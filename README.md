@@ -2,7 +2,7 @@
 
 <div align="center">
 
-*A stategy-oriented live option trading platform that supports your own quantitative option strategies*
+*A strategy-oriented live option trading platform that supports your own quantitative option strategies*
 
 ---
 
