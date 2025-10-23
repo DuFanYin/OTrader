@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=75.1.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "FACTT"
+version = "0.1.0"
+description = "Financial Analysis and Computational Trading Tools"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 140
+indent-width = 4
+target-version = "py312"
+include = ["engines/**/*.py", "utilities/**/*.py", "strategies/**/*.py", "backend/**/*.py", "frontend/**/*.py"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "C", "B", "UP", "A", "S"]
+ignore = ["E501"]
+
+
+[tool.ruff.format]
+skip-magic-trailing-comma = true 
+line-ending = "auto"
+
+[tool.ruff.lint.isort]
+split-on-trailing-comma = false
+combine-as-imports = true
+force-single-line = false
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = false
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+ignore_missing_imports = true
+disable_error_code = ["import-untyped"]
+files = [
+    "engines",
+    "utilities",
+    "strategies",
+    "backend",
+    "frontend",
+]
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = ["backend.*"]
+# Backend uses FastAPI and async patterns
+disallow_untyped_defs = false
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["frontend.*"]
+# Frontend has minimal Python files (mostly __init__.py)
+disallow_untyped_defs = false
+ignore_missing_imports = true
+

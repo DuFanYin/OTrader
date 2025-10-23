@@ -1,0 +1,126 @@
+# Environment variables
+.env
+
+# Cache directories (including subdirectories)
+**/__pycache__/
+**/.cache/
+**/.mypy_cache/
+**/.pytest_cache/
+**/.hypothesis/
+**/.tox/
+**/.nox/
+**/.coverage/
+**/.coverage.*
+**/.ipynb_checkpoints/
+**/.webassets-cache/
+**/.scrapy/
+**/.pyre/
+
+# Byte-compiled / optimized / DLL files
+*.py[cod]
+*$py.class
+
+# System files
+.DS_Store
+
+
+# Strategy and trading data files
+setting/order_data.csv
+setting/trade_data.csv
+setting/strategy_data.json
+setting/strategy_setting.json
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff
+instance/
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+#Pipfile.lock
+
+# PEP 582
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Virtual environments
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE settings
+.spyderproject
+.spyproject
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# Type checkers
+.dmypy.json
+dmypy.json

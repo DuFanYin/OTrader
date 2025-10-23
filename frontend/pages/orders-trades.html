@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Orders & Trades - OTrader</title>
+    <link rel="stylesheet" href="/static/dist/assets/index-Cplv8gwS.css">
+</head>
+<body class="bg-dark-bg text-dark-text min-h-screen flex flex-col">
+    <!-- Header will be injected here -->
+    <div id="header-container"></div>
+
+    <!-- Main Content -->
+    <main class="flex-1 p-6 flex flex-col min-h-0">
+        <!-- Orders & Trades Content -->
+        <div id="orders-trades-content" class="bg-dark-surface rounded-lg border border-dark-border p-6 flex-1 flex flex-col min-h-0">
+            <div class="flex justify-end items-center mb-4">
+                <button id="refresh-orders-trades-btn" class="px-4 py-2 bg-accent text-white rounded-md hover:bg-accent-hover">
+                    Refresh
+                </button>
+            </div>
+            
+            <!-- Orders & Trades Table -->
+            <div id="orders-trades-table-container" class="flex-1 overflow-auto">
+                <!-- Orders and trades table will be loaded here -->
+            </div>
+        </div>
+    </main>
+
+    <!-- Load JavaScript modules -->
+    <script src="/static/js/core/config.js"></script>
+    <script src="/static/js/core/error_handler.js"></script>
+    <script src="/static/js/core/apiClient.js"></script>
+    <script src="/static/js/utils/ui_utils.js"></script>
+    <script src="/static/js/components/dialog.js"></script>
+    <script src="/static/js/components/navigation.js"></script>
+    <script src="/static/js/pages/ordersTrades.js"></script>
+
+    <script>
+        // Initialize Orders & Trades page
+        document.addEventListener('DOMContentLoaded', () => {
+            // Initialize navigation
+            const nav = new Navigation();
+            const headerContainer = document.getElementById('header-container');
+            headerContainer.appendChild(nav.createHeader());
+            nav.startPeriodicUpdates();
+            
+            // Initialize orders & trades page
+            const ordersTradesPage = new OrdersTradesPage();
+            ordersTradesPage.init();
+        });
+    </script>
+</body>
+</html>
