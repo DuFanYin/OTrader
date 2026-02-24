@@ -4,6 +4,8 @@
 
 *A stategy-oriented live option trading platform that supports your own quantitative option strategies*
 
+> **[C++ version](Otrader_cpp/):** Work in progress
+
 ---
 
 <pre>

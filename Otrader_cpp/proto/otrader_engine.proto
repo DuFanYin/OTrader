@@ -1,0 +1,155 @@
+syntax = "proto3";
+
+package otrader;
+
+// 空消息，用于简单 RPC。
+message Empty {}
+
+// 引擎当前状态（仅用于 live）。
+message EngineStatus {
+  // 当前仅用于 live，引擎模式可以在实现中写死为 "live" 或通过 detail 描述。
+  bool running   = 1;
+  bool connected = 2;  // 是否与 IB/TWS 建立连接
+  string detail  = 3;  // 文本描述，例如 "live main engine"
+}
+
+// 策略概要信息（可选：后续可以逐步补充）。
+message StrategySummary {
+  string strategy_name = 1;
+  string class_name    = 2;
+  string portfolio     = 3;
+  string status        = 4;  // "running" / "stopped" / ...
+}
+
+// 日志文本行（后续可扩展结构化字段）。
+message LogLine {
+  string line = 1;
+}
+
+// 策略更新事件（payload 先用 JSON 字符串占位）。
+message StrategyUpdate {
+  string strategy_name = 1;
+  string class_name    = 2;
+  string portfolio     = 3;
+  string json_payload  = 4;
+}
+
+// 通用策略名请求。
+message StrategyNameRequest {
+  string strategy_name = 1;
+}
+
+// 添加策略请求。
+message AddStrategyRequest {
+  string strategy_class = 1;
+  string portfolio_name = 2;
+  string setting_json = 3;  // JSON string for strategy params
+}
+
+// 订单记录（与 DB orders 表对应）。
+message OrderRecord {
+  string timestamp = 1;
+  string strategy_name = 2;
+  string orderid = 3;
+  string symbol = 4;
+  string exchange = 5;
+  string trading_class = 6;
+  string type = 7;
+  string direction = 8;
+  double price = 9;
+  double volume = 10;
+  double traded = 11;
+  string status = 12;
+  string datetime = 13;
+  string reference = 14;
+  bool is_combo = 15;
+  string legs_info = 16;
+}
+
+// 成交记录（与 DB trades 表对应）。
+message TradeRecord {
+  string timestamp = 1;
+  string strategy_name = 2;
+  string tradeid = 3;
+  string symbol = 4;
+  string exchange = 5;
+  string orderid = 6;
+  string direction = 7;
+  double price = 8;
+  double volume = 9;
+  string datetime = 10;
+}
+
+message OrdersAndTradesResponse {
+  repeated OrderRecord orders = 1;
+  repeated TradeRecord trades = 2;
+}
+
+message ListPortfoliosResponse {
+  repeated string portfolios = 1;
+}
+
+message ListStrategyClassesResponse {
+  repeated string classes = 1;
+}
+
+message AddStrategyResponse {
+  string strategy_name = 1;
+}
+
+message RemoveStrategyResponse {
+  bool removed = 1;
+}
+
+message DeleteStrategyResponse {
+  bool deleted = 1;
+}
+
+message GetRemovedStrategiesResponse {
+  repeated string removed_strategies = 1;
+}
+
+message StrategyHoldingsResponse {
+  map<string, string> holdings = 1;  // strategy_name -> JSON string
+}
+
+// 面向 live 的引擎控制 / 查询服务。
+service EngineService {
+  // 通用状态
+  rpc GetStatus(Empty) returns (EngineStatus);
+  rpc ListStrategies(Empty) returns (stream StrategySummary);
+
+  // Live 专用控制
+  rpc ConnectGateway(Empty) returns (Empty);
+  rpc DisconnectGateway(Empty) returns (Empty);
+  rpc StartMarketData(Empty) returns (Empty);
+  rpc StopMarketData(Empty) returns (Empty);
+
+  // 策略控制（live）
+  rpc StartStrategy(StrategyNameRequest) returns (Empty);
+  rpc StopStrategy(StrategyNameRequest) returns (Empty);
+
+  // 事件流（logs / 策略更新）
+  rpc StreamLogs(Empty) returns (stream LogLine);
+  rpc StreamStrategyUpdates(Empty) returns (stream StrategyUpdate);
+
+  // 主服务：订单/成交、组合列表
+  rpc GetOrdersAndTrades(Empty) returns (OrdersAndTradesResponse);
+  rpc ListPortfolios(Empty) returns (ListPortfoliosResponse);
+
+  // 策略服务：类列表、组合元数据、已移除策略
+  rpc ListStrategyClasses(Empty) returns (ListStrategyClassesResponse);
+  rpc GetPortfoliosMeta(Empty) returns (ListPortfoliosResponse);
+  rpc GetRemovedStrategies(Empty) returns (GetRemovedStrategiesResponse);
+
+  // 策略生命周期
+  rpc AddStrategy(AddStrategyRequest) returns (AddStrategyResponse);
+  rpc RestoreStrategy(StrategyNameRequest) returns (Empty);
+  rpc InitStrategy(StrategyNameRequest) returns (Empty);
+  rpc RemoveStrategy(StrategyNameRequest) returns (RemoveStrategyResponse);
+  rpc DeleteStrategy(StrategyNameRequest) returns (DeleteStrategyResponse);  // C++: same as RemoveStrategy
+
+  // 策略持仓
+  rpc GetStrategyHoldings(Empty) returns (StrategyHoldingsResponse);
+}
+

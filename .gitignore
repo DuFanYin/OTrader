@@ -22,13 +22,15 @@
 
 # System files
 .DS_Store
-
+**/.DS_Store
 
 # Strategy and trading data files
 setting/order_data.csv
 setting/trade_data.csv
 setting/strategy_data.json
 setting/strategy_setting.json
+setting/strategy_data.yaml
+setting/strategy_setting.yaml
 
 # Distribution / packaging
 .Python
