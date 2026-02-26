@@ -2,7 +2,8 @@
 
 /**
  * Log engine (shared): consumes LogIntent via process_log_intent (no event subscription).
- * Sink stays here (set_sink / default_sink). EventEngine routes log intent into LogEngine (no context interface).
+ * Sink stays here (set_sink / default_sink). EventEngine routes log intent into LogEngine (no
+ * context interface).
  */
 
 #include "../utilities/base_engine.hpp"
@@ -26,7 +27,7 @@ inline constexpr int DISABLED = 99;
 using LogSink = std::function<void(const utilities::LogData&)>;
 
 class LogEngine : public utilities::BaseEngine {
-public:
+  public:
     explicit LogEngine(utilities::MainEngine* main_engine);
 
     void set_sink(LogSink sink) { sink_ = std::move(sink); }
@@ -38,10 +39,10 @@ public:
     /** Consume LogIntent (EventEngine routes here). */
     void process_log_intent(const utilities::LogData& data);
 
-private:
+  private:
     bool active_ = true;
-    int level_ = INFO;  // only output when data.level >= level_
+    int level_ = INFO; // only output when data.level >= level_
     LogSink sink_;
 };
 
-}  // namespace engines
+} // namespace engines

@@ -1,946 +1,888 @@
-## Otrader 系统架构文档
+# Otrader 架构设计文档
 
-### Part 0. 文件树
+> 本文档从架构设计角度描述 Otrader（C++ 期权交易引擎）的层次划分、职责边界与数据流。
+
+---
+
+## Part 0. 文档说明与文件树
+
+### 0.1 文档目标与范围
+
+- **目标**：为开发与维护者提供清晰的架构视图，明确各模块职责、边界与协作方式。
+- **范围**：仅描述 Otrader 文件夹内的 C++ 子系统，不与其他语言或后端做对比。
+- **原则**：以「Event 入、Intent 出」为主线，区分 Domain Core、Runtime、Infrastructure 三层。
+
+### 0.2 文件树
 
 ```
 Otrader/
-├── ARCHITECTURE.md
+├── ARCHITECTURE_NEW.md      # 本文档
 ├── CMakeLists.txt
-├── entry_backtest.cpp
-├── entry_live.cpp
-├── entry_live_grpc.cpp
-├── runtime/
+├── entry_backtest.cpp       # 回测可执行入口
+├── entry_live.cpp           # 实盘可执行入口（无 gRPC）
+├── entry_live_grpc.cpp      # 实盘 + gRPC 服务入口
+│
+├── runtime/                 # 运行时：回测与实盘差异集中在此
 │   ├── backtest/
 │   │   ├── CMakeLists.txt
-│   │   ├── engine_backtest.cpp
-│   │   ├── engine_backtest.hpp
-│   │   ├── engine_event.cpp
-│   │   ├── engine_event.hpp
-│   │   ├── engine_main.cpp
-│   │   └── engine_main.hpp
+│   │   ├── engine_backtest.{cpp,hpp}   # 回测顶层控制器
+│   │   ├── engine_event.{cpp,hpp}      # 回测事件引擎（同步分发）
+│   │   ├── engine_main.{cpp,hpp}       # 回测 MainEngine
+│   │   └── engine_data_historical.hpp  # 见 infra，backtest 通过 main 引用
 │   └── live/
 │       ├── CMakeLists.txt
-│       ├── engine_event.cpp
-│       ├── engine_event.hpp
-│       ├── engine_grpc.cpp
-│       ├── engine_grpc.hpp
-│       ├── engine_main.cpp
-│       └── engine_main.hpp
-├── infra/
+│       ├── engine_event.{cpp,hpp}      # 实盘事件引擎（队列 + 工作线程）
+│       ├── engine_main.{cpp,hpp}       # 实盘 MainEngine
+│       ├── engine_grpc.{cpp,hpp}       # gRPC 服务实现（持有 MainEngine*）
+│       ├── engine_data_tradier.{cpp,hpp}   # 见 infra
+│       ├── engine_db_pg.{cpp,hpp}          # 见 infra
+│       └── engine_gateway_ib.{cpp,hpp}     # 见 infra
+│
+├── infra/                   # 基础设施：数据、持久化、网关
+│   ├── marketdata/
+│   │   ├── engine_data_historical.{cpp,hpp}  # 回测数据引擎（parquet → 快照）
+│   │   └── engine_data_tradier.{cpp,hpp}     # 实盘行情/组合引擎（Contract + Snapshot）
 │   ├── db/
-│   │   ├── engine_db_pg.cpp
-│   │   └── engine_db_pg.hpp
-│   ├── gateway/
-│   │   ├── engine_gateway_ib.cpp
-│   │   └── engine_gateway_ib.hpp
-│   └── marketdata/
-│       ├── engine_data_historical.cpp
-│       ├── engine_data_historical.hpp
-│       ├── engine_data_tradier.cpp
-│       └── engine_data_tradier.hpp
+│   │   └── engine_db_pg.{cpp,hpp}            # PostgreSQL 合约/订单/成交
+│   └── gateway/
+│       └── engine_gateway_ib.{cpp,hpp}       # IB TWS 网关
+│
 ├── proto/
-│   ├── otrader_engine.proto
-│   └── (生成: otrader_engine.pb.{cc,h}, otrader_engine.grpc.pb.{cc,h})
-├── core/
+│   ├── otrader_engine.proto                   # gRPC 服务与消息定义
+│   └── (生成) otrader_engine.pb.{cc,h}, otrader_engine.grpc.pb.{cc,h}
+│
+├── core/                    # 领域核心：策略引擎与辅助引擎（无 Context，caller 传参或 RuntimeAPI）
 │   ├── CMakeLists.txt
-│   ├── engine_combo_builder.cpp
-│   ├── engine_combo_builder.hpp
-│   ├── engine_hedge.cpp
-│   ├── engine_hedge.hpp
-│   ├── engine_log.cpp
-│   ├── engine_log.hpp
-│   ├── engine_option_strategy.cpp
-│   ├── engine_option_strategy.hpp
-│   ├── engine_position.cpp
-│   ├── engine_position.hpp
+│   ├── engine_option_strategy.{cpp,hpp}  # 统一策略引擎 + RuntimeAPI
+│   ├── engine_position.{cpp,hpp}        # 策略持仓管理
+│   ├── engine_hedge.{cpp,hpp}           # 对冲引擎（产出 orders/cancels/logs）
+│   ├── engine_combo_builder.{cpp,hpp}    # 组合腿构造
+│   ├── engine_log.{cpp,hpp}             # 日志引擎（消费 LogIntent）
 │   └── log_sink.hpp
-├── strategy/
+│
+├── strategy/                # 策略实现与注册
 │   ├── CMakeLists.txt
-│   ├── high_frequency_momentum.cpp
-│   ├── high_frequency_momentum.hpp
-│   ├── strategy_registry.cpp
-│   ├── strategy_registry.hpp
-│   ├── template.cpp
-│   └── template.hpp
-├── utilities/
+│   ├── template.{cpp,hpp}                # 策略模板基类
+│   ├── high_frequency_momentum.{cpp,hpp} # 示例策略
+│   ├── strategy_registry.{cpp,hpp}       # 策略类名 → 工厂
+│   └── (其他策略...)
+│
+├── utilities/               # 通用数据模型与基础设施
 │   ├── CMakeLists.txt
-│   ├── README.md
-│   ├── base_engine.hpp
-│   ├── constant.hpp
-│   ├── event.hpp
+│   ├── constant.hpp         # 枚举、常量、to_string
+│   ├── types.hpp            # 时间戳等类型
+│   ├── object.{cpp,hpp}     # 订单、成交、合约、持仓、快照等结构体
+│   ├── portfolio.{cpp,hpp}  # PortfolioData / ChainData / OptionData / IEventEngine
+│   ├── event.hpp            # EventType / EventPayload / Event / StrategyUpdateData
+│   ├── base_engine.hpp      # MainEngine 抽象、BaseEngine 基类
+│   ├── utility.{cpp,hpp}
+│   ├── parquet_loader.{cpp,hpp}
+│   ├── occ_utils.{cpp,hpp}
 │   ├── ib_mapping.hpp
 │   ├── lets_be_rational_api.hpp
-│   ├── object.cpp
-│   ├── object.hpp
-│   ├── occ_utils.cpp
-│   ├── occ_utils.hpp
-│   ├── parquet_loader.cpp
-│   ├── parquet_loader.hpp
-│   ├── portfolio.cpp
-│   ├── portfolio.hpp
-│   ├── types.hpp
-│   ├── utility.cpp
-│   └── utility.hpp
-├── tests/
-│   ├── CMakeLists.txt
-│   ├── backtest/
-│   │   ├── CMakeLists.txt
-│   │   ├── test_backtest.cpp
-│   │   ├── test_backtest_data.cpp
-│   │   └── test_entry_multi.cpp
-│   └── live/
-│       ├── CMakeLists.txt
-│       └── test_live_components.cpp
-└── .vscode/
-    └── 现状描述.md
+│   └── README.md
+│
+└── tests/
+    ├── CMakeLists.txt
+    ├── backtest/
+    │   ├── test_backtest.cpp
+    │   ├── test_backtest_data.cpp
+    │   └── test_entry_multi.cpp
+    └── live/
+        └── test_live_components.cpp
 ```
 
-（说明：`proto/` 下 `.pb.cc`、`.pb.h`、`.grpc.pb.cc`、`.grpc.pb.h` 由 `otrader_engine.proto` 经 protobuf/gRPC 工具链生成，一般不纳入版本控制的生成物可依项目约定从树中省略。）
+说明：`runtime/live/` 通过 include 或链接使用 `infra/` 下的 marketdata、db、gateway；`runtime/backtest/` 使用 `infra/marketdata/engine_data_historical`（以及 utilities 的 parquet_loader 等）。proto 生成文件一般不纳入版本控制。
 
 ---
 
-### 1. 概览
+## Part 1. 系统概览
 
-#### 1.1 背景与目标
+### 1.1 目标与定位
 
-Otrader 是一个围绕期权组合交易场景构建的 C++20 交易引擎子系统，对应 Python 版 `utilities/`、`core/`、`backtest/`、`live/` 等模块的高性能实现。  
-它承担两类核心职责：
+Otrader 是围绕**期权组合交易**场景构建的 C++20 交易引擎，承担两类核心职责：
 
-- **离线回测引擎（Backtest）**：在单进程内完成数据回放、策略执行、订单撮合与绩效统计，对应可执行程序 `entry_backtest`。
-- **实时实盘引擎（Live）**：通过 IB TWS 网关接收真实行情、下单并记录成交，同时暴露 gRPC 服务给上层后端，对应可执行程序 `entry_live` 和 `entry_live_grpc`。
+1. **离线回测（Backtest）**  
+   在单进程内完成历史数据回放、策略执行、订单撮合与绩效统计，对应可执行程序 `entry_backtest`。
 
-整个 C++ 子系统围绕「**统一的期权组合定价与策略运行时（`core::OptionStrategyEngine`）**」展开构建，Backtest 与 Live 共用这套核心，分别在数据来源、订单执行与持久化层面做适配。
+2. **实时实盘（Live）**  
+   通过 IB TWS 网关接收真实行情、下单并记录成交，可选暴露 gRPC 服务给上层后端，对应 `entry_live` 与 `entry_live_grpc`。
 
-#### 1.2 核心设计理念
+回测与实盘**共用同一套领域核心**（Core + Strategy）：统一策略引擎、持仓、对冲、组合构造与日志。差异仅体现在**运行时**：数据来源、时钟驱动、订单执行与持久化由各自的 Runtime 与 Infrastructure 实现。
 
-- **Python/C++ 双栈对齐**：`utilities_cpp` 与 Python `utilities` 一一对应，结构和命名尽量保持一致，便于跨语言迁移和验证。
-- **统一策略引擎**：不区分 live/backtest 的策略接口，通过 `RuntimeAPI` 注入「发送订单、获取组合、获取合约、获取持仓」等能力，从而让策略逻辑与运行环境解耦。
-- **事件驱动与组合视图**：用 `Event` 与 `PortfolioData` 描述整个市场与组合状态，所有行情/Greeks 更新都通过「快照帧（`PortfolioSnapshot`）」来驱动。
-- **强类型数据模型**：使用大量结构体（`ContractData`、`OptionData`、`PortfolioData` 等）描述期权组合、持仓与订单，避免在关键路径上传递松散的字典型结构。
-- **可扩展的策略注册机制**：通过 `StrategyRegistry` 与 `REGISTER_STRATEGY` 宏，对策略类进行集中注册，支持在 Backtest 和 Live 中统一创建。
+### 1.2 核心设计理念
 
-#### 1.3 模块概览
+- **Event 入、Intent 出**  
+  输入为事件流（Timer、Snapshot、Order、Trade、Contract）；输出为意图（下单、撤单、日志）。领域核心只消费 Event、只产出 Intent；执行由 Runtime 完成。
 
-Otrader 目录结构（仅核心模块）：
+- **统一策略引擎**  
+  `core::OptionStrategyEngine` 不区分 live/backtest，通过 **RuntimeAPI** 注入「发单、获取组合、合约、持仓、写日志」等能力，使策略逻辑与运行环境解耦。
 
-- `utilities/`：通用数据结构与基础设施（枚举常量、订单/合约/持仓结构体、组合视图、事件、基础引擎接口等）。
-- `core/`：统一策略引擎与辅助引擎（`OptionStrategyEngine`、`HedgeEngine`、`ComboBuilderEngine`、日志 sink 等）。
-- `strategy/`：具体策略实现与策略模板（如 `HighFrequencyMomentumStrategy`），通过注册表对接 `OptionStrategyEngine`。
-- `runtime/backtest/`：回测引擎、数据加载与执行逻辑，包括 `BacktestEngine`、回测版 `MainEngine`、回测版 `EventEngine`；历史数据由 `infra/marketdata/engine_data_historical` 中的 `BacktestDataEngine` 提供。
-- `runtime/live/`：实盘引擎运行时，包含 `MainEngine`、`EventEngine` 及 gRPC 包装层（`engine_grpc`）；实盘所用的行情引擎、数据库、网关分别位于 `infra/marketdata/`（`engine_data_tradier`）、`infra/db/`（`engine_db_pg`）、`infra/gateway/`（`engine_gateway_ib`）。
-- `proto/`：面向后端的 gRPC 接口定义（`EngineService`），用于远程控制 live 引擎与拉取状态。
-- `entry_backtest.cpp` / `entry_live.cpp` / `entry_live_grpc.cpp`：不同运行模式的入口。
+- **事件驱动与固定分发顺序**  
+  事件进入引擎后，在**同一处**按**写死顺序**调用各组件（Snapshot → 更新组合；Timer → 策略 on_timer、持仓指标、对冲、执行意图；Order/Trade → 更新状态）。无动态 handler 注册。
 
-后续章节将围绕这些模块，从「静态结构视图」「运行时视图」「数据与事件流」「扩展点设计」四个维度展开描述。
+- **强类型数据模型**  
+  使用结构体（ContractData、OrderData、TradeData、PortfolioSnapshot、StrategyHolding 等）描述合约、订单、持仓与组合，避免在关键路径传递松散键值结构。
 
----
+- **可扩展的策略注册**  
+  通过 `StrategyRegistry` 与 `REGISTER_STRATEGY` 宏集中注册策略类，Backtest 与 Live 均可按类名创建策略实例。
 
-### 2. 静态结构视图
+### 1.3 系统边界与对外接口
 
-#### 2.1 Utilities 层：通用数据模型与基础设施
+- **回测**：通过命令行启动（entry_backtest），标准输入/输出无约定；结果以 JSON 形式输出到 stdout，错误与进度可输出到 stderr。不依赖网络或数据库；所有输入来自命令行参数与 parquet 文件。
+- **实盘（无 gRPC）**：通过 entry_live 启动；依赖 .env 中的 DATABASE_URL 等；与 IB TWS 通过 IbGateway 通信；无对外 RPC，仅进程内事件循环。
+- **实盘（gRPC）**：通过 entry_live_grpc 启动；在 0.0.0.0:50051 暴露 EngineService；后端或其它客户端通过 gRPC 调用 GetStatus、ListStrategies、ConnectGateway、AddStrategy、StreamStrategyUpdates 等。合约与订单/成交持久化到 PostgreSQL，由 DatabaseEngine 与 load_contracts/save_order_data/save_trade_data 完成。
 
-Utilities 层是整个系统的「语言层基石」，大部分模块只依赖 utilities 与 C++ 标准库。其职责包括：
+### 1.4 架构分层总览
 
-- 定义所有基础枚举、常量与字符串转换函数（`constant.hpp`）。
-- 封装订单、成交、合约、持仓等基础对象（`object.hpp`）。
-- 定义期权组合视图与快照应用逻辑（`portfolio.hpp`）。
-- 抽象事件系统最小接口与事件载体（`event.hpp`）。
-- 提供运行时引擎抽象基类（`base_engine.hpp`）。
+| 层次 | 职责 | 主要组件 |
+|------|------|----------|
+| **Domain Core** | 纯逻辑：接收 Event、更新状态、输出 Intent；不直接下单、不读库、不访问网关 | OptionStrategyEngine、PositionEngine、HedgeEngine、ComboBuilderEngine、LogEngine（消费 Intent）、Strategy 实现 |
+| **Runtime** | 接入数据与时钟，执行 Core 产出的 Intent，将执行结果转为 Event 回灌 | BacktestEngine、EventEngine（backtest/live）、MainEngine（backtest/live）、gRPC Service（live） |
+| **Infrastructure** | 数据源、持久化、网关 | BacktestDataEngine、MarketDataEngine、DatabaseEngine、IbGateway |
+| **Utilities** | 通用数据模型、事件与引擎抽象 | event.hpp、portfolio.hpp、object.hpp、base_engine.hpp、constant.hpp 等 |
 
-##### 2.1.1 常量与枚举（`utilities/constant.hpp`）
+下文按「职责边界 → 静态结构 → 事件与意图 → 运行时 → 数据流 → 扩展点」展开。
 
-**关键职责**：
+### 1.5 设计约束与原则（架构层面）
 
-- 提供交易方向、订单状态、产品类型、期权类型、组合类型、交易所等枚举。
-- 提供枚举到字符串的转换函数（`to_string` 系列）。
-- 统一「订单是否仍在进行中」的判断逻辑（`is_active_status`）。
+- **Core 不依赖 Runtime**：core/ 与 strategy/ 不包含对 backtest 或 live 的 #include；仅依赖 utilities 与 RuntimeAPI 的抽象（函数类型、PortfolioData*、ContractData* 等）。这样回测与实盘可独立替换 Runtime 与 Infra 实现。
+- **单线程与多线程**：回测 EventEngine 同步执行，无队列无工作线程；实盘 EventEngine 单工作线程消费队列、单定时器线程投递 Timer。策略与 Core 引擎在 dispatch 调用栈内执行，无需自身考虑线程安全；MainEngine 持有的状态（如 strategy_updates_、log_stream_buffer_）若被 gRPC 线程访问，需加锁（当前实现中由 MainEngine 内 mutex/cv 保护）。
+- **写死顺序**：事件处理顺序不在配置或注册表中，而在 EventEngine 的 process/put_event 分支与 dispatch_* 实现中写死。优点是可预测、易调试；扩展新事件类型时需改 EventEngine 与分支逻辑。
+- **日志单一 sink**：LogEngine 仅一个 level 与一个 sink；所有日志意图经 put_log_intent 汇聚到 LogEngine，由 level 统一过滤。不区分「策略日志」与「系统日志」的通道，仅通过 level 与 msg 区分。
 
-**主要枚举**：
+### 1.6 核心概念速查
 
-- **`Direction`**：`LONG` / `SHORT` / `NET`，分别表示多头、空头及净头寸。
-- **`Status`**：`SUBMITTING` / `NOTTRADED` / `PARTTRADED` / `ALLTRADED` / `CANCELLED` / `REJECTED`，贯穿订单生命周期。
-- **`Product`**：涵盖股指、期货、期权、指数、ETF、债券、基金等。
-- **`OrderType`**：目前为 `LIMIT` 与 `MARKET`。
-- **`OptionType`**：`CALL` 与 `PUT`。
-- **`ComboType`**：包含 `SPREAD`、`STRADDLE`、`STRANGLE`、`IRON_CONDOR` 等多种组合类型，反映系统对复杂期权结构的抽象能力。
-- **`Exchange`**：`SMART`、`NYSE`、`NASDAQ`、`CBOE` 等，IB 相关交易所枚举。
-
-这些枚举在 `object.hpp`、`portfolio.hpp`、策略引擎与网关层广泛使用，保证跨模块语义一致。
-
-##### 2.1.2 基础对象模型（`utilities/object.hpp`）
-
-该文件定义了 Otrader 的核心数据结构，主要包括：
-
-- **日志与基础数据**：`BaseData`、`LogData`。
-- **行情数据**：`TickData`、`OptionMarketData`、`ChainMarketData`、`PortfolioSnapshot`。
-- **合约数据**：`ContractData`。
-- **订单 & 成交**：`Leg`、`OrderRequest`、`OrderData`、`CancelRequest`、`TradeData`。
-- **持仓与组合汇总**：`BasePosition` 及其派生 `OptionPositionData`、`UnderlyingPositionData`、`ComboPositionData`，以及 `PortfolioSummary`、`StrategyHolding`。
-
-**合约模型（`ContractData`）要点**：
-
-- 用于描述标的、期权合约与其元数据（合约代码、交易所、乘数、tick 步长）。
-- 对期权扩展字段包括：行权价、对应标的、期权类型、上市/到期日、所属组合（`option_portfolio`）、链 index 等。
-- 同时包含 `con_id`、`trading_class` 等 IB 特有字段，支撑与 TWS 的映射。
-
-**订单与成交模型要点**：
-
-- `OrderRequest` 表示从策略或者上层系统发出的下单意图。
-- `OrderData` 表示在 OMS 视角下的订单状态，包含 `status`、`traded`、组合腿、引用（`reference`）等。
-- `TradeData` 表示实际成交记录，与订单通过 `orderid` 关联。
-- `Leg` 用于表示组合腿，包括 `con_id`、方向、比例、价格等，可选 `symbol` 与 `trading_class`。
-
-**持仓与组合汇总要点**：
-
-- `BasePosition` 记录头寸数量、成本、当前价格、Greeks 等。
-- `OptionPositionData`、`UnderlyingPositionData` 和 `ComboPositionData` 细化不同资产类别的特性（如 multiplier）。
-- `StrategyHolding` 聚合一个策略的标的持仓、期权持仓、组合持仓以及整体 `PortfolioSummary`。
-
-这些对象构成了策略引擎与回测/实盘运行时之间的「共享语言」。
-
-##### 2.1.3 组合与期权链视图（`utilities/portfolio.hpp`）
-
-该模块提供了围绕「组合-标的-期权链-期权合约」的多层结构视图：
-
-- **`OptionData`**：封装单个期权合约在组合中的视角。
-- **`UnderlyingData`**：描述组合标的的价格与 Tick。
-- **`ChainData`**：期权链视图，维护某一到期日或某一组期权的整体信息。
-- **`PortfolioData`**：顶层组合视图，聚合所有期权、链和标的。
-
-**关键点**：
-
-- `OptionData` 关联 `PortfolioData`、`ChainData` 与 `UnderlyingData`，并附带 delta/gamma/theta/vega/iv 等希腊值。
-- `ChainData` 按 index（行权价或某种编码）管理 call/put 集合，并计算 ATM 价格、days_to_expiry/time_to_expiry 以及 skew 等统计量。
-- `PortfolioData` 负责：
-  - 接受 `ChainMarketData` 与 `TickData` 更新组合。
-  - 维护一个固定的 `option_apply_order_`，用于 `PortfolioSnapshot` 的紧凑帧应用。
-  - 提供 `apply_frame` 方法，将外部行情快照快速写入组合结构。
-
-这种设计使得:
-
-- live 模式下，真实行情（含 Greeks）可以预处理为 `PortfolioSnapshot` 并通过事件应用。
-- backtest 模式下，可以从 parquet 中解析出帧数据后，同样通过 `PortfolioSnapshot` 更新组合状态。
-
-##### 2.1.4 事件系统基础（`utilities/event.hpp` 与 `utilities/portfolio.hpp` 中的 `IEventEngine`）
-
-事件系统由两部分构成：
-
-- **事件定义（`event.hpp`）**：
-  - `EventType`：`Timer` / `Order` / `Trade` / `Contract` / `Snapshot`。
-  - `EventPayload`：`std::variant` 包含 `OrderData`、`TradeData`、`ContractData`、`PortfolioSnapshot` 等。
-  - `Event`：承载事件类型与 payload。
-  - `StrategyUpdateData`：策略更新的结构化载体，用于 live gRPC 侧向外输出策略状态变化。
-
-- **事件引擎抽象（`IEventEngine`）**：
-  - 提供 `start/stop`、`register_handler`、`put_intent_send_order`、`put_intent_cancel_order`、`put_intent_log`、`put_event` 等接口。
-  - 默认实现多为 no-op，具体逻辑在 backtest 与 live 的 EventEngine 中实现。
-
-通过 `IEventEngine`，回测与实盘可以在「订单/成交/快照」的处理方式上有所区别，但对上层组合与策略保持统一接口。
-
-##### 2.1.5 通用引擎基类（`utilities/base_engine.hpp`）
-
-该文件提供了一个非常薄的引擎抽象：
-
-- **`utilities::MainEngine`** 抽象：
-  - 提供 `write_log` 与 `put_event` 两个方法，默认 no-op。
-  - backtest 与 live 版本的 `MainEngine` 都会实现该接口。
-
-- **`utilities::BaseEngine`**：
-  - 作为所有功能引擎（如 `MarketDataEngine`、`DatabaseEngine`）的基类，持有一个 `MainEngine*` 与自身名称。
-  - 提供统一的构造与 `close` 钩子，便于资源释放与调试。
-
-Utilities 层的这些抽象为上层核心与运行时提供了统一的语义基石。
+- **Event**：进入引擎的输入，类型为 Timer/Snapshot/Order/Trade/Contract；Payload 为对应数据结构（PortfolioSnapshot、OrderData、TradeData、ContractData 等）。
+- **Intent**：策略或 Hedge 产出的「意图」，包括 OrderRequest（下单）、CancelRequest（撤单）、LogData（日志）；由 Runtime 通过 append_order、append_cancel、put_log_intent 执行。
+- **RuntimeAPI**：MainEngine 注入给 OptionStrategyEngine 的能力集合；策略与 OptionStrategyEngine 仅通过该 API 访问环境，不直接依赖 MainEngine 或 EventEngine。
+- **dispatch**：EventEngine 根据事件类型调用固定顺序的处理逻辑（dispatch_snapshot、dispatch_timer、dispatch_order、dispatch_trade、dispatch_contract）；无动态注册的 handler。
+- **apply_frame**：PortfolioData 的方法；将 PortfolioSnapshot 按 option_apply_order_ 顺序写回组合内各期权与标的的价格与 Greeks。
+- **option_apply_order_**：PortfolioData 内固定好的期权指针顺序，与 PortfolioSnapshot 的向量一一对应；在 finalize_chains 或回测 build_option_apply_index 时确定，后续不变。
+- **order_executor**：回测 MainEngine 持有的可调用对象，由 BacktestEngine::execute_order 充当；append_order 时调用，完成撮合并 put_event(Order/Trade) 回灌。
 
 ---
 
-#### 2.2 Core 层：统一策略引擎与核心辅助引擎
+## Part 2. 职责边界
 
-Core 层以 `OptionStrategyEngine` 为中心，将策略实例、订单状态与 runtime API 粘合在一起，形成一个对 backtest/live 透明的统一策略运行环境。
+### 2.1 Domain 层（Core + Strategy）
 
-##### 2.2.1 RuntimeAPI：策略引擎与运行时解耦
+#### 2.1.1 总体原则
 
-`core/engine_option_strategy.hpp` 定义了 `RuntimeAPI` 结构体，它由 runtime（`MainEngine`）构造并注入 `OptionStrategyEngine`：
+- **无 Context**：Core 内各引擎不持有 IEventEngine 或 MainEngine；所需能力由 **caller 传参**或通过 **RuntimeAPI** 注入。
+- **只读环境 + 产出 Intent**：策略与 Hedge 通过 API 读取组合、合约、持仓；通过 API 提交订单请求、撤单请求、日志。不直接调用网关或数据库。
 
-- **订单相关**：
-  - `send_order(strategy_name, OrderRequest)`：发送普通订单。
-  - `send_combo_order(strategy_name, ComboType, combo_sig, Direction, price, volume, legs, OrderType)`：发送组合订单。
+#### 2.1.2 OptionStrategyEngine（core）
 
-- **环境读取**：
-  - `get_portfolio(portfolio_name)`：获取组合视图。
-  - `get_contract(symbol)`：获取合约元数据。
-  - `get_holding(strategy_name)` / `get_or_create_holding(strategy_name)`：访问或创建策略持仓。
+- **职责**：策略实例管理、订单/成交状态（OMS 视角）、将 RuntimeAPI 暴露给策略并驱动生命周期（on_init/on_start/on_stop/on_timer）。
+- **依赖**：仅依赖 `RuntimeAPI`（由 MainEngine 构造时注入）。不持 MainEngine、不持 IEventEngine。
+- **对外**：`process_order` / `process_trade` 由 EventEngine 在 dispatch_order / dispatch_trade 中调用；`on_timer()` 由 EventEngine 在 dispatch_timer 中调用。策略侧通过 `send_order` / `send_combo_order` / `write_log` 等走 RuntimeAPI。
 
-- **辅助功能**：
-  - `write_log(LogData)`：写入日志。
-  - `get_combo_builder_engine()` / `get_hedge_engine()`：访问核心辅助引擎实例。
-  - `put_strategy_event(StrategyUpdateData)`：向外部（如 gRPC 流）报告策略更新事件。
+#### 2.1.3 PositionEngine（core）
 
-通过 RuntimeAPI，策略引擎不直接依赖回测或实盘环境，所有环境差异都在 `MainEngine` 层实现。
+- **职责**：维护策略持仓（StrategyHolding）；处理订单与成交以更新持仓；按组合更新汇总指标（update_metrics）。日志以 LogData 追加到调用方提供的 vector，由调用方统一 put_log_intent。
+- **依赖**：caller 传入 get_portfolio、portfolio 等；无执行类回调。
+- **对外**：由 EventEngine 在 dispatch_timer 中调用 update_metrics（回测）或 process_timer_event（live）；在 dispatch_order / dispatch_trade 中调用 process_order / process_trade。
 
-##### 2.2.2 OptionStrategyEngine：策略运行与 OMS 状态
+#### 2.1.4 HedgeEngine（core）
 
-`OptionStrategyEngine` 负责：
+- **职责**：集中式 delta 等对冲逻辑；根据 HedgeParams（只读：portfolio、holding、get_contract、get_strategy_active_orders、get_order）产出 orders、cancels、logs，写入 caller 提供的 vector。
+- **依赖**：纯只读 HedgeParams；无执行回调。执行由 Runtime 对产出的 orders/cancels/logs 调用 send_order/cancel_order/put_log_intent。
+- **对外**：由 EventEngine 在 dispatch_timer 中组 HedgeParams、调用 process_hedging，再对结果逐条执行。
 
-- 管理策略实例（`strategy_cpp::OptionStrategyTemplate` 的派生类）。
-- 跟踪订单与成交状态（维护 `orders_`、`trades_`、`strategy_active_orders_` 等）。
-- 将 runtime API 暴露给策略，并通过策略生命周期钩子（`on_init`/`on_start`/`on_stop`/`on_timer` 等）调度策略逻辑。
+**HedgeParams 与 HedgeConfig**：HedgeParams 由 EventEngine 在 dispatch_timer 中组装：portfolio 来自 get_portfolio(portfolio_name)、holding 来自 get_holding(strategy_name)、get_contract/get_strategy_active_orders/get_order 来自 MainEngine 与 OptionStrategyEngine 的 lambda。HedgeConfig 按策略名注册（timer_trigger、delta_target、delta_range）；process_hedging 内部根据 config 与 params 计算对冲单并追加到 out_orders、out_cancels、out_logs。策略可通过 RuntimeAPI.get_hedge_engine() 与 register_hedging 注册自身参与对冲。
 
-**核心职责**：
+#### 2.1.5 ComboBuilderEngine（core）
 
-- **策略管理**：
-  - `add_strategy(class_name, portfolio_name, setting)`：创建并注册策略实例。
-  - `init_strategy` / `start_strategy` / `stop_strategy` / `remove_strategy`。
-  - 提供基于策略名的持仓访问与组合访问。
+- **职责**：按 ComboType 与期权数据生成标准化 Leg 与组合签名。纯函数风格；get_contract 由 caller 传入；日志追加到 out_logs。
+- **依赖**：caller 传 get_contract、option_data 等。
+- **对外**：策略通过 RuntimeAPI.get_combo_builder_engine() 取得后调用；out_logs 由调用方 write_log/append_log 打出。
 
-- **订单与成交流转**：
-  - `process_order` / `process_trade`：更新内部 OMS 状态 + 更新策略持仓。
-  - `get_order` / `get_trade` / `get_all_orders` / `get_all_trades` / `get_all_active_orders`。
-  - `get_strategy_name_for_order(orderid)`：用于在 live 中将订单/成交与策略绑定（比如写入 DB 时打上策略名）。
+#### 2.1.6 LogEngine（core）
 
-- **订单下发接口**：
-  - 提供多种 overload 的 `send_order` 与 `send_combo_order`，包括传入 `symbol`/`price`/`volume` 简化接口。
+- **职责**：消费 LogIntent（process_log_intent）；按 level 过滤后输出到 sink。单一 sink，由 LogEngine 的 level 统一控制。
+- **依赖**：仅持 MainEngine*（用于写日志时的 gateway 等）；不持 IEventEngine。
+- **对外**：MainEngine 的 put_log_intent/append_log 将 LogData 交给 LogEngine；MainEngine 暴露 set_log_level/log_level。
 
-通过 OptionStrategyEngine，策略层可以在不关心底层撮合与连接的情况下，专注于「组合状态 → 交易信号 → 订单请求」的闭环。
+#### 2.1.7 Strategy 层（strategy/）
 
-##### 2.2.3 辅助引擎：头寸管理、组合构造与对冲
+- **职责**：实现具体策略逻辑（派生 OptionStrategyTemplate）；在 on_init_logic、on_timer_logic 等中读组合/持仓、产生产单/撤单/日志意图。
+- **依赖**：仅通过 OptionStrategyEngine（即 RuntimeAPI）访问环境；不直接接触 EventEngine 或 MainEngine。
+- **注册**：StrategyRegistry 维护类名 → 工厂；Backtest/Live 通过类名创建实例并交给 OptionStrategyEngine 管理。
 
-Core 层还包含：
+#### 2.1.8 OptionStrategyEngine 内部状态（OMS 视角）
 
-- `engine_position`：管理 `StrategyHolding`，为策略与 runtime 提供持仓读写接口。
-- `engine_combo_builder`：根据 `ComboType` 和 Legs 生成标准化组合结构。
-- `engine_hedge`：为策略或 runtime 提供对冲策略（如 delta 对冲、gamma 对冲）的执行器。
-- `engine_log` 与 `log_sink`：统一日志收集与输出（可接入不同 sink，如控制台、文件或数据库）。
+- **strategies_**：策略名 → 策略实例（OptionStrategyTemplate 派生类）。
+- **orders_** / **trades_**：orderid/tradeid → OrderData/TradeData；用于查询与策略侧 get_order/get_trade。
+- **strategy_active_orders_**：策略名 → 该策略当前活跃 orderid 集合；用于对冲等逻辑判断订单是否仍挂单。
+- **orderid_strategy_name_**：orderid → strategy_name；用于 live 侧 dispatch_order/dispatch_trade 后根据 orderid 取策略名以 save_order_data/save_trade_data。
+- **all_active_order_ids_**：当前所有未完结订单 id；回测 MainEngine 在 append_order 后可能插入 orderid，cancel 时通过 remove_order_tracking 移除。
 
-这些引擎通过 RuntimeAPI 间接暴露给策略，形成一个对策略透明的「组合交易工具箱」。
+策略与 Hedge 不直接访问上述集合；通过 get_order、get_trade、get_strategy_active_orders、get_strategy_name_for_order 等接口访问。
 
----
+#### 2.1.9 RuntimeAPI 职责汇总
 
-#### 2.3 Strategy 层：策略模板与具体策略实现
+RuntimeAPI 由 MainEngine（backtest 或 live）在构造时组装并注入 OptionStrategyEngine。策略与 OptionStrategyEngine 内部仅通过该 API 访问环境，不持有 MainEngine 或 IEventEngine。
 
-Strategy 层主要包含：
+| API 成员 | 职责 | 回测实现 | 实盘实现 |
+|----------|------|----------|----------|
+| send_order | 提交订单请求 | append_order → order_executor 撮合 | append_order → IbGateway::send_order |
+| send_combo_order | 提交组合订单 | 同 send_order（构造 OrderRequest 后 append_order） | 同 send_order |
+| write_log | 提交日志意图 | put_log_intent → LogEngine | put_log_intent → LogEngine |
+| get_portfolio | 按名称取组合视图 | MainEngine::get_portfolio（来自 BacktestDataEngine 注册） | MainEngine::get_portfolio（来自 MarketDataEngine） |
+| get_contract | 按 symbol 取合约 | MainEngine::get_contract（来自 BacktestDataEngine 注册） | MainEngine::get_contract（来自 MarketDataEngine） |
+| get_holding | 按策略名取持仓 | MainEngine::get_holding（PositionEngine） | MainEngine::get_holding |
+| get_or_create_holding | 确保策略持仓存在 | MainEngine::get_or_create_holding | MainEngine::get_or_create_holding |
+| remove_strategy_holding | 移除策略持仓 | PositionEngine::remove_strategy_holding | 同上 |
+| get_combo_builder_engine | 取组合构造引擎 | MainEngine::combo_builder_engine() | MainEngine::combo_builder_engine() |
+| get_hedge_engine | 取对冲引擎 | MainEngine::hedge_engine() | MainEngine::hedge_engine() |
+| put_strategy_event | 推送策略更新（供 gRPC 流） | 可选 no-op 或空实现 | MainEngine::on_strategy_event 入队 |
 
-- `strategy/template.hpp`：通用期权策略模板基类 `OptionStrategyTemplate`。
-- `strategy/high_frequency_momentum.hpp/cpp`：高频动量策略实现。
-- `strategy/strategy_registry.hpp/cpp`：策略注册表与工厂。
+#### 2.1.10 PositionEngine 与 StrategyHolding
 
-##### 2.3.1 策略注册表（`strategy/strategy_registry.hpp`）
+- **StrategyHolding**：每个策略一份；内含标的持仓、期权持仓、组合持仓及 PortfolioSummary（pnl、delta、gamma、theta 等汇总）。由 PositionEngine 维护 strategy_holdings_ 映射。
+- **process_order**：根据 OrderData 更新 order_meta_（用于后续 process_trade 时识别组合腿）；不直接改持仓，持仓由 process_trade 更新。
+- **process_trade**：根据成交更新对应 StrategyHolding 内标的/期权/组合持仓数量与成本；更新 summary。
+- **update_metrics**：根据当前 PortfolioData 与持仓重新计算 StrategyHolding 的 summary（Greeks、pnl 等）。
+- **process_timer_event**（仅 live）：可选产出 pos_logs，由调用方 put_log_intent；用于定时检查持仓或风控日志。
+- **get_or_create_holding**：MainEngine 通过 position_engine->get_create_strategy_holding 或类似接口确保策略有对应 StrategyHolding；OptionStrategyEngine 通过 RuntimeAPI.get_or_create_holding 调用到 MainEngine，最终落到 PositionEngine。
 
-`StrategyRegistry` 维护从策略类名到工厂函数的映射：
+### 2.2 Runtime 层（Backtest / Live）
 
-- `add` / `add_factory`：注册策略类名称，以及实际工厂函数。
-- `has` / `get_all_strategy_class_names`：查询当前可用策略类型。
-- `create`：根据类名、`OptionStrategyEngine*`、策略名、组合名与参数字典，构建策略实例。
+#### 2.2.1 共同点
 
-`REGISTER_STRATEGY(ClassName)` 宏用于简化注册逻辑：
+- **MainEngine**：持有各引擎（OptionStrategyEngine、PositionEngine、HedgeEngine、ComboBuilderEngine、LogEngine 等）；提供 send_order、cancel_order、put_log_intent、get_portfolio、get_contract、get_holding 等；**不包含** dispatch 控制逻辑。
+- **EventEngine**：负责按事件类型与固定顺序分发（dispatch_snapshot、dispatch_timer、dispatch_order、dispatch_trade，live 另有 dispatch_contract）；不持有引擎，通过 MainEngine 的 accessor 访问并调用；执行（send_order/cancel_order/put_log_intent）也通过 MainEngine。
+- **put_event**：MainEngine 的 put_event 委托给 EventEngine.put_event；回测为同步调用，live 为入队后由工作线程 process。
 
-- 在 `strategy_registry.cpp` 中集中过一行写入：
-  - `REGISTER_STRATEGY(HighFrequencyMomentumStrategy);`
-- 工厂函数会将 `void* engine` 强转为 `core::OptionStrategyEngine*`，并构造策略。
+#### 2.2.2 回测特有
 
-这一机制使得：
+- **BacktestEngine**：顶层控制器；持有 MainEngine 与 EventEngine；在 run() 中按时间步先 put_event(Snapshot)，再 put_event(Timer)；通过 set_order_executor 将自身 execute_order 注入 MainEngine，用于撮合。
+- **Backtest MainEngine**：无网关与数据库；持有 BacktestDataEngine；append_order 内部调用 order_executor（即 BacktestEngine::execute_order），撮合后 add_order、put_event(Order)、put_event(Trade) 回灌。
+- **Backtest EventEngine**：无队列无线程；put_event 直接按类型分支并同步执行 dispatch_*。
 
-- Backtest 与 Live 可以通过同一个类名创建策略实例。
-- 新策略的接入只需添加头文件 include + 注册宏，改动局部且易于维护。
+#### 2.2.3 实盘特有
 
-##### 2.3.2 策略模板与高频动量策略
+- **Live MainEngine**：持有 DatabaseEngine、MarketDataEngine、IbGateway；构造时调用 db_engine_->load_contracts()，通过 put_event(Contract) 驱动 MarketDataEngine 建立组合结构；append_order/append_cancel 转 IbGateway；dispatch_order/dispatch_trade 内调用 save_order_data/save_trade_data。
+- **Live EventEngine**：队列 + 工作线程 + 定时器线程；put(event) 入队，run() 中取事件并 process(event)；run_timer 按间隔 put(Timer)。
+- **gRPC**：GrpcLiveEngineService 持有 MainEngine*，各 RPC 直接调用 MainEngine 接口（GetStatus、ListStrategies、ConnectGateway、AddStrategy、StreamStrategyUpdates 等）。
 
-`HighFrequencyMomentumStrategy` 派生自 `OptionStrategyTemplate`，其头文件中可以看到若干关键参数：
+#### 2.2.4 MainEngine 与 EventEngine 的职责划分
 
-- **仓位控制参数**：
-  - `position_size_`、`max_holding_minutes_`、`cooldown_minutes_`。
-- **信号阈值**：
-  - `momentum_threshold_`、`iv_change_threshold_`。
-- **风控参数**：
-  - `profit_target_pct_`、`stop_loss_pct_`。
+- **MainEngine**：只负责「持有引擎实例」与「提供能力接口」；不包含「按事件类型决定先调谁、后调谁」的逻辑。put_event 仅转发给 EventEngine；append_order/append_cancel/append_log 内部转 send_order/cancel_order/put_log_intent。
+- **EventEngine**：只负责「接收事件」与「按固定顺序分发」；不持有任何引擎实例，通过 set_main_engine 获得的 MainEngine* 访问 get_portfolio、option_strategy_engine、position_engine、hedge_engine、send_order、cancel_order、put_log_intent 等。执行意图（下单、撤单、写日志）一律通过 MainEngine 完成。
 
-策略内部维护：
+因此：**dispatch 控制逻辑**与**引擎持有与执行**分离；EventEngine 是「调度器」，MainEngine 是「容器与执行门面」。
 
-- `chain_symbols_`：订阅的期权链列表。
-- `entry_price_`、`entry_time_`、`last_exit_time_` 等交易状态。
-- `last_underlying_price_`、`last_iv_call_`、`last_iv_put_` 等用于判断动量与 IV 变化的状态量。
+#### 2.2.5 回测 MainEngine 与实盘 MainEngine 对比
 
-运行时，OptionStrategyEngine 会周期性调用 `on_timer_logic`，策略内部通过：
+| 能力 | 回测 MainEngine | 实盘 MainEngine |
+|------|-----------------|-----------------|
+| 事件引擎 | 持有 IEventEngine*（Backtest EventEngine），同步 put_event | 持有或使用 EventEngine*，put_event 入队 |
+| 组合/合约来源 | BacktestDataEngine load 时 register_portfolio、register_contract | MarketDataEngine 经 process_contract 建立；合约来自 load_contracts |
+| 订单执行 | append_order → order_executor（BacktestEngine::execute_order）撮合 | append_order → send_order → IbGateway::send_order |
+| 撤单 | cancel_order：更新状态、remove_order_tracking、put_event(Order) | cancel_order → IbGateway::cancel_order |
+| 持久化 | 无 | save_order_data、save_trade_data → DatabaseEngine |
+| 网关 | 无 | connect/disconnect、query_account、query_position → IbGateway |
+| 策略更新流 | 无（可选 no-op） | on_strategy_event、pop_strategy_update 供 gRPC StreamStrategyUpdates |
+| 日志流 | 无 | log_stream_buffer_、pop_log_for_stream 供 gRPC StreamLogs |
+| 初始化后加载 | load_backtest_data 由 BacktestEngine 调用 | 构造末 db_engine_->load_contracts() |
 
-- `check_entry_signals()`：基于近期价格与 IV 变化决定是否开仓。
-- `check_exit_conditions()`：基于止盈/止损/时间到期等条件决定是否平仓。
-- `enter_position` / `enter_straddle` / `reset_position`：通过 RuntimeAPI 下单或关闭头寸。
+### 2.3 基础设施层（infra）
 
-策略本身只感知：
+- **BacktestDataEngine**（marketdata）：从 parquet 加载历史数据；构建回测用 PortfolioData；预计算每帧 PortfolioSnapshot；提供 iter_timesteps 与 get_precomputed_snapshot。回测组合结构在 load 时建立，行情由每步 Snapshot 事件更新。
+- **MarketDataEngine**（engine_data_tradier）：处理 Contract 事件，维护 contracts_、portfolios_（add_option/set_underlying），add_option 后 finalize_chains 以便 apply_frame 可用；不直接产生行情，行情由外部 Snapshot 事件经 dispatch_snapshot → get_portfolio()->apply_frame(snapshot) 更新。
+- **DatabaseEngine**（db）：PostgreSQL；load_contracts 按固定顺序发出 Contract 事件；save_order_data/save_trade_data 在 dispatch_order/dispatch_trade 中被调用。
+- **IbGateway**（gateway）：封装 IB TWS 连接；send_order/cancel_order 下发；订单/成交/合约回报通过 main_engine->put_event(Order/Trade/Contract) 回灌；process_timer_event 用于周期性消费 TWS 消息队列。
 
-- 从组合视图中读取到的价格与 Greeks。
-- 从 `StrategyHolding` 中读取到的当前持仓。
-- 自身的参数与内部状态。
+#### 2.3.1 BacktestDataEngine 与回测数据流
 
-所有订单执行细节（撮合价、手续费、滑点）以及数据来源（实盘 vs 回测）均由运行时负责。
+- **输入**：parquet 文件路径、时间列名（默认 ts_recv）、标的符号（可选，可从文件名推断）。
+- **过程**：load_parquet 解析 parquet，构建标的与期权合约列表；create_portfolio_data 创建 PortfolioData 并注册到 MainEngine；build_occ_to_option、build_option_apply_index 建立 OCC 符号到 OptionData* 的映射与 apply 顺序；precompute_snapshots 逐帧构建 PortfolioSnapshot 并写入 snapshots_。
+- **输出**：iter_timesteps 提供 (timestamp, TimestepFrameColumnar) 回调；get_precomputed_snapshot(step) 提供第 step 帧快照；portfolio_data() 返回供 MainEngine 注册的 PortfolioData*。回测组合结构在 load 阶段定型，运行时仅通过 apply_frame 更新价格与 Greeks。
 
----
+- **TimestepFrameColumnar 与 precompute**：每帧对应 parquet 中按时间列（如 ts_recv）分组的一批行；build_snapshot_from_frame 根据当前帧列数据填充 PortfolioSnapshot 的 underlying 与 option 向量，顺序与 option_apply_order_ 一致；precompute_snapshots 在 load 结束时一次性生成所有帧的快照，避免运行时逐帧解析。
 
-#### 2.4 Backtest 层：回测引擎与数据加载
+#### 2.3.2 MarketDataEngine（实盘）与组合结构
 
-Backtest 层围绕 `BacktestEngine` 构建一条完整的「数据 → 策略 → 订单执行 → 绩效统计 → JSON 输出」流水线。
+- **输入**：Contract 事件（EventPayload 为 ContractData）；来自 DatabaseEngine::load_contracts 按固定顺序发出。
+- **过程**：process_contract 中根据 contract 的 option_portfolio、option_underlying 等字段 get_or_create_portfolio、add_option、set_underlying；每次 add_option 后调用 finalize_chains，保证 option_apply_order_ 与链内顺序稳定。
+- **输出**：get_portfolio、get_contract、get_all_portfolio_names、get_all_contracts 供 MainEngine 与策略使用。行情/Greeks 不由此引擎产生，由外部 Snapshot 事件经 dispatch_snapshot → get_portfolio(name)->apply_frame(snapshot) 更新。
 
-##### 2.4.1 回测入口（`entry_backtest.cpp`）
+#### 2.3.3 DatabaseEngine 与合约加载顺序
 
-`entry_backtest` 可执行程序主要职责：
+- load_contracts 从 PostgreSQL 读取合约表，按约定顺序（如先标的后期权）遍历，对每条构造 ContractData 并 put_event(EventType::Contract, data)。EventEngine 工作线程 process 时 dispatch_contract → MarketDataEngine::process_contract，从而建立 portfolios_。该顺序需与 MarketDataEngine 对 option_apply_order_ 的假设一致，以便后续 Snapshot 的 apply_frame 正确写回。
 
-- 解析命令行参数：
-  - 支持单文件模式与 `--files` 多文件模式。
-  - 解析 `strategy_name`、`fill_mode`（`mid|bid|ask`）、`fee_rate`、`risk_free_rate`、`iv_price_mode`、`--log`、以及一组 `key=value` 的策略参数。
-- 构建一个或多个 `BacktestEngine` 实例（支持并行处理多文件）。
-- 为每个 engine 注册 timestep 回调，采集逐帧指标（PnL、Delta、Theta、Gamma、Fees）。
-- 汇总每日结果与整体指标（总 PnL、净 PnL、最大回撤、Sharpe 等），并以 JSON 形式输出到 stdout。
+### 2.4 通用层（utilities）
 
-它将所有 UI 与交互层面的复杂性屏蔽在外，对上层 Python/后端暴露一个统一的命令行协议与 JSON 输出格式。
+- **数据与枚举**：constant.hpp、types.hpp、object.hpp（OrderRequest、OrderData、TradeData、ContractData、PortfolioSnapshot、StrategyHolding 等）、portfolio.hpp（PortfolioData、ChainData、OptionData、UnderlyingData）。
+- **事件抽象**：event.hpp（EventType、EventPayload、Event）、portfolio.hpp（IEventEngine）。
+- **引擎抽象**：base_engine.hpp（MainEngine 虚接口、BaseEngine 基类）。
+- **工具**：parquet_loader、occ_utils、utility、ib_mapping 等。
 
-##### 2.4.2 BacktestEngine 结构（`runtime/backtest/engine_backtest.hpp/cpp`）
+#### 2.4.1 事件与引擎抽象（utilities）
 
-`BacktestEngine` 是回测模式下的顶层控制器，其核心成员包括：
+- **Event**：type（Timer/Order/Trade/Contract/Snapshot）+ data（variant<monostate, OrderData, TradeData, ContractData, PortfolioSnapshot>）。全系统唯一的事件载体，回测与实盘共用。
+- **IEventEngine**：最小事件引擎接口。start/stop、register_handler/unregister_handler（默认 no-op）、put_intent_send_order、put_intent_cancel_order、put_intent_log、put_event。回测与 live 的 EventEngine 实现该接口；策略与 Core 不直接依赖 IEventEngine，只通过 RuntimeAPI 提交意图。
+- **MainEngine（虚）**：write_log、put_event 两个虚方法，默认 no-op。backtest::MainEngine 与 engines::MainEngine 重写后委托给各自 EventEngine 或 LogEngine。
+- **BaseEngine**：持 MainEngine*、engine_name；close 钩子。所有「功能引擎」（LogEngine、PositionEngine、MarketDataEngine、DatabaseEngine 等）继承 BaseEngine，**不持 IEventEngine**。事件入口统一由 EventEngine 持有并调用各引擎（通过 MainEngine 的 accessor）；引擎自身不订阅或拉取事件，仅在被 dispatch 或 MainEngine 直接调用时工作。
 
-- `std::unique_ptr<MainEngine> main_engine_`：回测专用 MainEngine。
-- `std::unique_ptr<EventEngine> event_engine_`：内部事件驱动（回测版）。
-- 策略名称与参数：`strategy_name_`、`strategy_setting_`。
-- 执行与绩效统计字段：`current_timestep_`、`current_pnl_`、`max_delta_`、`max_gamma_`、`max_theta_`、`max_drawdown_` 等。
-- 费用与成交统计：`fee_rate_`、`cumulative_fees_`、`total_orders_`（订单数量）。
+#### 2.4.2 组合与快照（utilities/portfolio.hpp、object.hpp）
 
-**关键方法**：
-
-- `load_backtest_data(parquet_path, underlying_symbol)`：
-  - 构造或复用 `BacktestDataEngine`（定义于 `infra/marketdata/engine_data_historical.hpp`），从 parquet 读取带有 `ts_recv` 时间戳的行情与希腊值。
-  - 将数据映射到 `PortfolioSnapshot` 或类似结构，为后续逐帧回放做准备。
-
-- `add_strategy(strategy_name, setting)`：
-  - 与 core 层 `OptionStrategyEngine` 对接，创建策略实例并注入参数。
-
-- `configure_execution(fill_mode, fee_rate)`：
-  - 指定撮合价策略（`mid`/`bid`/`ask`）与手续费率。
-
-- `run()`：
-  - 驱动数据回放循环，对每一时间步：
-    - 更新组合快照。
-    - 驱动策略 `on_timer` 与订单执行。
-    - 根据订单请求调用 `execute_order`，计算成交价与费用。
-    - 统计逐步 PnL、Greeks、最大回撤等。
-    - 触发已注册的 timestep 回调，将相关指标收集给调用方。
-
-- `reset()`：
-  - 在多文件并行回测场景下，允许复用 engine 实例，但清理内部状态与数据。
-
-##### 2.4.3 Backtest MainEngine（`runtime/backtest/engine_main.cpp`）
-
-回测模式下的 `MainEngine` 与 live 版有明显不同：
-
-- 不连接真实网关，而是通过内部逻辑完成撮合。
-- 依赖一个 `BacktestDataEngine`（实现在 `infra/marketdata/engine_data_historical.cpp`）来提供时间序列数据。
-- 持有：
-  - `engines::PositionEngine`：策略持仓管理。
-  - `engines::LogEngine`：日志记录（默认禁用，可通过 `set_log_level` 打开）。
-  - `core::OptionStrategyEngine`：统一策略引擎。
-
-**特征**：
-
-- 使用 `backtest::EventEngine`；回测调度主要由 `BacktestEngine::run()` 显式驱动（无独立事件线程）。
-- `load_backtest_data()` 将 parquet 中的数据转成内部 `BacktestDataEngine` 的帧表示。
-- `send_order()` 不直接发送到外部，而由 `BacktestEngine` 提供的回调 `execute_order` 处理：
-  - 根据 `fill_mode` 与当前 `PortfolioData` 中的 bid/ask/mid 决定成交价。
-  - 根据 `fee_rate` 计算手续费并累计。
-  - 更新 `OptionStrategyEngine` 中的订单与成交状态。
-
-这种设计保证回测环境可以完全在内存中重放，并在不依赖任何外部系统的前提下，对策略进行全流程验证。
+- **PortfolioData**：组合顶层；name、options、chains、underlying、underlying_symbol、option_apply_order_（固定顺序，供 apply_frame 写回）。方法：add_option、set_underlying、finalize_chains、apply_frame(snapshot)、get_chain 等。
+- **ChainData**：单链；chain_symbol、underlying、options、calls、puts、indexes、atm_price、days_to_expiry 等。
+- **OptionData / UnderlyingData**：单期权/标的视图；价格、Greeks、链与组合指针。
+- **PortfolioSnapshot**：紧凑快照；portfolio_name、datetime、underlying_bid/ask/last、以及与 option_apply_order 一一对应的 bid/ask/last/delta/gamma/theta/vega/iv 向量。用于 apply_frame 批量更新组合状态。
 
 ---
 
-#### 2.5 Live 层：实盘引擎与 gRPC 接口
+## Part 3. 静态结构
 
-Live 层将核心策略引擎接入 IB TWS 与 PostgreSQL 数据库，并通过 gRPC 向后端暴露控制面与查询面。
+### 3.1 目录与模块映射
 
-##### 2.5.1 实盘入口（`entry_live.cpp` 与 `entry_live_grpc.cpp`）
+| 目录/文件 | 所属层次 | 职责摘要 |
+|-----------|----------|----------|
+| entry_backtest.cpp | Runtime | 解析命令行（parquet、策略名、fill_mode、fee_rate、slippage_bps、risk_free_rate、iv_price_mode、log、策略 key=value），构建 BacktestEngine，load_backtest_data、add_strategy、configure_execution、run()，汇总 BacktestResult 以 JSON 输出 stdout |
+| entry_live.cpp | Runtime | 信号处理、.env、创建 EventEngine+MainEngine，connect，主循环，disconnect/close |
+| entry_live_grpc.cpp | Runtime | 创建 EventEngine+MainEngine，GrpcLiveEngineService，gRPC Server 阻塞，退出时 disconnect/close |
+| runtime/backtest/engine_backtest | Runtime | 回测顶层：load_backtest_data、add_strategy、configure_execution、run、execute_order、timestep 回调 |
+| runtime/backtest/engine_main | Runtime | 回测 MainEngine：持有各引擎、RuntimeAPI 注入、register_portfolio/contract、append_*、set_order_executor |
+| runtime/backtest/engine_event | Runtime | 回测 EventEngine：put_event 同步分发 Snapshot/Timer/Order/Trade |
+| runtime/live/engine_main | Runtime | 实盘 MainEngine：持有各引擎与 infra 组件、load_contracts、append_*、put_event、策略更新队列 |
+| runtime/live/engine_event | Runtime | 实盘 EventEngine：队列+线程、put 入队、process 分发 Snapshot/Timer/Order/Trade/Contract |
+| runtime/live/engine_grpc | Runtime | gRPC 服务实现，持有 MainEngine*，各 RPC 转调 MainEngine |
+| infra/marketdata/engine_data_historical | Infra | 回测数据：parquet 加载、组合构建、预计算快照、iter_timesteps |
+| infra/marketdata/engine_data_tradier | Infra | 实盘行情/组合：process_contract 建组合、subscribe_chains、start/stop_market_data_update |
+| infra/db/engine_db_pg | Infra | PostgreSQL：load_contracts、save/load contract、save order/trade、wipe_trading_data |
+| infra/gateway/engine_gateway_ib | Infra | IB 网关：connect、send_order、cancel_order、回报回调 put_event |
+| core/engine_option_strategy | Core | 统一策略引擎 + RuntimeAPI 定义与注入 |
+| core/engine_position | Core | 策略持仓、process_order/process_trade、update_metrics、process_timer_event |
+| core/engine_hedge | Core | 对冲：process_hedging 产出 orders/cancels/logs |
+| core/engine_combo_builder | Core | 组合腿构造：combo_builder、straddle、strangle 等 |
+| core/engine_log | Core | 消费 LogIntent、level 过滤、sink 输出 |
+| strategy/template | Core/Strategy | 策略基类 OptionStrategyTemplate |
+| strategy/strategy_registry | Core/Strategy | 策略类名 → 工厂、REGISTER_STRATEGY 宏 |
+| strategy/high_frequency_momentum | Strategy | 示例策略实现 |
+| utilities/* | Utilities | 事件、组合、对象、常量、基类、工具 |
 
-**`entry_live.cpp`** 负责：
+### 3.2 组件依赖关系（高层）
 
-- 安装 SIGINT/SIGTERM 处理，将 `g_running` 标志置 false 以触发优雅退出。
-- 加载 `.env` 文件（当前目录及上级目录），为 `DatabaseEngine` 提供如 `DATABASE_URL` 等连接信息。
-- 构造 `engines::EventEngine` 与 `engines::MainEngine`。
-- 调用 `main_engine.connect()` 建立与 IB/TWS 的连接。
-- 进入简单的循环，保持进程存活，直到收到终止信号，然后：
-  - 调用 `main_engine.disconnect()` 与 `main_engine.close()` 完成资源释放。
+- **BacktestEngine** → EventEngine、MainEngine（backtest）；MainEngine 持有 OptionStrategyEngine、PositionEngine、BacktestDataEngine、HedgeEngine、ComboBuilderEngine、LogEngine。
+- **Live MainEngine** → EventEngine、OptionStrategyEngine、PositionEngine、MarketDataEngine、DatabaseEngine、IbGateway、HedgeEngine、ComboBuilderEngine、LogEngine。
+- **OptionStrategyEngine** → 仅 RuntimeAPI（由 MainEngine 注入）；策略实例通过 RuntimeAPI 访问 portfolio、contract、holding、send_order、write_log 等。
+- **EventEngine** → 通过 MainEngine* 访问 get_portfolio、option_strategy_engine、position_engine、hedge_engine、send_order、cancel_order、put_log_intent、market_data_engine（live）、save_order_data/save_trade_data（live）等。
 
-**`entry_live_grpc.cpp`** 在上述基础上增加 gRPC：
+### 3.2.1 头文件依赖关系（高层）
 
-- 创建 `EventEngine` 与 `MainEngine`。
-- 将 `MainEngine*` 注入 `EventEngine` 与 `GrpcLiveEngineService`。
-- 使用 `grpc::ServerBuilder`：
-  - 监听 `0.0.0.0:50051` 端口。
-  - 注册 `GrpcLiveEngineService`。
-  - 调用 `server->Wait()` 阻塞至进程被终止。
-- 在 gRPC 服务器退出前调用 `disconnect()` 与 `close()`，保证资源清理。
+- **utilities**：event.hpp、object.hpp、constant.hpp、portfolio.hpp、base_engine.hpp、types.hpp 等仅依赖标准库与彼此，不依赖 core、runtime、infra。
+- **core**：engine_option_strategy、engine_position、engine_hedge、engine_combo_builder、engine_log 依赖 utilities 与彼此（如 OptionStrategyEngine 依赖 RuntimeAPI 与 strategy_cpp 前向声明）；不依赖 runtime 或 infra。
+- **strategy**：template、strategy_registry、high_frequency_momentum 依赖 core（OptionStrategyEngine）、utilities（PortfolioData、ContractData 等）；不依赖 runtime 或 infra。
+- **runtime/backtest**：engine_backtest、engine_main、engine_event 依赖 core、utilities、infra/marketdata/engine_data_historical（BacktestDataEngine）。
+- **runtime/live**：engine_main、engine_event、engine_grpc 依赖 core、utilities、infra 下 marketdata、db、gateway，以及 proto 生成代码。
+- **infra**：各 engine 依赖 utilities、core/engine_log（若写日志）；不依赖 runtime。
 
-##### 2.5.2 Live MainEngine（`runtime/live/engine_main.cpp`）
+依赖方向为：utilities ← core/strategy ← infra ← runtime（entry 依赖 runtime）。
 
-live 版 `MainEngine` 是实盘模式下所有引擎的总控：
+### 3.3 Utilities 层关键类型（object.hpp、constant.hpp）
 
-- 构造过程中：
-  - 若未显式传入 `EventEngine*`，则内部创建一个 `EventEngine` 并启动其线程。
-  - 创建：
-    - `LogEngine`：负责日志输出与过滤。
-    - `PositionEngine`：维护策略持仓。
-    - `DatabaseEngine`：从 PostgreSQL 加载合约、保存订单与成交历史。
-    - `MarketDataEngine`：基于 Contract/Snapshot 事件构建并更新 `PortfolioData`。
-    - `IbGateway`：与 IB TWS 通信的网关。
-    - `core::OptionStrategyEngine`：统一策略引擎，并将 RuntimeAPI 中各能力绑定到上述组件。
-  - 调用 `db_engine_->load_contracts()`：
-    - 从数据库读取所有合约信息。
-    - 通过 `EventEngine` 派发 `Contract` 事件，最终在 `MarketDataEngine::process_contract` 中构建组合与期权链结构。
+以下类型为全系统共享的数据契约，不包含业务逻辑，仅作数据结构定义。
 
-**公开能力**：
+| 类型 | 用途 |
+|------|------|
+| Direction | LONG / SHORT / NET |
+| Status | 订单状态：SUBMITTING、NOTTRADED、PARTTRADED、ALLTRADED、CANCELLED、REJECTED |
+| Product / Exchange / OrderType / OptionType / ComboType | 产品、交易所、订单类型、期权类型、组合类型等枚举 |
+| ContractData | 合约元数据：symbol、exchange、乘数、tick、期权字段（strike、expiry、option_portfolio、option_underlying 等）、IB con_id/trading_class |
+| OrderRequest | 下单意图：symbol、direction、price、volume、type、is_combo、legs 等 |
+| OrderData | 订单状态：orderid、status、traded、volume、组合腿信息等 |
+| TradeData | 成交记录：tradeid、orderid、symbol、price、volume、direction、datetime 等 |
+| CancelRequest | 撤单意图 |
+| Leg | 组合腿：con_id、symbol、direction、ratio、price、trading_class 等 |
+| BasePosition / OptionPositionData / UnderlyingPositionData / ComboPositionData | 持仓基类与派生：数量、成本、价格、Greeks 等 |
+| StrategyHolding | 策略持仓聚合：标的持仓、期权持仓、组合持仓、PortfolioSummary（pnl、delta、gamma、theta 等） |
+| PortfolioSnapshot | 见 2.4.2 |
+| LogData | 日志载荷：msg、level、gateway_name、time |
+| TickData / OptionMarketData / ChainMarketData | 行情与链行情（部分路径使用） |
 
-- **网关控制**：
-  - `connect` / `disconnect`。
-  - `query_account` / `query_position`。
+### 3.4 命名空间与模块归属
 
-- **订单控制**：
-  - `send_order` / `cancel_order`，内部调用 `IbGateway`。
-  - `get_order` / `get_trade`：从 `OptionStrategyEngine` 中查询。
+- **utilities**：event.hpp、portfolio.hpp、object.hpp、base_engine.hpp、constant.hpp、types.hpp 等；全系统共享类型与最小抽象。
+- **backtest**：runtime/backtest 下 BacktestEngine、EventEngine、MainEngine；仅回测使用。
+- **engines**：runtime/live 下 MainEngine、EventEngine、GrpcLiveEngineService；core 下 PositionEngine、HedgeEngine、ComboBuilderEngine、LogEngine；infra 下 MarketDataEngine、DatabaseEngine、IbGateway。engines 命名空间为 live 与 core 共用，便于区分 utilities 与 backtest。
+- **core**：OptionStrategyEngine、RuntimeAPI；被 backtest 与 live 的 MainEngine 共同依赖。
+- **strategy_cpp**：OptionStrategyTemplate、StrategyRegistry；策略基类与注册表，被 core 与 strategy 实现共用。
 
-- **行情与组合**：
-  - `start_market_data_update` / `stop_market_data_update`（结合外部数据源，可定时推送 Snapshot）。
-  - `get_portfolio` / `get_all_portfolio_names`。
-  - `get_contract` / `get_all_contracts`。
+### 3.5 策略模板生命周期（strategy/template）
 
-- **策略更新事件流**：
-  - 接收 `StrategyUpdateData` 并写入内部队列：
-    - `on_strategy_event` 将更新事件推入 deque，并通过条件变量唤醒消费端。
-    - `pop_strategy_update` 提供阻塞/带超时的获取方法，供 gRPC `StreamStrategyUpdates` 使用。
+- **OptionStrategyTemplate**：基类持有 engine_（OptionStrategyEngine*）、strategy_name_、portfolio_name_、portfolio_、underlying_、holding_、chain_map_、inited_、started_、error_ 等。
+- **生命周期**：on_init（置 inited_，调 on_init_logic）→ on_start（置 started_）→ on_timer（由 EventEngine dispatch_timer 驱动，调 on_timer_logic）→ on_stop（调 on_stop_logic）。
+- **环境访问**：portfolio()、underlying()、holding()、get_chain() 来自 engine_ 注入的 RuntimeAPI（get_portfolio、get_holding）；下单通过 engine_->send_order/send_combo_order；日志通过 engine_->write_log；组合腿通过 get_combo_builder_engine()、对冲通过 get_hedge_engine() 与 register_hedging。
 
-MainEngine 还提供日志写入封装（`write_log`/`put_log_intent`）以及对 HedgeEngine/ComboBuilderEngine 的懒初始化访问。
+#### 3.5.1 从 add_strategy 到 on_timer 的链路（概念）
 
-##### 2.5.3 实盘 EventEngine（`runtime/live/engine_event.hpp/cpp`）
-
-Live `EventEngine` 实现了完整的异步事件处理：
-
-- 内部维护：
-  - 一个事件队列 `queue_` 与互斥锁 + 条件变量。
-  - 一个 dispatch 线程处理业务事件。
-  - 一个定时器线程定期触发 `Timer` 事件。
-
-- **接收入口**：
-  - `put_event` / `put`：接收来自 MainEngine 或其他组件的事件，并推入队列。
-  - `put_intent_send_order` / `put_intent_cancel_order` / `put_intent_log`：
-    - 用于接收来自上游（例如 IB 回调、外部 controller）的「意图」，并转换为事件或直接调用 `MainEngine`。
-
-- **调度逻辑**（按事件类型固定顺序分发）：
-  - `dispatch_timer`：调用 `OptionStrategyEngine::on_timer()`，驱动所有策略执行定时逻辑（如风控、条件单等）。
-  - `dispatch_order`：调用 `OptionStrategyEngine::process_order()`，并在必要时通过 `DatabaseEngine` 持久化。
-  - `dispatch_trade`：调用 `OptionStrategyEngine::process_trade()`，并写入 DB。
-  - `dispatch_contract`：调用 `MarketDataEngine::process_contract()`，构建或更新组合结构。
-  - `dispatch_snapshot`：调用 `PortfolioData::apply_frame()`，更新价格与 Greeks。
-
-通过 EventEngine，live 模式下所有外部驱动因素（行情、订单状态、定时任务）都转化为统一的事件流。
-
-##### 2.5.4 MarketDataEngine：组合与行情更新（`infra/marketdata/engine_data_tradier.hpp`）
-
-实盘使用的 `MarketDataEngine` 定义于 `infra/marketdata/engine_data_tradier.hpp`（Tradier 命名仅为文件区分；接口为通用组合与行情维护）：
-
-- `process_contract`：
-  - 处理 `EventType::Contract` 事件。
-  - 在内部 `contracts_` 集合中登记合约。
-  - 基于合约的 `option_portfolio` / `option_underlying` 等信息，构造或更新对应 `PortfolioData`：
-    - 为每个组合内的期权添加 `OptionData`。
-    - 配置组合标的 `UnderlyingData`。
-    - 在结构构建完毕后调用 `finalize_chains`，确保 `option_apply_order_` 稳定。
-
-- `subscribe_chains` / `unsubscribe_chains`：
-  - 记录策略与其感兴趣的期权链 symbols，用于上游行情源按需推送数据。
-
-- `start_market_data_update` / `stop_market_data_update`：
-  - 与外部行情源（未在此工程中实现）配合，控制 Snapshot 推送节奏。
-
-该引擎不直接处理 Tick/Greeks，而是依赖已经整理好的 `PortfolioSnapshot` 来更新内部结构，保持接口简单、稳定。
-
-##### 2.5.5 DatabaseEngine：PostgreSQL 持久化（`infra/db/engine_db_pg.hpp/cpp`）
-
-`DatabaseEngine` 负责与 PostgreSQL 的所有交互：
-
-- 管理合约表，支撑：
-  - `load_contracts`：启动时读取合约，并通过 `MainEngine::put_event(EventType::Contract, ContractData)` 按固定顺序发出事件，驱动 `MarketDataEngine` 构建组合。
-  - `save_contract_data` / `load_contract_data`：读写合约元数据。
-
-- 管理订单与成交表，支撑：
-  - `save_order_data(strategy_name, OrderData)`。
-  - `save_trade_data(strategy_name, TradeData)`。
-  - `get_all_history_orders` / `get_all_history_trades`。
-  - `wipe_trading_data` 用于清理历史记录。
-
-- 内部由 `pqxx::connection` 管理数据库连接，并持有互斥锁 `db_mutex_` 确保线程安全。
-
-数据库连接字符串可由构造函数参数或环境变量（如 `.env` 中的 `DATABASE_URL`）提供。
-
-##### 2.5.6 IbGateway 与 IB API 抽象（`infra/gateway/engine_gateway_ib.hpp/cpp`）
-
-`IbGateway` 是对 IB/TWS 连接的包装：
-
-- 内部通过 `IbApi` 抽象类与具体实现 `IbApiTws` 解耦。
-- 提供：
-  - `connect` / `disconnect`。
-  - `send_order` / `cancel_order`。
-  - `query_account` / `query_position` / `query_portfolio`。
-  - `process_timer_event`：周期性调用，确保 TWS 消息队列被持续消费。
-
-`IbGateway` 与 `MainEngine` 的关系：
-
-- 持有一个 `MainEngine* main_engine_`，在接收到订单、成交或合约更新时，通过 `on_order` / `on_trade` / `on_contract` 向主引擎发出事件。
-- 默认设置（host、port、client_id、account）由 `Setting` 结构体管理，可由上层配置。
-
-##### 2.5.7 GrpcLiveEngineService 与 proto 接口（`runtime/live/engine_grpc.hpp` + `proto/otrader_engine.proto`）
-
-`GrpcLiveEngineService` 实现 proto 中定义的 `EngineService`：
-
-- 调用 `MainEngine` 提供的接口实现：
-  - `GetStatus`：返回是否运行中、是否连接 IB，以及简单文本描述。
-  - `ListStrategies`：枚举当前加载的策略（名/class/portfolio/status）。
-  - `ConnectGateway` / `DisconnectGateway`：控制 `IbGateway`。
-  - `StartMarketData` / `StopMarketData`：调用 `MarketDataEngine` 相关控制。
-  - `GetOrdersAndTrades`：拉取当前订单与成交列表。
-  - `ListPortfolios` / `GetPortfoliosMeta`：列出所有组合名称。
-  - `ListStrategyClasses`：查询所有可用策略类名（来自 `StrategyRegistry`）。
-  - `GetRemovedStrategies`：查看已移除策略列表。
-  - `AddStrategy` / `RestoreStrategy` / `InitStrategy` / `RemoveStrategy` / `DeleteStrategy`：管理策略生命周期。
-  - `GetStrategyHoldings`：返回当前所有策略持仓的 JSON 描述。
-
-- 流式接口：
-  - `StreamLogs`：将日志行作为 `LogLine` 流式返回。
-  - `StreamStrategyUpdates`：从 `MainEngine` 的 `StrategyUpdateData` 队列中消费数据，向外输出策略更新事件。
-
-proto 文件 `otrader_engine.proto` 则定义了所有消息结构与 RPC 签名，确保 C++ 与后端服务之间有稳定的契约。
+1. **添加策略**：BacktestEngine::add_strategy(strategy_name, setting) 或 gRPC AddStrategy → MainEngine 侧 OptionStrategyEngine::add_strategy(class_name, portfolio_name, setting)。add_strategy 内部通过 StrategyRegistry::create(class_name, engine, strategy_name, portfolio_name, setting) 创建策略实例，并插入 strategies_；get_or_create_holding 确保该策略有 StrategyHolding。
+2. **初始化与启动**：回测在 run() 前若策略未 inited 则调用 strategy->on_init()、strategy->on_start()；实盘可通过 gRPC InitStrategy、StartStrategy 触发。
+3. **定时驱动**：回测每步 put_event(Timer)；Live 定时器线程 put(Timer)。EventEngine 在 dispatch_timer 中调用 option_strategy_engine->get_strategy()->on_timer()（回测单策略）或 option_strategy_engine->on_timer()（Live 遍历所有策略）。on_timer 内部调用 on_timer_logic()，策略在此读取 portfolio、holding，可能调用 send_order/send_combo_order/write_log。
+4. **意图执行**：send_order 经 RuntimeAPI.send_order → MainEngine.append_order → send_order（回测为 order_executor，Live 为 IbGateway）；回报再以 Order/Trade 事件回灌，dispatch_order/dispatch_trade 更新 OptionStrategyEngine 与 PositionEngine。
 
 ---
 
-### 3. 运行时视图
+## Part 4. 事件与意图
 
-本节从「回测模式」与「实盘模式」两个角度，描述运行时组件的协作关系与典型调用路径。
+### 4.1 Event 形态与类型
 
-#### 3.1 回测模式运行时
+- **定义位置**：utilities/event.hpp、object.hpp（Payload 中使用的类型）、portfolio.hpp（IEventEngine）。
+- **EventType**：Timer、Order、Trade、Contract、Snapshot。
+- **EventPayload**：variant<monostate, OrderData, TradeData, ContractData, PortfolioSnapshot>。
+- **Event**：type + data。
+- **StrategyUpdateData**：用于 live gRPC 流式输出策略更新，不经过 EventEngine 路由；结构含 strategy_name、class_name、portfolio、json_payload。
 
-**核心组件**：
+**无独立 Log 事件类型**：日志以 Intent（LogData）经 put_log_intent/append_log 提交，由 MainEngine 转 LogEngine 处理。
 
-- `entry_backtest` 可执行程序。
-- `backtest::BacktestEngine`。
-- 回测版 `backtest::MainEngine` 与 `backtest::EventEngine`。
-- `core::OptionStrategyEngine` 与注册的策略实例。
-- `BacktestDataEngine`（`infra/marketdata/engine_data_historical`）与 `PortfolioData`。
+#### 4.1.1 EventPayload 各类型说明
 
-##### 3.1.1 初始化阶段
+- **OrderData**：订单状态；含 orderid、status、traded、volume、symbol、direction、gateway_name、组合腿等；dispatch_order 时更新 OptionStrategyEngine 与 PositionEngine，live 侧并写入 DB。
+- **TradeData**：成交记录；含 tradeid、orderid、symbol、price、volume、direction、datetime；dispatch_trade 时更新 OptionStrategyEngine 与 PositionEngine、并写入持仓与 summary，live 侧并 save_trade_data。
+- **ContractData**：合约元数据；含 symbol、exchange、乘数、期权字段（strike、expiry、option_portfolio、option_underlying、option_index 等）、IB 相关字段；dispatch_contract 时用于 MarketDataEngine 建组合。
+- **PortfolioSnapshot**：紧凑快照；portfolio_name、datetime、underlying_bid/ask/last、与 option_apply_order 同序的 bid/ask/last/delta/gamma/theta/vega/iv 向量；dispatch_snapshot 时 get_portfolio(name)->apply_frame(snapshot) 写回组合内各 OptionData 与 UnderlyingData。
 
-1. `entry_backtest` 解析命令行参数与环境变量（如 `BACKTEST_LOG`）。
-2. 为并行执行场景预创建若干 `BacktestEngine` 实例，每个实例内部：
-   - 构造 `MainEngine`，并注入 `OptionStrategyEngine` 与 `PositionEngine`、`LogEngine` 等。
-   - 通过 RuntimeAPI 将 `send_order`、`write_log`、`get_portfolio`、`get_contract` 等能力暴露给 `OptionStrategyEngine`。
+### 4.2 各事件类型职责
 
-##### 3.1.2 数据加载与组合构建
+| 类型 | 含义 | 生产者 | 消费者（dispatch） |
+|------|------|--------|---------------------|
+| Timer | 时钟/周期驱动 | 回测：run 每步 put；Live：定时器线程 put | dispatch_timer：策略 on_timer、持仓、对冲、执行意图 |
+| Snapshot | 组合快照（价格/Greeks） | 回测：BacktestDataEngine 预计算每步 put；Live：外部数据源 put | dispatch_snapshot → get_portfolio(name)->apply_frame(snapshot) |
+| Order | 订单状态更新 | 回测：execute_order 后 put_event(Order)；Live：IbGateway 回报 put_event | dispatch_order → position_engine->process_order；option_strategy_engine->process_order；live 侧 save_order_data |
+| Trade | 成交回报 | 回测：execute_order 后 put_event(Trade)；Live：IbGateway 回报 put_event | dispatch_trade → option_strategy_engine->process_trade；live 侧 save_trade_data；position_engine->process_trade |
+| Contract | 合约信息 | Live：DatabaseEngine::load_contracts 按序 put | dispatch_contract → market_data_engine->process_contract |
 
-对于每个回测文件：
+### 4.3 Intent 形态与提交
 
-1. 调用 `BacktestEngine::load_backtest_data(parquet_path)`：
-   - 在 `MainEngine` 内部创建/复用 `BacktestDataEngine`。
-   - 解析 parquet 中的行情、希腊值与元数据。
-   - 将其组织为时间有序的帧（通常对应分钟级别）。
-2. `BacktestDataEngine` 利用 `PortfolioData` 与 `ChainData` 结构构建组合视图：
-   - 初始时基于合约信息构造组合。
-   - 后续每帧更新使用类似 `PortfolioSnapshot` 的方式写入价格与 Greeks。
+- **OrderIntent**：OrderRequest 经 RuntimeAPI.send_order 或 send_combo_order 提交；Runtime 实现为 append_order → send_order（回测为 order_executor 撮合，live 为 IbGateway）。
+- **CancelIntent**：CancelRequest 经 append_cancel → cancel_order。
+- **LogIntent**：LogData 经 RuntimeAPI.write_log 或 put_log_intent/append_log 提交；最终由 LogEngine.process_log_intent 消费，按 level 过滤后输出。
 
-##### 3.1.3 策略加载与执行
+策略与 Hedge 只通过 RuntimeAPI 或 MainEngine 的 append_* / put_log_intent 提交意图；不直接调用 IEventEngine.put_intent_*（EventEngine 内部可将 put_intent_* 转 main_engine->send_order/cancel_order/put_log_intent）。
 
-1. `BacktestEngine::add_strategy(strategy_name, setting)`：
-   - 调用 `OptionStrategyEngine::add_strategy(class_name, portfolio_name, setting)`。
-   - 通过 `StrategyRegistry::create` 根据类名构造具体策略实例。
-2. 在运行 loop 中，`BacktestEngine::run()` 会对每一时间步执行：
-   - 从 `BacktestDataEngine` 读取当前帧的组合快照并应用到 `PortfolioData`。
-   - 调用 `OptionStrategyEngine::on_timer()`：
-     - 逐个策略调用其 `on_timer_logic`，执行交易逻辑与风控。
-   - 对策略调用产生的 `OrderRequest`，通过 `BacktestEngine::execute_order`：
-     - 根据 fill_mode 从 bid/ask/mid 选择成交价。
-     - 计算手续费并更新 `cumulative_fees_`。
-     - 构造 `OrderData` 与 `TradeData`，调用 `OptionStrategyEngine::process_order/process_trade`。
-   - 在每步末尾，更新汇总指标，并调用所有注册的 timestep 回调。
+### 4.4 事件分发顺序（写死）
 
-##### 3.1.4 结果汇总与输出
+**回测 EventEngine.put_event**：按 event.type 分支；同一事件内顺序为：
 
-在所有文件处理完毕后：
+- Snapshot → dispatch_snapshot（仅更新组合）
+- Timer → dispatch_timer：1）option_strategy_engine->get_strategy()->on_timer()；2）position_engine->update_metrics；3）hedge_engine->process_hedging；4）对 out_orders/out_cancels/out_logs 逐条 main_engine_->send_order/cancel_order/put_log_intent
+- Order → dispatch_order：position_engine->process_order；option_strategy_engine->process_order
+- Trade → dispatch_trade：position_engine->process_trade；option_strategy_engine->process_trade
 
-- `entry_backtest` 聚合每个文件的 `BacktestResult`：
-  - 按输入文件顺序排序为「日序列」。
-  - 计算总 PnL、净 PnL（扣手续费）、最大回撤、Sharpe 等。
-  - 构造逐日汇总（file、pnl、net_pnl、fees、orders、timesteps）。
-  - 对所有时间步 metrics 按 timestamp 排序，形成统一的时间序列。
-- 将上述结果封装为结构化 JSON 输出到 stdout，并在 stderr 输出进度更新。
+**Live EventEngine.process(event)**：按 event.type 分支：
 
-回测运行时与实盘相比，没有外部依赖，所有动作都在内存中可控地重放，便于调试与自动化测试。
+- Snapshot → dispatch_snapshot（同上）
+- Timer → dispatch_timer：1）ib_gateway->process_timer_event(Timer)；2）position_engine->process_timer_event(get_portfolio, &pos_logs)，对 pos_logs 逐条 put_log_intent；3）每策略 process_hedging，对 orders/cancels/logs 逐条 send_order/cancel_order/put_log_intent；4）option_strategy_engine->on_timer()
+- Order → dispatch_order：position_engine->process_order；option_strategy_engine->process_order；save_order_data(strategy_name, order)
+- Trade → dispatch_trade：option_strategy_engine->process_trade；save_trade_data；position_engine->process_trade
+- Contract → dispatch_contract：market_data_engine->process_contract
 
----
+register_handler / unregister_handler 为 no-op，不改变上述顺序。
 
-#### 3.2 实盘模式运行时（非 gRPC）
+### 4.4.1 回测 EventEngine 与 Live EventEngine 对比
 
-实盘运行时由 `entry_live` 启动，内部组件包括：
+| 维度 | 回测 EventEngine | Live EventEngine |
+|------|------------------|------------------|
+| 线程模型 | 无独立线程；put_event 同步执行 process | 单工作线程 run() 消费队列；单定时器线程 run_timer() 按间隔 put(Timer) |
+| 事件入口 | put_event 直接 switch 分支并调用 dispatch_* | put(event) 入队，工作线程从队列取事件后 process(event) 再 dispatch_* |
+| 事件类型 | Snapshot、Timer、Order、Trade（无 Contract） | Snapshot、Timer、Order、Trade、Contract |
+| 访问引擎 | 通过 set_main_engine 获得的 MainEngine* 访问 get_portfolio、option_strategy_engine、position_engine、hedge_engine、send_order、cancel_order、put_log_intent | 同上；另可访问 market_data_engine（dispatch_contract）、save_order_data、save_trade_data |
+| register_handler | no-op，返回 0 | no-op，返回 0 |
 
-- `engines::EventEngine`（带事件队列与定时器）。
-- `engines::MainEngine`（live 版本）。
-- `engines::DatabaseEngine`。
-- `engines::MarketDataEngine`。
-- `engines::IbGateway` 与 `IbApiTws`。
-- `core::OptionStrategyEngine` 与策略实例。
+### 4.5 回测与实盘 dispatch_timer 顺序对比
 
-##### 3.2.1 初始化与合约加载
+| 步骤 | 回测 dispatch_timer | Live dispatch_timer |
+|------|---------------------|----------------------|
+| 1 | option_strategy_engine->get_strategy()->on_timer() | ib_gateway->process_timer_event(Timer) |
+| 2 | position_engine->update_metrics(strategy_name, portfolio) | position_engine->process_timer_event(get_portfolio, &pos_logs)；对 pos_logs put_log_intent |
+| 3 | hedge_engine->process_hedging(..., out_orders, out_cancels, out_logs) | 对每策略：hedge_engine->process_hedging；对 orders/cancels/logs 逐条 send_order/cancel_order/put_log_intent |
+| 4 | 对 out_orders/out_cancels/out_logs 逐条 send_order/cancel_order/put_log_intent | option_strategy_engine->on_timer() |
 
-1. `entry_live` 安装信号处理器、加载 `.env`，然后创建：
-   - `EventEngine event_engine(1)`。
-   - `MainEngine main_engine(&event_engine)`。
-2. `MainEngine` 构造函数中：
-   - 将 `event_engine` 作为 `IEventEngine` 启动其工作线程与定时器线程。
-   - 创建 `LogEngine`、`PositionEngine`、`DatabaseEngine`、`MarketDataEngine`、`IbGateway`、`OptionStrategyEngine`。
-   - 配置 RuntimeAPI，将所有能力注入 `OptionStrategyEngine`。
-   - 调用 `db_engine_->load_contracts()`：
-     - 从 PostgreSQL 读取合约列表。
-     - 对每个合约构造 `Event(EventType::Contract, ContractData)` 并通过 `EventEngine` 发送。
-     - `EventEngine::dispatch_contract` 调用 `MarketDataEngine::process_contract`：
-       - 构建 `PortfolioData`、`ChainData` 和 `OptionData` 结构。
+回测为单策略，get_strategy() 直接返回当前策略；Live 为多策略，先按策略执行对冲再统一 on_timer。
 
-此时，组合结构在内存中已经成型，但价格与 Greeks 仍处于初始状态。
+### 4.6 Log 路径统一
 
-##### 3.2.2 与 IB/TWS 的连接
+- 策略或 Hedge 写日志：RuntimeAPI.write_log(log) 或 engine_->write_log(msg) → MainEngine.put_log_intent(log) → LogEngine.process_log_intent(data)。
+- LogEngine：仅当 data.level >= level_ 时输出；level 由 MainEngine::set_log_level 设置，回测与实盘一致。DISABLED(99) 可关闭全部输出。
 
-1. `entry_live` 调用 `main_engine.connect()`：
-   - `IbGateway::connect()` 使用内部 `IbApi` 与 IB/TWS 建立 TCP 会话。
-   - 成功后，IB API 会开始推送订单、成交、合约信息，以及行情数据。
-2. IB 回调通过 `IbApiTws` 调用 `IbGateway` 的私有回调：
-   - `on_order(OrderData)`、`on_trade(TradeData)`、`on_contract(ContractData)` 等。
-3. `IbGateway` 在这些回调中调用：
-   - `main_engine->put_event(EventType::Order, order)`。
-   - `main_engine->put_event(EventType::Trade, trade)`。
-   - `main_engine->put_event(EventType::Contract, contract)`（对于新增或更新合约）。
+### 4.7 Intent 在回测与 Live 中的执行路径
 
-##### 3.2.3 实盘事件流
+| Intent | 提交入口 | 回测执行路径 | Live 执行路径 |
+|--------|----------|--------------|---------------|
+| 下单 | RuntimeAPI.send_order → append_order | append_order → order_executor(req) → execute_order：撮合、add_order、put_event(Order)、put_event(Trade) | append_order → MainEngine::send_order(req) → IbGateway::send_order(req)；TWS 回报 → put_event(Order/Trade) |
+| 撤单 | append_cancel(req) | MainEngine::cancel_order：remove_order_tracking、更新订单状态、put_event(Order) | MainEngine::cancel_order → IbGateway::cancel_order |
+| 日志 | RuntimeAPI.write_log 或 put_log_intent | put_log_intent → LogEngine.process_log_intent | 同上 |
+| Hedge 产出 | dispatch_timer 内 process_hedging 得到 out_orders/out_cancels/out_logs | 对 out_* 逐条 main_engine_->send_order/cancel_order/put_log_intent | 同上 |
 
-`EventEngine` 在其主线程中循环：
-
-1. 从队列中取出事件。
-2. 根据事件类型调用相应 `dispatch_*` 方法：
-   - **订单事件**：
-     - 调用 `OptionStrategyEngine::process_order` 更新内部 OMS 状态。
-     - 调用 `DatabaseEngine::save_order_data` 将订单写入 PostgreSQL。
-   - **成交事件**：
-     - 调用 `OptionStrategyEngine::process_trade` 更新持仓与指标。
-     - 调用 `DatabaseEngine::save_trade_data` 将成交写入数据库。
-   - **合约事件**：
-     - 调用 `MarketDataEngine::process_contract` 更新组合结构。
-   - **快照事件**：
-     - 调用 `PortfolioData::apply_frame(snapshot)` 更新行情与 Greeks。
-
-定时器线程则周期性触发 `Timer` 事件：
-
-- 在 `dispatch_timer` 中调用 `OptionStrategyEngine::on_timer()`：
-  - 各策略执行自身的定时逻辑（如轮询检查风险指标、超时平仓、逐步调整头寸）。
-
-##### 3.2.4 策略与订单执行
-
-在实盘运行时，策略与订单执行路径为：
-
-1. 策略在 `on_init_logic` / `on_timer_logic` 等回调中：
-   - 读取 `PortfolioData` 与 `StrategyHolding`。
-   - 调用 `OptionStrategyEngine::send_order` 或 `send_combo_order` 提交订单。
-2. `OptionStrategyEngine` 将订单请求提交给 runtime（`RuntimeAPI::send_order`）：
-   - 对 live 版 MainEngine，最终调用 `IbGateway::send_order`。
-3. `IbGateway` 通过 `IbApi` 发送给 TWS，等待成交与订单状态回报。
-4. TWS 的回报再次通过事件流（`Order`/`Trade`）回到 `OptionStrategyEngine`，策略通过持仓或订单查询接口感知实际成交结果。
-
-##### 3.2.5 停止与资源回收
-
-当 `entry_live` 收到终止信号时：
-
-1. 将 `g_running` 置为 false，退出主循环。
-2. 调用 `main_engine.disconnect()`：
-   - 关闭与 IB/TWS 的连接。
-3. 调用 `main_engine.close()`：
-   - 关闭 `OptionStrategyEngine`，停止对策略的调用。
-   - 关闭 `DatabaseEngine`（关闭数据库连接）。
-   - 让 `EventEngine` 停止事件与定时器线程。
+策略与 Hedge 不直接调用 IbGateway 或 order_executor；一律通过 MainEngine 的 append_order/append_cancel/put_log_intent（或 RuntimeAPI 封装的 send_order、write_log）进入上述路径。
 
 ---
 
-#### 3.3 实盘 gRPC 模式运行时
+## Part 5. 运行时视图
 
-在 gRPC 模式下，`entry_live_grpc` 将 `MainEngine` 嵌入到一个 gRPC 服务器中：
+### 5.1 回测运行时
 
-- 后端服务通过 `EngineService` 接口控制 live 引擎：
-  - 连接/断开 gateway。
-  - 启停策略与行情。
-  - 查询当前订单、成交与持仓。
-  - 拉取日志与策略更新流，用于前端展示。
+**初始化**
 
-**典型调用路径（示例）**：
+1. entry_backtest 解析命令行（parquet 路径、策略名、fill_mode、fee_rate、slippage_bps、risk_free_rate、iv_price_mode、log、策略参数）。
+2. 构建 BacktestEngine；其内部创建 EventEngine 与 MainEngine（backtest），EventEngine.set_main_engine(main_engine)，MainEngine.set_order_executor(BacktestEngine::execute_order)。
+3. MainEngine 构造时组装 RuntimeAPI 并创建 OptionStrategyEngine、PositionEngine、LogEngine（默认 DISABLED）、HedgeEngine、ComboBuilderEngine；不创建 BacktestDataEngine（由 load_backtest_data 触发）。
 
-- 后端调用 `ConnectGateway`：
-  - `GrpcLiveEngineService::ConnectGateway` → `main_engine->connect()`。
+**数据与策略加载**
 
-- 后端调用 `AddStrategy`：
-  - proto 请求体携带 `strategy_class`、`portfolio_name` 与 `setting_json`。
-  - Service 将 `setting_json` 解析为参数字典，调用 `main_engine` 对接 `OptionStrategyEngine::add_strategy`。
+1. BacktestEngine::load_backtest_data(parquet_path, underlying_symbol) → MainEngine::load_backtest_data → BacktestDataEngine::load_parquet；构建 portfolio_data_、预计算 snapshots_、向 MainEngine 注册 portfolio 与 contract。
+2. BacktestEngine::add_strategy(strategy_name, setting) → OptionStrategyEngine::add_strategy(strategy_name, "backtest", setting)；通过 StrategyRegistry 创建策略实例并加入引擎。
 
-- 后端调用 `StreamStrategyUpdates`：
-  - Service 在一个 loop 中反复调用 `main_engine->pop_strategy_update`，将 `StrategyUpdateData` 转换为 proto `StrategyUpdate` 并写入 gRPC 流。
+**运行循环**
 
-gRPC 模式不改变内核逻辑，只是在外层加了一层远程控制与状态暴露的包装。
+1. BacktestEngine::run() 校验 data_engine 与 strategy 存在，若策略未 init 则 on_init/on_start。
+2. data_engine->iter_timesteps(callback)：对每一时间步：
+   - event_engine_->put_event(Snapshot, data_engine->get_precomputed_snapshot(step_count))
+   - event_engine_->put_event(Timer)
+   - EventEngine 同步执行 dispatch_snapshot（apply_frame）→ dispatch_timer（on_timer、update_metrics、process_hedging、执行意图）
+   - 策略或 Hedge 产生的订单经 append_order → order_executor（execute_order）：撮合、add_order、put_event(Order)、put_event(Trade)（含 combo 各 leg），EventEngine 再次同步 dispatch_order/dispatch_trade
+   - 收集指标、调用 timestep_callbacks_
+3. 汇总 BacktestResult（日序列、总 PnL、净 PnL、最大回撤、Sharpe 等），JSON 输出到 stdout。
 
----
+**资源**：无外部网络或数据库；所有状态在进程内。
 
-### 4. 数据与事件流
+#### 5.1.0 回测入口参数与结果（entry_backtest）
 
-本节从「数据结构演化」与「事件生命周期」两方面，总结 Otrader 的数据与事件流设计。
+- **必需参数**：第一类为 parquet 路径（单文件）或 `--files file1 file2 ...` 多文件；第二类为 strategy_name（策略类名）。
+- **可选参数**：--fill-mode（mid|bid|ask）、--fee-rate、--slippage-bps、--risk-free-rate、--iv-price-mode、--log（启用日志）；以及 key=value 形式的策略参数。
+- **环境变量**：BACKTEST_LOG=1 或 true 时开启日志级别为 INFO。
+- **执行**：单文件时构建一个 BacktestEngine，多文件时可构建多个或复用 engine 并 reset；每个 engine 先 load_backtest_data、add_strategy、configure_execution，再 run()。
+- **输出**：BacktestResult 汇总为 JSON 输出到 stdout，包含 status、strategy_name、portfolio_name、日序列（file、pnl、net_pnl、fees、orders、timesteps）、总 PnL、净 PnL、最大回撤、Sharpe 等；错误与进度可写 stderr。
 
-#### 4.1 合约与组合结构演化
+**多文件与并行**：entry_backtest 支持 --files 后跟多个 parquet 路径，再跟 strategy_name。若采用多 engine 并行（如每文件一个 BacktestEngine），各 engine 独立 load_backtest_data、add_strategy、run，结果在入口层聚合为日序列或汇总指标。若复用同一 engine，需在每文件前 reset() 清空数据与策略状态，再重新 load_backtest_data、add_strategy、run。
 
-1. **合约初始化阶段**：
-   - Backtest 模式中，合约可以由回测数据加载逻辑直接构建。
-   - Live 模式中，合约由 `DatabaseEngine::load_contracts` 从 PostgreSQL 读取，并转化为 `ContractData` 事件。
-2. **组合结构构建**：
-   - `MarketDataEngine::process_contract` 或对应 backtest 逻辑：
-     - 对每个合约决定其所属组合（`option_portfolio`）、标的（`option_underlying`）与链（`option_index`）。
-     - 构建或更新 `PortfolioData`、`UnderlyingData` 与 `ChainData`。
-   - 在初始构建完成后调用 `PortfolioData::finalize_chains`，锁定 `option_apply_order_`。
-3. **运行期结构维护**：
-   - 新合约的出现会触发组合结构的扩展。
-   - 到期合约可由 `DatabaseEngine::cleanup_expired_options` 或其他定期任务清理。
+#### 5.1.1 回测单步详细流程（单时间步）
 
-这种模型使合约信息的演化具有：「数据库 → ContractData 事件 → PortfolioData 结构 → Snapshot 应用」的清晰流向。
+1. BacktestEngine::run 内 iter_timesteps 回调得到 (ts, frame)。
+2. put_event(Snapshot, get_precomputed_snapshot(step_count)) → EventEngine.put_event 同步执行：
+   - dispatch_snapshot：main_engine_->get_portfolio(snap->portfolio_name)->apply_frame(*snap)，组合内价格与 Greeks 更新。
+3. put_event(Timer) → EventEngine.put_event 同步执行：
+   - dispatch_timer：  
+     a. se->get_strategy()->on_timer()：策略读 portfolio、holding，可能调用 send_order/send_combo_order。  
+     b. send_order 内部：RuntimeAPI.send_order → MainEngine.append_order → order_executor（即 execute_order）。  
+     c. execute_order：生成 orderid、按 fill_mode 取价、撮合、main_engine_->add_order、put_event(Order)、put_event(Trade)。  
+     d. put_event(Order) 再次进入 EventEngine：dispatch_order → position_engine->process_order、option_strategy_engine->process_order。  
+     e. put_event(Trade)：dispatch_trade → position_engine->process_trade、option_strategy_engine->process_trade。  
+     f. position_engine->update_metrics。  
+     g. hedge_engine->process_hedging(..., out_orders, out_cancels, out_logs)；对结果逐条 send_order/cancel_order/put_log_intent。  
+4. 本步结束后 BacktestEngine 从 strategy_engine->get_strategy_holding() 取 PnL、Delta 等，更新 current_pnl_、max_drawdown_ 等，调用 timestep_callbacks_。
 
-#### 4.2 行情与快照流
+### 5.2 实盘运行时（非 gRPC）
 
-行情与 Greeks 的流动路径可以归纳为：
+**初始化**
 
-1. **数据源产生帧数据**：
-   - 回测：由 `BacktestDataEngine` 读取 parquet 帧。
-   - 实盘：由外部行情处理进程/组件，根据 Tick/Greeks 生成 `PortfolioSnapshot`。
-2. **快照事件分发**：
-   - 回测：在 `BacktestEngine::run()` 中，直接调用 `PortfolioData::apply_frame` 或通过 `EventEngine` 分发。
-   - 实盘：外部组件构造 `Event(EventType::Snapshot, snapshot)` 并通过 `EventEngine::put_event` 发送。
-3. **组合更新与策略感知**：
-   - `PortfolioData::apply_frame` 按固定顺序将 snapshot 写入所有期权与标的。
-   - 策略在下一次 `on_timer` 调用或自定义触发点，从组合中读取最新价格与 Greeks，用于生成交易信号。
+1. entry_live 安装 SIGINT/SIGTERM、load_dotenv。
+2. 创建 EventEngine(interval)、MainEngine(&event_engine)；MainEngine 构造时创建各引擎、组装 RuntimeAPI、创建 OptionStrategyEngine、event_engine->start()（启动队列线程与定时器线程）、event_engine->set_main_engine(this)、db_engine_->load_contracts()。
+3. load_contracts 从 PostgreSQL 读取合约，按固定顺序 put_event(Contract)；EventEngine 工作线程 process 时 dispatch_contract → MarketDataEngine::process_contract，建立 portfolios_ 与 option_apply_order_。
 
-这种「快照帧」设计减少了 per-option 粒度的事件数量，适合高频期权组合作用场景。
+**连接与事件流**
 
-#### 4.3 订单与成交生命周期
+1. main_engine.connect() → IbGateway::connect()，与 TWS 建立连接。
+2. 定时器线程按间隔 put(Timer)；TWS 回报通过 IbGateway 回调 main_engine->put_event(Order/Trade/Contract)，入队。
+3. 工作线程 run() 从队列取事件，process(event) 按类型 dispatch；Snapshot 事件由外部数据源或上游组件 put，用于更新组合价格与 Greeks。
 
-订单从生成到归档的典型生命周期：
+**策略与订单**
 
-1. **策略生成订单请求**：
-   - 策略调用 `OptionStrategyEngine::send_order`。
-   - OptionStrategyEngine 通过 RuntimeAPI 调用 `MainEngine` 的实际下单实现。
-2. **运行时执行下单**：
-   - 回测：
-     - `BacktestEngine::execute_order` 直接在内存中撮合出成交价与成交量。
-     - 立即构造 `OrderData` + `TradeData`，反向调用 `OptionStrategyEngine::process_order/process_trade`。
-   - 实盘：
-     - `IbGateway::send_order` 将订单发送到 TWS。
-     - 等待 TWS 汇报订单状态与成交。
-3. **订单与成交事件回流**：
-   - 所有订单状态变化与成交事件重新封装为 `Event(EventType::Order or Trade, payload)`，交给 EventEngine。
-   - EventEngine 调用 `OptionStrategyEngine::process_order/process_trade` 更新内部 OMS。
-4. **持久化与对外暴露**：
-   - Live 模式中，`DatabaseEngine::save_order_data/save_trade_data` 将数据写入 PostgreSQL。
-   - gRPC `GetOrdersAndTrades` 调用从 DB 或 OptionStrategyEngine 集合中读取并转化为 proto `OrderRecord`、`TradeRecord`。
+1. 策略通过 gRPC 或后续扩展方式添加（AddStrategy）；OptionStrategyEngine::add_strategy 创建实例。
+2. 策略在 on_timer 中通过 RuntimeAPI 发单；append_order → MainEngine::send_order → IbGateway::send_order。
+3. 回报经 put_event(Order/Trade) 入队，dispatch_order/dispatch_trade 更新 OptionStrategyEngine 与 PositionEngine，并 save_order_data/save_trade_data。
 
-这样，无论在回测还是实盘环境中，策略侧看到的订单生命周期语义是一致的。
+**停止**：g_running 置 false 后 main_engine.disconnect()、main_engine.close()。
 
-#### 4.4 策略更新与监控流
+#### 5.2.1 实盘 MainEngine 构造与 load_contracts
 
-策略在运行过程中，可以通过两种方式对外暴露状态变化：
+1. MainEngine(&event_engine) 内：若未传 event_engine 则内部创建 EventEngine(1)；event_engine_ptr_->start() 启动队列线程与定时器线程。
+2. 依次创建 LogEngine、PositionEngine、DatabaseEngine、MarketDataEngine、IbGateway。
+3. 组装 RuntimeAPI（send_order→append_order，get_portfolio→get_portfolio 等），创建 OptionStrategyEngine(api)，event_engine_ptr_->set_main_engine(this)。
+4. db_engine_->load_contracts()：从 PostgreSQL 读合约，按序对每条 put_event(EventType::Contract, ContractData)。事件入队后由工作线程 process → dispatch_contract → MarketDataEngine::process_contract，建立 portfolios_ 与 option_apply_order_。此时组合结构已就绪，价格与 Greeks 仍为初始值，待 Snapshot 事件更新。
 
-- **策略持仓**：
-  - `StrategyHolding` 结构体记录了标的与所有期权/组合的持仓与 Greeks。
-  - Live 模式下，gRPC `GetStrategyHoldings` 将这些信息序列化为 JSON 以便前端展示。
+#### 5.2.2 Live 启动后首次 Timer 前的状态
 
-- **策略更新事件**：
-  - 策略通过 `RuntimeAPI::put_strategy_event` 提交 `StrategyUpdateData`。
-  - MainEngine 将其推入一个 `deque`，并提供 `pop_strategy_update` 供消费。
-  - gRPC `StreamStrategyUpdates` 使用一个 long-lived stream 将这些事件推送到外部。
+- MainEngine 构造完成时：EventEngine 已 start（队列线程与定时器线程运行）；load_contracts 已执行完毕，Contract 事件已被工作线程消费，MarketDataEngine 已建立 portfolios_ 与 option_apply_order_。
+- 此时组合结构完整，但各 PortfolioData 内价格与 Greeks 仍为初始值（如 0）；尚未有 Snapshot 事件注入。若需策略在首帧就有行情，需在 connect 或后续由外部先 put_event(Snapshot, ...)。
+- 定时器线程按 interval 秒投递 Timer；首个 Timer 到达后 dispatch_timer 会执行（ib_gateway process_timer_event、position process_timer_event、每策略 process_hedging、option_strategy_engine->on_timer()）。若尚未添加策略，on_timer 可能为空遍历。
 
-这一机制方便构建「策略看板」、「风控监控」等上层产品。
+#### 5.2.3 实盘事件来源
 
----
+- **Timer**：定时器线程按 interval 秒 put(Event(Timer))。
+- **Order / Trade**：IbGateway 在 TWS 回报回调中调用 main_engine->put_event(Order/Trade)。
+- **Contract**：仅启动时 load_contracts 发出；后续若有合约变更可再 put_event(Contract)。
+- **Snapshot**：由外部行情处理或上游服务组装 PortfolioSnapshot 后 put_event(Snapshot)；若实盘暂未接行情，可暂无 Snapshot，策略仅能依赖 Contract 阶段的结构与后续接入的 Snapshot。
 
-### 5. 扩展性与演进方向
+### 5.3 实盘 gRPC 运行时
 
-#### 5.1 策略扩展
+- entry_live_grpc 与 entry_live 类似创建 EventEngine 与 MainEngine，并构造 GrpcLiveEngineService(&main_engine)，gRPC Server 监听 0.0.0.0:50051，RegisterService(&service)，BuildAndStart() 后 server->Wait() 阻塞。
+- 后端通过 EngineService 调用 GetStatus、ListStrategies、ConnectGateway、DisconnectGateway、StartMarketData、StopMarketData、AddStrategy、InitStrategy、RemoveStrategy、GetOrdersAndTrades、StreamLogs、StreamStrategyUpdates 等；各 RPC 内部直接调用 main_engine 的对应方法。
+- 进程终止前 disconnect、close。
 
-新增策略的标准流程：
+#### 5.3.1 gRPC 服务接口（EngineService）概览
 
-1. 在 `strategy/` 下创建新的策略类头文件与实现文件，派生自 `OptionStrategyTemplate`。
-2. 在类中通过构造函数接收：
-   - `core::OptionStrategyEngine*`。
-   - `strategy_name`。
-   - `portfolio_name`。
-   - `setting`（参数字典）。
-3. 实现必要的生命周期与信号逻辑（`on_init_logic`、`on_timer_logic`、`on_stop_logic` 等）。
-4. 在 `strategy/strategy_registry.cpp` 中：
-   - `#include "your_strategy.hpp"`。
-   - 添加一行 `REGISTER_STRATEGY(YourStrategyClassName);`。
+GrpcLiveEngineService 实现 proto 定义的 EngineService，各 RPC 直接调用 MainEngine 或 OptionStrategyEngine 的对应能力：
 
-完成上述步骤后：
-
-- 回测模式可以在 `entry_backtest` 中通过策略类名进行回测。
-- Live 模式可以通过 gRPC 接口 `ListStrategyClasses` 发现新策略类型，并通过 `AddStrategy` 创建与配置。
-
-#### 5.2 数据源扩展
-
-当前设计已经为多种数据源预留了扩展空间：
-
-- 回测：
-  - `BacktestDataEngine` 可扩展支持多标的、跨品种与更细粒度的频率。
-  - 可增加滑点与成交优先级模型。
-- 实盘：
-  - `MarketDataEngine` 以 `PortfolioSnapshot` 为输入，数据源可以是：
-    - IB 实时数据经过预处理的快照。
-    - 外部定价模型或聚合服务输出的 Greeks 帧。
-  - 只要能组装出 `PortfolioSnapshot` 并发出 `EventType::Snapshot` 事件，策略与核心逻辑均无需变更。
-
-#### 5.3 风控与监控扩展
-
-基于现有结构，可以逐步引入：
-
-- 账户级风控引擎：
-  - 在 `MainEngine` 或单独的 `RiskEngine` 中，读取所有策略持仓与 PnL，设置全局风控阈值（如单日最大亏损、最大仓位等）。
-  - 为 `OptionStrategyEngine` 增加风控反馈接口，用于拒绝或缩减部分下单请求。
-
-- 多级监控：
-  - 在 gRPC 层扩展更多 RPC，例如实时推送全局 PnL 曲线、风险暴露等。
-  - 引入订阅机制，使前端可以按策略/组合选择订阅粒度。
-
-#### 5.4 多资产与多账户支持
-
-尽管当前设计以单账户、单底层为主，但在结构上已经具备一定的可扩展性：
-
-- `PortfolioData` 可以按不同组合名区分不同底层与资产集合。
-- `StrategyHolding` 可以扩展字段以支持多账户区分。
-- `IbGateway` 可以扩展为多实例或多账号配置。
-
-这些演进仅需在现有数据结构与接口上做增量设计，无需推翻当前主干架构。
+| RPC | 职责 |
+|-----|------|
+| GetStatus | 引擎运行状态、是否连接 IB 等 |
+| ListStrategies | 当前加载策略列表（名、类、组合、状态） |
+| ConnectGateway / DisconnectGateway | 连接/断开 IbGateway |
+| StartMarketData / StopMarketData | 启停行情更新（MarketDataEngine） |
+| StartStrategy / StopStrategy | 启停指定策略 |
+| StreamLogs | 流式输出日志（从 MainEngine 日志队列消费） |
+| StreamStrategyUpdates | 流式输出策略更新（从 MainEngine strategy_updates_ 消费） |
+| GetOrdersAndTrades | 当前订单与成交列表 |
+| ListPortfolios / GetPortfoliosMeta | 组合列表与元信息 |
+| ListStrategyClasses | 已注册策略类名（StrategyRegistry） |
+| GetRemovedStrategies | 已移除策略列表 |
+| AddStrategy / RestoreStrategy / InitStrategy / RemoveStrategy / DeleteStrategy | 策略生命周期管理 |
+| GetStrategyHoldings | 各策略持仓 JSON |
 
 ---
 
-### 6. 小结
+## Part 6. 数据流
 
-本架构文档从模块视图、运行时视图、数据与事件流以及扩展性四个方面，对 Otrader C++ 子系统进行了整体梳理。  
-核心特点可以概括为：
+### 6.1 合约与组合结构
 
-- **统一策略引擎**：backtest 与 live 共用 `OptionStrategyEngine` 与策略模板，只在 RuntimeAPI 实现上有所差异。
-- **强类型组合模型**：以 `PortfolioData` 为中心，将合约、期权链、标的与快照统一纳入一个可组合的视图中。
-- **事件驱动运行时**：使用 `EventEngine` 协调订单、成交、合约与快照流，清晰地分离生产者与消费者。
-- **良好的扩展边界**：策略、数据源、风控与监控都可以在现有结构基础上平滑演进。
+**回测 parquet 与快照格式（概念）**
 
-在后续的演进中，可以围绕：
+- 回测数据来自 parquet 文件；时间列默认 ts_recv，标的符号可从文件名推断或显式传入。
+- BacktestDataEngine 在 load_parquet 时解析标的与期权符号，构建 PortfolioData 与 option_apply_order_；每帧对应 parquet 中按时间分组的一批行，build_snapshot_from_frame 将该帧的 bid/ask/last/delta/gamma/theta/vega/iv 等按 option_apply_order_ 顺序填入 PortfolioSnapshot 的向量。
+- 预计算后 snapshots_.size() 等于时间步数；run 时每步取 get_precomputed_snapshot(step_count) 作为 Snapshot 事件，无需在运行时再解析 parquet。快照格式与 PortfolioData::apply_frame 的约定一致（underlying 字段 + option 向量顺序）。
 
-- 更丰富的风险度量与报表能力。
-- 对多品种、多账户、多市场的支持。
-- 更灵活的策略参数管理与运行配置。
+**回测**
 
-进一步增强 Otrader 在生产环境中的适用性与可维护性。
+- 合约与组合在 BacktestDataEngine::load_parquet 时建立：从 parquet 解析标的与期权符号，create_portfolio_data、build_option_apply_index、precompute_snapshots；portfolio_data_ 注册到 MainEngine，合约注册到 MainEngine。组合结构在 load 后固定，行情由每步 Snapshot 的 apply_frame 更新。
 
+**实盘**
+
+- 合约来自 DatabaseEngine::load_contracts，按固定顺序（如先 equity 后 option）put_event(Contract)。MarketDataEngine::process_contract 维护 contracts_、portfolios_（add_option、set_underlying），每次 add_option 后 finalize_chains，使 option_apply_order_ 稳定，供 apply_frame 使用。后续 Snapshot 事件只更新价格与 Greeks，不改变结构。
+
+### 6.2 行情与快照流
+
+- **回测**：BacktestDataEngine 预计算每帧 PortfolioSnapshot（与 portfolio option_apply_order 一致）；run 时每步 put_event(Snapshot, get_precomputed_snapshot(step))，再 put_event(Timer)。dispatch_snapshot 内 get_portfolio(snap->portfolio_name)->apply_frame(*snap)。
+- **实盘**：组合结构由 Contract 事件建立；行情/Greeks 由外部或上游组装 PortfolioSnapshot 后 put_event(Snapshot)；dispatch_snapshot 同样 get_portfolio(name)->apply_frame(snapshot)。MarketDataEngine 不直接产生 Tick/Greeks，只维护组合结构与 apply_frame 的兼容顺序。
+
+### 6.3 订单与成交流
+
+1. **策略产单**：策略 on_timer 等中调用 engine_->send_order（即 RuntimeAPI.send_order）→ MainEngine.append_order。
+2. **回测执行**：append_order → order_executor（BacktestEngine::execute_order）：生成 orderid、撮合、add_order、put_event(Order)、put_event(Trade)；EventEngine 同步 dispatch_order/dispatch_trade，更新 PositionEngine 与 OptionStrategyEngine。
+3. **实盘执行**：append_order → MainEngine::send_order → IbGateway::send_order；TWS 回报经 IbGateway 回调 put_event(Order)/put_event(Trade)，入队后 dispatch_order/dispatch_trade 更新状态并 save_order_data/save_trade_data。
+4. **策略感知**：通过 OptionStrategyEngine 的 orders_/trades_ 与 get_strategy_holding 的持仓变化；策略不直接依赖 EventEngine。
+
+### 6.4 合约 → 组合 → 快照 的演化
+
+- **回测**：BacktestDataEngine::load_parquet 阶段从 parquet 解析标的与期权符号 → create_portfolio_data 创建 PortfolioData、add_option/set_underlying → build_option_apply_index、precompute_snapshots 生成与 option_apply_order 一致的快照序列。运行时无新增合约；每步仅 apply_frame(snapshot) 更新数值。
+- **实盘**：DatabaseEngine::load_contracts 从 DB 读 ContractData → put_event(Contract) → MarketDataEngine::process_contract 中 get_or_create_portfolio、add_option、set_underlying、finalize_chains。组合结构在 load_contracts 完成后稳定；后续 Snapshot 事件仅更新价格与 Greeks。若未来支持运行中新增合约，可再 put_event(Contract)，由 process_contract 扩展结构。
+
+### 6.5 回测与实盘数据流对比（概要）
+
+| 阶段 | 回测 | 实盘 |
+|------|------|------|
+| 合约与组合结构 | BacktestDataEngine::load_parquet 内 create_portfolio_data、add_option、finalize_chains；注册到 MainEngine | load_contracts 发 Contract 事件 → MarketDataEngine::process_contract 建 portfolios_、finalize_chains |
+| 行情与 Greeks | 每步 get_precomputed_snapshot(step) 作为 Snapshot 事件；dispatch_snapshot → apply_frame | 外部或上游组装 PortfolioSnapshot 后 put_event(Snapshot)；同样 dispatch_snapshot → apply_frame |
+| 订单执行 | append_order → order_executor（execute_order）撮合 → add_order、put_event(Order)、put_event(Trade) | append_order → IbGateway::send_order；TWS 回报 → put_event(Order/Trade) |
+| 订单/成交持久化 | 无 | dispatch_order/dispatch_trade 内 save_order_data/save_trade_data |
+| 策略驱动 | 每步先 Snapshot 再 Timer；dispatch_timer 内 on_timer、update_metrics、process_hedging、执行意图 | 定时器线程 put(Timer)；外部回报 put(Order/Trade)；dispatch_timer 内先 ib_gateway、position、hedge，最后 on_timer |
+
+### 6.6 策略更新与监控流（Live）
+
+- 策略通过 RuntimeAPI.put_strategy_event(StrategyUpdateData) 提交更新；MainEngine::on_strategy_event 将数据推入 strategy_updates_ 队列。
+- gRPC StreamStrategyUpdates 在循环中调用 main_engine->pop_strategy_update，将 StrategyUpdateData 转为 proto StrategyUpdate 写入流，供后端或前端展示。
+- 日志流：MainEngine 可将 LogData 写入 log_stream_buffer_，StreamLogs 从该队列消费并推送给客户端。
+
+### 6.7 回测与实盘数据流时序（概念）
+
+**回测**：  
+T0 load_backtest_data → 建立组合、预计算快照；T1 add_strategy → 创建策略并绑定 "backtest" 组合；T2 run() 开始 → 每步：先 put_event(Snapshot) 更新组合数值 → put_event(Timer) → dispatch_timer 内 on_timer 可能 send_order → execute_order 撮合 → put_event(Order)、put_event(Trade) → dispatch_order、dispatch_trade 更新状态 → 下一步。无外部时钟，时间由 iter_timesteps 的帧顺序决定。
+
+**Live**：  
+T0 MainEngine 构造 → load_contracts 发 Contract → 工作线程 process 后 dispatch_contract 建组合；T1 connect() 连 TWS；T2 定时器线程周期性 put(Timer)，外部回报 put(Order/Trade)；工作线程依次 process(Snapshot)、process(Timer)、process(Order)、process(Trade)。策略通过 AddStrategy 添加后，在 dispatch_timer 的 on_timer() 中被驱动；行情由外部 put(Snapshot) 注入，无固定「每步」概念，取决于 Timer 间隔与 Snapshot 到达频率。
+
+---
+
+## Part 7. 扩展点
+
+### 7.1 新增策略
+
+1. 在 strategy/ 下新增派生 OptionStrategyTemplate 的类，实现 on_init_logic、on_timer_logic、on_stop_logic 等。
+2. 在 strategy_registry.cpp 中 include 新头文件，并添加 REGISTER_STRATEGY(YourStrategyClassName)。
+3. 回测在 entry_backtest 命令行传入策略类名；实盘通过 gRPC AddStrategy 传入类名与参数。
+
+### 7.2 数据源
+
+- **回测**：BacktestDataEngine 可扩展支持更多 parquet 格式或频率；快照格式保持 PortfolioSnapshot 与 option_apply_order 一致即可。
+- **实盘**：只要能组装 PortfolioSnapshot 并按组合名 put_event(Snapshot)，即可对接不同行情源；MarketDataEngine 无需改逻辑。
+
+### 7.3 风控与监控
+
+- 可在 MainEngine 或单独 RiskEngine 中在 append_order 前做限额、仓位检查；或在对冲逻辑中扩展 HedgeEngine 参数。
+- gRPC 已暴露 StreamLogs、StreamStrategyUpdates、GetStrategyHoldings 等，可用于前端或监控；可扩展更多 RPC 或过滤条件。
+
+### 7.4 多组合与多账户
+
+- PortfolioData 按 name 区分；StrategyHolding 按 strategy_name 区分。多账户可在 ContractData 或配置中扩展 account 等字段，IbGateway 与 DatabaseEngine 按需扩展。
+
+### 7.5 新增入口或运行模式
+
+- 若需新的可执行程序（如仅行情订阅、仅风控等），可参考 entry_live 或 entry_live_grpc：创建 EventEngine 与 MainEngine，按需调用 connect、load_contracts、add_strategy 等；不必须启动 gRPC。
+- 若需回测多文件并行，entry_backtest 已支持 --files 多文件；每文件可对应独立 BacktestEngine 实例或复用 engine 后 reset。
+
+### 7.6 替换基础设施实现
+
+- **网关**：IbGateway 内部通过 IbApi 抽象与 IbApiTws 实现解耦；可增加其他 IbApi 实现或其它经纪商网关，只要在回报时调用 main_engine->put_event(Order/Trade/Contract) 即可。
+- **数据库**：DatabaseEngine 当前为 PostgreSQL；若更换存储，需实现 load_contracts（按序发 Contract）、save_order_data、save_trade_data 等语义。
+- **行情**：实盘行情只要产出 PortfolioSnapshot 并按组合名 put_event(Snapshot, snapshot)，无需改 MarketDataEngine 或策略逻辑。
+
+### 7.7 扩展时的注意事项
+
+- **新增策略**：必须实现 OptionStrategyTemplate 的 on_init_logic、on_timer_logic、on_stop_logic；在 strategy_registry.cpp 中 REGISTER_STRATEGY；回测使用固定 portfolio 名 "backtest"，live 由 AddStrategy 指定 portfolio_name。
+- **新增事件类型**：需在 EventType 与 EventPayload 中增加；在 EventEngine 的 process/put_event 分支中增加对应 dispatch_*；若有新消费者，在 dispatch 顺序中明确调用顺序。
+- **新增 Runtime 能力**：若 MainEngine 需暴露新接口（如风控开关），可在 MainEngine 与 GrpcLiveEngineService 中增加方法；Core 层仍不直接依赖这些能力，仅通过 RuntimeAPI 已定义的 get_*、send_order 等与 Runtime 交互。
+- **多文件回测**：entry_backtest 的 --files 模式可多文件；每文件可对应独立 BacktestEngine 或复用同一 engine 并 reset()；reset 需清空数据、策略与指标但保留引擎实例，以便迭代下一文件。
+
+---
+
+## Part 8. 小结
+
+- **Domain Core**：纯逻辑、无 Context；OptionStrategyEngine 通过 RuntimeAPI 与策略解耦；Position/Hedge/ComboBuilder 均为 caller 传参或产出 Intent，由 Runtime 执行。
+- **Runtime**：Backtest 与 Live 差异集中在 EventEngine（同步 vs 队列+线程）、MainEngine（有无网关/数据库）、以及数据来源（预计算快照 vs Contract+Snapshot）。事件分发顺序写死，无 handler 注册。
+- **Infrastructure**：回测数据、实盘行情/组合、数据库、网关各司其职；合约与组合结构的建立方式不同（load 时建 vs Contract 事件建），但 Snapshot 应用路径一致（apply_frame）。
+- **事件与意图**：Event 入（Timer/Snapshot/Order/Trade/Contract），Intent 出（OrderRequest、CancelRequest、LogData）；Log 不占事件类型，统一经 put_log_intent → LogEngine。
+
+本架构使回测与实盘共享同一套领域核心与策略实现，仅通过 Runtime 与 Infrastructure 切换数据与执行环境，便于维护与扩展。
+
+### 8.1 架构要点速查
+
+| 维度 | 要点 |
+|------|------|
+| 分层 | Domain Core（纯逻辑）→ Runtime（调度与执行）→ Infrastructure（数据、持久化、网关）→ Utilities（数据与抽象） |
+| 事件 | Event 入：Timer、Snapshot、Order、Trade、Contract；无独立 Log 事件 |
+| 意图 | Intent 出：OrderRequest、CancelRequest、LogData；执行由 Runtime 完成 |
+| 策略环境 | OptionStrategyEngine 仅持 RuntimeAPI；策略通过 API 读组合/持仓、发单、写日志 |
+| 分发 | EventEngine 按类型写死顺序 dispatch；无动态 handler 注册 |
+| 回测 | BacktestEngine 驱动；每步 Snapshot → Timer；order_executor 撮合后 put_event(Order/Trade) 回灌 |
+| 实盘 | 队列+定时器线程；load_contracts 发 Contract 建组合；Snapshot 更行情；IbGateway 回报 put_event |
+| 日志 | put_log_intent → LogEngine；level 统一控制；单一 sink |
+
+
+### 8.3 架构层面的风险与限制
+
+- **事件顺序**：dispatch 顺序写死，若新增事件类型或需调整顺序，需改 EventEngine 实现；多策略 Live 下 dispatch_timer 内先 hedge 再 on_timer，策略看到的订单/成交状态已包含对冲结果。
+- **单工作线程**：Live EventEngine 单线程消费事件队列；若某次 dispatch 耗时过长，会阻塞后续事件。Timer 与外部回报共享同一队列，需避免在 on_timer 或 process_contract 中做重计算。
+- **组合结构一致性**：apply_frame 依赖 option_apply_order_ 与 Snapshot 向量顺序一致；回测在 load 时确定，Live 在 load_contracts 后 process_contract 确定。若 Contract 事件顺序或组合拓扑与 Snapshot 生产者不一致，会导致错位。
+- **策略与 Runtime 契约**：策略仅通过 RuntimeAPI 访问环境；若 Runtime 未正确注入 get_portfolio、get_contract 等（如组合名错误、未 load_contracts），策略可能得到空指针或错误数据，需在调用方保证。
+- **回测与实盘差异**：回测为同步、无网络、无持久化；实盘为异步队列、有网关与 DB。策略逻辑一致，但执行延迟、滑点、部分成交等仅在实盘存在，回测默认即时全成。
+
+---
+
+## 附录 A. 事件与意图速查表
+
+### A.1 Event 类型与 Payload
+
+| EventType | Payload 类型 | 典型生产者 | 典型消费者 |
+|-----------|--------------|------------|------------|
+| Timer | （无或 monostate） | 回测 run 每步；Live 定时器线程 | dispatch_timer |
+| Snapshot | PortfolioSnapshot | BacktestDataEngine；Live 外部行情 | dispatch_snapshot → apply_frame |
+| Order | OrderData | execute_order 后；IbGateway 回报 | dispatch_order |
+| Trade | TradeData | execute_order 后；IbGateway 回报 | dispatch_trade |
+| Contract | ContractData | load_contracts；IbGateway（若推送） | dispatch_contract → process_contract |
+
+### A.2 Intent 提交路径
+
+| Intent | 提交方式 | 执行方 |
+|--------|----------|--------|
+| 下单 | api_.send_order(strategy_name, req) → append_order → send_order | 回测 order_executor；Live IbGateway |
+| 撤单 | append_cancel(req) → cancel_order | 回测更新状态+put_event(Order)；Live IbGateway |
+| 日志 | api_.write_log(log) 或 put_log_intent(log) | LogEngine.process_log_intent |
+
+### A.3 回测与 Live dispatch 顺序对照
+
+- **Snapshot**：一致；get_portfolio(name)->apply_frame(snapshot)。
+- **Timer**：回测顺序为 on_timer → update_metrics → process_hedging → 执行 orders/cancels/logs；Live 为 ib_gateway process_timer_event → position process_timer_event + put_log_intent → 每策略 process_hedging → 执行 → on_timer。
+- **Order**：一致；position_engine->process_order；option_strategy_engine->process_order；Live 额外 save_order_data。
+- **Trade**：回测先 position 后 option_strategy_engine；Live 先 option_strategy_engine、save_trade_data，再 position->process_trade。
+- **Contract**：仅 Live；dispatch_contract → market_data_engine->process_contract。
+
+---
+
+## 附录 B. 逻辑闭环（文字描述）
+
+**回测单步闭环**：  
+iter_timesteps 每步 → put_event(Snapshot, get_precomputed_snapshot(step)) → put_event(Timer) → EventEngine 同步 process → dispatch_snapshot → get_portfolio()->apply_frame(snap) → dispatch_timer → on_timer / update_metrics / process_hedging → 产生 intents → main_engine_->send_order/cancel_order/put_log_intent → 若为订单则 order_executor 撮合 → main_engine_->add_order、put_event(Order)、put_event(Trade) → event_engine_->put_event 再次进入 → dispatch_order / dispatch_trade 更新状态。
+
+**Live 事件闭环**：  
+定时器或外部 → put(Event) 入队 → run() 取事件 process → dispatch_snapshot / dispatch_timer / dispatch_order / dispatch_trade / dispatch_contract。Snapshot 更新 portfolio；Contract 建立/更新 portfolio（process_contract + finalize_chains）。position/hedge 在 dispatch_timer 中产出 intents → send_order/cancel_order/put_log_intent → Gateway 执行。回报经 main_engine->put_event → event_engine->put(e) 入队 → 下一轮 process 更新状态；dispatch_order/dispatch_trade 内 save_order_data/save_trade_data。
+
+策略与 Hedge 仅通过 RuntimeAPI 读入参、产出 orders/cancels/logs；执行与回灌均由 MainEngine（append_*、put_event）完成，不直接依赖 IEventEngine。
+
+---
+
+## 附录 D. 主要调用关系（谁调用谁）
+
+以下为架构层面的典型调用方向，便于理解数据与控制流。
+
+- **entry_backtest** → BacktestEngine（构造、load_backtest_data、add_strategy、configure_execution、run）。
+- **BacktestEngine** → EventEngine.put_event(Snapshot/Timer)；MainEngine.load_backtest_data、get_portfolio、option_strategy_engine、set_order_executor；order_executor 即 BacktestEngine::execute_order。
+- **BacktestEngine::execute_order** → MainEngine.add_order、put_event(Order)、put_event(Trade)。
+- **EventEngine（回测）** → MainEngine.get_portfolio、option_strategy_engine、position_engine、hedge_engine、send_order、cancel_order、put_log_intent；dispatch_timer 内 get_strategy()->on_timer()、update_metrics、process_hedging。
+- **OptionStrategyEngine** → 仅通过 RuntimeAPI 调用 MainEngine 能力（send_order、get_portfolio 等）；内部被 EventEngine 调用 process_order、process_trade、on_timer。
+- **策略** → engine_->send_order、get_portfolio、get_holding、write_log、get_combo_builder_engine、get_hedge_engine 等（均来自 RuntimeAPI）。
+- **entry_live** → EventEngine、MainEngine、main_engine.connect()、主循环、disconnect、close。
+- **MainEngine（live）** → DatabaseEngine.load_contracts；EventEngine.set_main_engine；各引擎创建与 RuntimeAPI 组装。
+- **load_contracts** → put_event(Contract) → EventEngine 入队 → process → dispatch_contract → MarketDataEngine.process_contract。
+- **IbGateway** → main_engine->put_event(Order/Trade/Contract) 回报。
+- **GrpcLiveEngineService** → main_engine 的 get_portfolio、option_strategy_engine、connect、send_order、add_strategy、pop_strategy_update 等。
+
+---
+
+## 附录 E. Proto 消息与服务摘要
+
+- **EngineStatus**：running、connected、detail 等，GetStatus 响应。
+- **StrategySummary**：strategy_name、class_name、portfolio、status，ListStrategies 流式条目。
+- **Empty**：无参请求占位。
+- **LogLine**：StreamLogs 流式条目。
+- **StrategyUpdate**：strategy_name、class_name、portfolio、json_payload，StreamStrategyUpdates 流式条目。
+- **AddStrategyRequest**：strategy_class、portfolio_name、setting_json 等；AddStrategy 请求。
+- **OrdersAndTradesResponse**：当前订单与成交列表。
+- **ListPortfoliosResponse**：组合名称或元信息列表。
+- **ListStrategyClassesResponse**：已注册策略类名列表。
+- **GetRemovedStrategiesResponse**：已移除策略列表。
+- **StrategyHoldingsResponse**：各策略持仓 JSON。
+- **EngineService**：定义 GetStatus、ListStrategies、ConnectGateway、DisconnectGateway、StartMarketData、StopMarketData、StartStrategy、StopStrategy、StreamLogs、StreamStrategyUpdates、GetOrdersAndTrades、ListPortfolios、GetPortfoliosMeta、ListStrategyClasses、GetRemovedStrategies、AddStrategy、RestoreStrategy、InitStrategy、RemoveStrategy、DeleteStrategy、GetStrategyHoldings 等 RPC。
+
+具体字段与编号以 proto 文件为准。
+
+---
+
+## 附录 H. 设计决策与取舍（架构层面）
+
+- **为何 Core 不持 IEventEngine**：Core 与策略只应产出「意图」（订单、撤单、日志），由 Runtime 决定何时、以何种方式执行。若 Core 持 IEventEngine，则与「Event 入、Intent 出」的边界模糊，且回测与 Live 的事件模型不同（同步 vs 队列），Core 难以抽象统一。
+- **为何事件分发顺序写死**：可预测、易调试、无隐藏依赖；扩展新事件类型时需改 EventEngine 代码，但换来的是一目了然的调用链。若未来需要可配置顺序，可在 dispatch 内引入「阶段列表」配置，而不必改为动态 handler 注册。
+- **为何 Log 不作为 Event 类型**：日志是「侧效应」，不需要参与事件驱动的状态机；统一为 Intent 经 put_log_intent 进入 LogEngine，由 level 统一过滤，避免事件流被大量日志稀释，且便于关闭或重定向日志而不影响 Event 队列。
+- **为何回测与 Live 的 dispatch_timer 顺序不同**：回测单策略、无网关，先 on_timer 再 update_metrics 再 hedge 再执行意图；Live 需先让 IbGateway 消费 TWS 消息（process_timer_event），再更新持仓指标与对冲，最后统一 on_timer，避免策略在尚未收到最新回报时做决策。
+- **为何 Snapshot 与 Contract 分离**：Contract 建立组合结构（拓扑），Snapshot 只更新数值；这样回测可预计算快照、Live 可由不同数据源组装 Snapshot，而不必改组合结构逻辑。apply_frame 假设 option_apply_order_ 已定，与 Contract 建立顺序一致。
+- **为何 OptionStrategyEngine 持 RuntimeAPI 而非 MainEngine***：若持 MainEngine*，Core 将依赖 Runtime 的具体类型；持 RuntimeAPI（函数与访问器）则 Core 仅依赖抽象能力，便于单测与替换 Runtime 实现。
+
+---
+
+## 附录 I. 常见问题与对照
+
+- **如何新增一种策略？** 在 strategy/ 下实现派生 OptionStrategyTemplate 的类，实现 on_init_logic、on_timer_logic、on_stop_logic；在 strategy_registry.cpp 中 include 并 REGISTER_STRATEGY(ClassName)。回测在命令行传入该类名；Live 通过 gRPC AddStrategy 传入 class 名与 portfolio_name、setting_json。
+- **回测与实盘是否共用同一策略代码？** 是。OptionStrategyEngine 与策略实现均在 core/、strategy/，回测与 Live 仅 MainEngine 与 EventEngine、Infra 不同；策略通过 RuntimeAPI 访问环境，不感知回测或 Live。
+- **组合结构从哪里来？** 回测：BacktestDataEngine::load_parquet 内 create_portfolio_data、add_option、finalize_chains，并注册到 MainEngine。Live：DatabaseEngine::load_contracts 发 Contract 事件 → MarketDataEngine::process_contract 建 portfolios_、finalize_chains。
+- **行情/Greeks 如何进入组合？** 统一通过 Snapshot 事件：dispatch_snapshot → get_portfolio(name)->apply_frame(snapshot)。回测每步用 get_precomputed_snapshot(step)；Live 由外部或上游组装 PortfolioSnapshot 后 put_event(Snapshot)。
+- **订单从策略到成交的路径？** 策略调用 engine_->send_order（即 RuntimeAPI.send_order）→ MainEngine.append_order → 回测为 order_executor 撮合后 put_event(Order)、put_event(Trade)；Live 为 IbGateway::send_order，TWS 回报后 put_event(Order)、put_event(Trade)。EventEngine 的 dispatch_order/dispatch_trade 更新 OptionStrategyEngine 与 PositionEngine；Live 并 save_order_data/save_trade_data。
+- **为何 Core 不持 IEventEngine？** Core 只应产出 Intent，由 Runtime 执行；事件入口与顺序由 EventEngine 控制，Core 不订阅事件，仅在 dispatch 时被调用。
+- **如何关闭回测日志？** MainEngine::set_log_level(engines::DISABLED) 或默认 LogEngine 已为 DISABLED；通过 BACKTEST_LOG 环境变量或入口参数 --log 可开启 INFO。
+- **gRPC 与无 gRPC 实盘的区别？** 同一套 Live MainEngine 与 EventEngine；entry_live 仅启动引擎与 connect，无 RPC；entry_live_grpc 在此基础上启动 gRPC Server，将 MainEngine 能力暴露为 EngineService，供后端调用。
+
+---
+
+（文档完。若与代码实现有出入，以代码为准；本文档仅描述架构设计意图与职责划分。）

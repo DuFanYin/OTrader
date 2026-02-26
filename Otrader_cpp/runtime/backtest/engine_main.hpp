@@ -5,11 +5,11 @@
  * 不包含 dispatch 控制逻辑；EventEngine 负责 dispatch，通过 main 的 accessor 访问各引擎。
  */
 
-#include "../../core/engine_position.hpp"
-#include "../../core/engine_hedge.hpp"
 #include "../../core/engine_combo_builder.hpp"
+#include "../../core/engine_hedge.hpp"
 #include "../../core/engine_log.hpp"
 #include "../../core/engine_option_strategy.hpp"
+#include "../../core/engine_position.hpp"
 #include "../../utilities/base_engine.hpp"
 #include "../../utilities/constant.hpp"
 #include "../../utilities/event.hpp"
@@ -25,7 +25,7 @@ namespace backtest {
 class BacktestDataEngine;
 
 class MainEngine : public utilities::MainEngine {
-public:
+  public:
     static constexpr int INFO = 20;
 
     explicit MainEngine(utilities::IEventEngine* event_engine = nullptr);
@@ -59,12 +59,14 @@ public:
     void put_log_intent(const utilities::LogData& intent) const;
     void close();
 
-    /** Strategy/Hedge 只调 append_*，不持 event_engine；内部直接转 send_order/cancel_order/put_log_intent。 */
+    /** Strategy/Hedge 只调 append_*，不持 event_engine；内部直接转
+     * send_order/cancel_order/put_log_intent。 */
     std::string append_order(const utilities::OrderRequest& req);
     void append_cancel(const utilities::CancelRequest& req);
-    void append_log(const utilities::LogData& log);
+    void append_log(const utilities::LogData& log) const;
 
-    /** Log level: only messages with level >= this are output. Use engines::DISABLED to turn off. */
+    /** Log level: only messages with level >= this are output. Use engines::DISABLED to turn off.
+     */
     void set_log_level(int level);
     int log_level() const;
 
@@ -72,7 +74,9 @@ public:
     const utilities::IEventEngine* event_engine() const { return event_engine_; }
 
     core::OptionStrategyEngine* option_strategy_engine() { return option_strategy_engine_.get(); }
-    const core::OptionStrategyEngine* option_strategy_engine() const { return option_strategy_engine_.get(); }
+    const core::OptionStrategyEngine* option_strategy_engine() const {
+        return option_strategy_engine_.get();
+    }
 
     engines::PositionEngine* position_engine() { return position_engine_.get(); }
     const engines::PositionEngine* position_engine() const { return position_engine_.get(); }
@@ -85,7 +89,7 @@ public:
     using OrderExecutor = std::function<std::string(const utilities::OrderRequest&)>;
     void set_order_executor(OrderExecutor fn) { order_executor_ = std::move(fn); }
 
-private:
+  private:
     utilities::IEventEngine* event_engine_ = nullptr;
     std::unordered_map<std::string, utilities::PortfolioData*> portfolios_;
     std::unordered_map<std::string, utilities::ContractData> contracts_;
@@ -100,4 +104,4 @@ private:
     std::unique_ptr<engines::LogEngine> log_engine_;
 };
 
-}  // namespace backtest
+} // namespace backtest

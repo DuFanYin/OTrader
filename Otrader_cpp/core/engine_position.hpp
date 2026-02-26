@@ -27,16 +27,18 @@ using GetPortfolioFn = std::function<utilities::PortfolioData*(const std::string
 struct OrderMeta {
     bool is_combo = false;
     std::string symbol;
-    std::optional<std::string> combo_type;  // ComboType name
-    std::vector<std::map<std::string, std::string>> legs;  // symbol, con_id, ratio, direction
+    std::optional<std::string> combo_type;                // ComboType name
+    std::vector<std::map<std::string, std::string>> legs; // symbol, con_id, ratio, direction
 };
 
 class PositionEngine {
-public:
+  public:
     PositionEngine() = default;
 
-    /** Caller invokes each tick; pass get_portfolio. Optional out_logs: append LogIntent (LogData) for caller to put_intent_log. */
-    void process_timer_event(GetPortfolioFn get_portfolio, std::vector<utilities::LogData>* out_logs = nullptr);
+    /** Caller invokes each tick; pass get_portfolio. Optional out_logs: append LogIntent (LogData)
+     * for caller to put_intent_log. */
+    void process_timer_event(const GetPortfolioFn& get_portfolio,
+                             std::vector<utilities::LogData>* out_logs = nullptr);
     void process_order(const utilities::OrderData& order);
     void process_trade(const std::string& strategy_name, const utilities::TradeData& trade);
 
@@ -47,27 +49,37 @@ public:
     /** Update metrics; caller passes portfolio from outside. */
     void update_metrics(const std::string& strategy_name, utilities::PortfolioData* portfolio);
 
-    std::string serialize_holding(const std::string& strategy_name) const;
-    void load_serialized_holding(const std::string& strategy_name, const std::string& data);
+    static std::string serialize_holding(const std::string& strategy_name);
+    static void load_serialized_holding(const std::string& strategy_name, const std::string& data);
 
-private:
-    void apply_underlying_trade(utilities::StrategyHolding& holding, const utilities::TradeData& trade);
-    void apply_single_leg_option_trade(utilities::StrategyHolding& holding, const utilities::TradeData& trade);
-    utilities::ComboPositionData* get_or_create_combo_position(utilities::StrategyHolding& holding,
-        const std::string& symbol, utilities::ComboType combo_type,
-        const std::vector<std::map<std::string, std::string>>* legs_meta);
-    utilities::OptionPositionData* get_or_create_option_position(utilities::ComboPositionData& combo,
-        const utilities::TradeData& trade);
-    void apply_position_change(utilities::ComboPositionData* pos, const utilities::TradeData& trade);
-    void apply_position_change(utilities::BasePosition* pos, const utilities::TradeData& trade);
+  private:
+    static void apply_underlying_trade(utilities::StrategyHolding& holding,
+                                       const utilities::TradeData& trade);
+    static void apply_single_leg_option_trade(utilities::StrategyHolding& holding,
+                                              const utilities::TradeData& trade);
+    static utilities::ComboPositionData*
+    get_or_create_combo_position(utilities::StrategyHolding& holding, const std::string& symbol,
+                                 utilities::ComboType combo_type,
+                                 const std::vector<std::map<std::string, std::string>>* legs_meta);
+    static utilities::OptionPositionData*
+    get_or_create_option_position(utilities::ComboPositionData& combo,
+                                  const utilities::TradeData& trade);
+    static void apply_position_change(utilities::ComboPositionData* pos,
+                                      const utilities::TradeData& trade);
+    static void apply_position_change(utilities::BasePosition* pos,
+                                      const utilities::TradeData& trade);
 
-    std::map<std::string, double> accumulate_position(utilities::BasePosition* position,
-        const utilities::OptionData* option_snapshot);
-    std::map<std::string, double> accumulate_position(utilities::BasePosition* position,
-        const utilities::UnderlyingData* underlying_snapshot);
-    std::map<std::string, double> accumulate_combo_position(utilities::ComboPositionData& combo,
-        utilities::PortfolioData* portfolio);
-    static void add_totals(std::map<std::string, double>& totals, const std::map<std::string, double>& metrics);
+    static std::map<std::string, double>
+    accumulate_position(utilities::BasePosition* position,
+                        const utilities::OptionData* option_snapshot);
+    static std::map<std::string, double>
+    accumulate_position(utilities::BasePosition* position,
+                        const utilities::UnderlyingData* underlying_snapshot);
+    static std::map<std::string, double>
+    accumulate_combo_position(utilities::ComboPositionData& combo,
+                              utilities::PortfolioData* portfolio);
+    static void add_totals(std::map<std::string, double>& totals,
+                           const std::map<std::string, double>& metrics);
     static std::string normalize_combo_symbol(const std::string& symbol);
 
     std::unordered_map<std::string, utilities::StrategyHolding> strategy_holdings_;
@@ -75,4 +87,4 @@ private:
     std::set<std::string> trade_seen_;
 };
 
-}  // namespace engines
+} // namespace engines

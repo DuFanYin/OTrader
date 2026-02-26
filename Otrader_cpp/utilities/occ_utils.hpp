@@ -25,4 +25,4 @@ std::string infer_underlying_from_filename(const std::string& filename);
 /** Format expiry as YYYYMMDD string. */
 std::string format_expiry_yyyymmdd(Timestamp expiry);
 
-}  // namespace backtest
+} // namespace backtest

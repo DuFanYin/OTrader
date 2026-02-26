@@ -5,28 +5,28 @@
  * 不包含 dispatch 控制逻辑；EventEngine 负责 dispatch，通过 Main 的 accessor 访问各引擎。
  */
 
-#include "engine_event.hpp"
-#include "engine_db_pg.hpp"
-#include "engine_data_tradier.hpp"
-#include "engine_gateway_ib.hpp"
-#include "../../core/engine_option_strategy.hpp"
-#include "../../core/engine_log.hpp"
-#include "../../core/engine_position.hpp"
-#include "../../core/engine_hedge.hpp"
 #include "../../core/engine_combo_builder.hpp"
+#include "../../core/engine_hedge.hpp"
+#include "../../core/engine_log.hpp"
+#include "../../core/engine_option_strategy.hpp"
+#include "../../core/engine_position.hpp"
 #include "../../utilities/base_engine.hpp"
+#include "../../utilities/event.hpp"
 #include "../../utilities/object.hpp"
 #include "../../utilities/portfolio.hpp"
-#include "../../utilities/event.hpp"
+#include "engine_data_tradier.hpp"
+#include "engine_db_pg.hpp"
+#include "engine_event.hpp"
+#include "engine_gateway_ib.hpp"
+#include <condition_variable>
 #include <deque>
 #include <memory>
 #include <mutex>
-#include <condition_variable>
 
 namespace engines {
 
 class MainEngine : public utilities::MainEngine {
-public:
+  public:
     explicit MainEngine(EventEngine* event_engine = nullptr);
     ~MainEngine() override;
 
@@ -45,7 +45,8 @@ public:
 
     void start_market_data_update();
     void stop_market_data_update();
-    void subscribe_chains(const std::string& strategy_name, const std::vector<std::string>& chain_symbols);
+    void subscribe_chains(const std::string& strategy_name,
+                          const std::vector<std::string>& chain_symbols);
     void unsubscribe_chains(const std::string& strategy_name);
     utilities::PortfolioData* get_portfolio(const std::string& portfolio_name);
     std::vector<std::string> get_all_portfolio_names() const;
@@ -66,12 +67,16 @@ public:
     utilities::TradeData* get_trade(const std::string& tradeid);
 
     void put_event(const utilities::Event& e) override;
-    void write_log(const std::string& msg, int level = engines::INFO, const std::string& gateway = "") override;
+    void write_log(const std::string& msg, int level = engines::INFO,
+                   const std::string& gateway = "") override;
     /** Execute log intent (called by EventEngine and others). */
     void put_log_intent(const utilities::LogData& log);
     void close();
 
-    /** Strategy/Hedge 只调 append_*，不持 event_engine；内部直接转 send_order/cancel_order/put_log_intent。 */
+    bool market_data_running() const { return market_data_running_; }
+
+    /** Strategy/Hedge 只调 append_*，不持 event_engine；内部直接转
+     * send_order/cancel_order/put_log_intent。 */
     std::string append_order(const utilities::OrderRequest& req);
     void append_cancel(const utilities::CancelRequest& req);
     void append_log(const utilities::LogData& log);
@@ -84,9 +89,12 @@ public:
     void on_strategy_event(const utilities::StrategyUpdateData& update);
     bool pop_strategy_update(utilities::StrategyUpdateData& out, int timeout_ms);
 
-private:
+    /** Log queue for gRPC StreamLogs. */
+    bool pop_log_for_stream(utilities::LogData& out, int timeout_ms);
+
+  private:
     std::unique_ptr<EventEngine> event_engine_;
-    EventEngine* event_engine_ptr_ = nullptr;  // always the one in use (owned or external)
+    EventEngine* event_engine_ptr_ = nullptr; // always the one in use (owned or external)
     std::unique_ptr<LogEngine> log_engine_;
     std::unique_ptr<DatabaseEngine> db_engine_;
     std::unique_ptr<MarketDataEngine> market_data_engine_;
@@ -99,6 +107,12 @@ private:
     std::deque<utilities::StrategyUpdateData> strategy_updates_;
     std::mutex strategy_updates_mutex_;
     std::condition_variable strategy_updates_cv_;
+
+    std::deque<utilities::LogData> log_stream_buffer_;
+    std::mutex log_stream_mutex_;
+    std::condition_variable log_stream_cv_;
+
+    bool market_data_running_ = false;
 };
 
-}  // namespace engines
+} // namespace engines

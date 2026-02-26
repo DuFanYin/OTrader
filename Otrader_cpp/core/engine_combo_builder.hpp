@@ -27,7 +27,7 @@ public:
     /** Create one leg; get_contract required when not called from combo_builder (which sets current_). */
     utilities::Leg create_leg(const utilities::OptionData& option, utilities::Direction direction,
         int volume, std::optional<double> price = std::nullopt,
-        ComboGetContractFn get_contract_fn = nullptr);
+        const ComboGetContractFn& get_contract_fn = nullptr);
 
     /** Build combo legs and signature; caller passes get_contract. Optional out_logs: append LogIntent for caller to put_intent_log. */
     std::pair<std::vector<utilities::Leg>, std::string> combo_builder(

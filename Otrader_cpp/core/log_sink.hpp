@@ -7,8 +7,8 @@
 
 #include "../utilities/object.hpp"
 #include <chrono>
-#include <iostream>
 #include <iomanip>
+#include <iostream>
 #include <sstream>
 #include <string>
 
@@ -27,17 +27,22 @@ inline std::string format_time() {
 
 /** Map level number to string (DEBUG=10, INFO=20, WARNING=30, ERROR=40, CRITICAL=50). */
 inline std::string level_to_string(int level) {
-    if (level <= 10) return "DEBUG";
-    if (level <= 20) return "INFO";
-    if (level <= 30) return "WARNING";
-    if (level <= 40) return "ERROR";
+    if (level <= 10)
+        return "DEBUG";
+    if (level <= 20)
+        return "INFO";
+    if (level <= 30)
+        return "WARNING";
+    if (level <= 40)
+        return "ERROR";
     return "CRITICAL";
 }
 
 /** Default sink: print to stdout as "| LEVEL | gateway_name | msg". */
 inline void default_sink(const utilities::LogData& log) {
-    std::cout << "| " << level_to_string(log.level) << " | " << log.gateway_name << " | " << log.msg << std::endl;
+    std::cout << "| " << level_to_string(log.level) << " | " << log.gateway_name << " | " << log.msg
+              << std::endl;
 }
 
-}  // namespace log_sink
-}  // namespace engines
+} // namespace log_sink
+} // namespace engines

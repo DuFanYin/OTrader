@@ -12,45 +12,78 @@ namespace engines {
 
 namespace {
 /** HALF_UP rounding by decimal digits (factor-based); avoids 0.01 float representation issues. */
-inline double round_digits(double value, int digits) {
-    if (digits < 0) return value;
+inline auto round_digits(double value, int digits) -> double {
+    if (digits < 0) {
+        return value;
+    }
     const double factor = std::pow(10.0, digits);
     const double scaled = value * factor;
     const double rounded = scaled >= 0.0 ? std::floor(scaled + 0.5) : std::ceil(scaled - 0.5);
     return rounded / factor;
 }
 
-utilities::ComboType combo_type_from_string(const std::string& s) {
-    if (s == "CUSTOM") return utilities::ComboType::CUSTOM;
-    if (s == "SPREAD") return utilities::ComboType::SPREAD;
-    if (s == "STRADDLE") return utilities::ComboType::STRADDLE;
-    if (s == "STRANGLE") return utilities::ComboType::STRANGLE;
-    if (s == "DIAGONAL_SPREAD") return utilities::ComboType::DIAGONAL_SPREAD;
-    if (s == "RATIO_SPREAD") return utilities::ComboType::RATIO_SPREAD;
-    if (s == "RISK_REVERSAL") return utilities::ComboType::RISK_REVERSAL;
-    if (s == "BUTTERFLY") return utilities::ComboType::BUTTERFLY;
-    if (s == "INVERSE_BUTTERFLY") return utilities::ComboType::INVERSE_BUTTERFLY;
-    if (s == "IRON_CONDOR") return utilities::ComboType::IRON_CONDOR;
-    if (s == "IRON_BUTTERFLY") return utilities::ComboType::IRON_BUTTERFLY;
-    if (s == "CONDOR") return utilities::ComboType::CONDOR;
-    if (s == "BOX_SPREAD") return utilities::ComboType::BOX_SPREAD;
+auto combo_type_from_string(const std::string& s) -> utilities::ComboType {
+    if (s == "CUSTOM") {
+        return utilities::ComboType::CUSTOM;
+    }
+    if (s == "SPREAD") {
+        return utilities::ComboType::SPREAD;
+    }
+    if (s == "STRADDLE") {
+        return utilities::ComboType::STRADDLE;
+    }
+    if (s == "STRANGLE") {
+        return utilities::ComboType::STRANGLE;
+    }
+    if (s == "DIAGONAL_SPREAD") {
+        return utilities::ComboType::DIAGONAL_SPREAD;
+    }
+    if (s == "RATIO_SPREAD") {
+        return utilities::ComboType::RATIO_SPREAD;
+    }
+    if (s == "RISK_REVERSAL") {
+        return utilities::ComboType::RISK_REVERSAL;
+    }
+    if (s == "BUTTERFLY") {
+        return utilities::ComboType::BUTTERFLY;
+    }
+    if (s == "INVERSE_BUTTERFLY") {
+        return utilities::ComboType::INVERSE_BUTTERFLY;
+    }
+    if (s == "IRON_CONDOR") {
+        return utilities::ComboType::IRON_CONDOR;
+    }
+    if (s == "IRON_BUTTERFLY") {
+        return utilities::ComboType::IRON_BUTTERFLY;
+    }
+    if (s == "CONDOR") {
+        return utilities::ComboType::CONDOR;
+    }
+    if (s == "BOX_SPREAD") {
+        return utilities::ComboType::BOX_SPREAD;
+    }
     return utilities::ComboType::CUSTOM;
 }
-}  // namespace
+} // namespace
 
-void PositionEngine::process_timer_event(GetPortfolioFn get_portfolio, std::vector<utilities::LogData>* out_logs) {
-    if (!get_portfolio) return;
+void PositionEngine::process_timer_event(const GetPortfolioFn& get_portfolio,
+                                         std::vector<utilities::LogData>* out_logs) {
+    if (!get_portfolio) {
+        return;
+    }
     for (auto& kv : strategy_holdings_) {
         try {
             std::string portfolio_name = kv.first;
             size_t p = kv.first.find('_');
-            if (p != std::string::npos && p + 1 < kv.first.size())
+            if (p != std::string::npos && p + 1 < kv.first.size()) {
                 portfolio_name = kv.first.substr(p + 1);
+            }
             utilities::PortfolioData* portfolio = get_portfolio(portfolio_name);
-            if (portfolio)
+            if (portfolio != nullptr) {
                 update_metrics(kv.first, portfolio);
+            }
         } catch (const std::exception& e) {
-            if (out_logs) {
+            if (out_logs != nullptr) {
                 utilities::LogData log;
                 log.msg = std::string("[PositionEngine] Metrics update error: ") + e.what();
                 log.level = 0;
@@ -65,8 +98,9 @@ void PositionEngine::process_order(const utilities::OrderData& order) {
     OrderMeta meta;
     meta.is_combo = order.is_combo;
     meta.symbol = order.symbol;
-    if (order.combo_type.has_value())
+    if (order.combo_type.has_value()) {
         meta.combo_type = utilities::to_string(order.combo_type.value());
+    }
     if (order.is_combo && order.legs.has_value()) {
         for (const auto& leg : order.legs.value()) {
             std::map<std::string, std::string> m;
@@ -80,8 +114,11 @@ void PositionEngine::process_order(const utilities::OrderData& order) {
     order_meta_[order.orderid] = std::move(meta);
 }
 
-void PositionEngine::process_trade(const std::string& strategy_name, const utilities::TradeData& trade) {
-    if (trade_seen_.count(trade.tradeid)) return;
+void PositionEngine::process_trade(const std::string& strategy_name,
+                                   const utilities::TradeData& trade) {
+    if (static_cast<unsigned int>(trade_seen_.contains(trade.tradeid)) != 0U) {
+        return;
+    }
     trade_seen_.insert(trade.tradeid);
 
     get_create_strategy_holding(strategy_name);
@@ -91,8 +128,10 @@ void PositionEngine::process_trade(const std::string& strategy_name, const utili
     if (meta_it != order_meta_.end() && meta_it->second.is_combo) {
         const OrderMeta& meta = meta_it->second;
         utilities::ComboType combo_type = meta.combo_type.has_value()
-            ? combo_type_from_string(meta.combo_type.value()) : utilities::ComboType::CUSTOM;
-        utilities::ComboPositionData* combo = get_or_create_combo_position(holding, meta.symbol, combo_type, &meta.legs);
+                                              ? combo_type_from_string(meta.combo_type.value())
+                                              : utilities::ComboType::CUSTOM;
+        utilities::ComboPositionData* combo =
+            get_or_create_combo_position(holding, meta.symbol, combo_type, &meta.legs);
         if (trade.symbol == meta.symbol) {
             apply_position_change(combo, trade);
         } else {
@@ -111,25 +150,30 @@ void PositionEngine::process_trade(const std::string& strategy_name, const utili
 }
 
 void PositionEngine::get_create_strategy_holding(const std::string& strategy_name) {
-    if (strategy_holdings_.find(strategy_name) == strategy_holdings_.end())
+    if (!strategy_holdings_.contains(strategy_name)) {
         strategy_holdings_[strategy_name] = utilities::StrategyHolding();
+    }
 }
 
 void PositionEngine::remove_strategy_holding(const std::string& strategy_name) {
     strategy_holdings_.erase(strategy_name);
 }
 
-utilities::StrategyHolding& PositionEngine::get_holding(const std::string& strategy_name) {
+auto PositionEngine::get_holding(const std::string& strategy_name) -> utilities::StrategyHolding& {
     return strategy_holdings_.at(strategy_name);
 }
 
-void PositionEngine::apply_underlying_trade(utilities::StrategyHolding& holding, const utilities::TradeData& trade) {
+void PositionEngine::apply_underlying_trade(utilities::StrategyHolding& holding,
+                                            const utilities::TradeData& trade) {
     utilities::UnderlyingPositionData& pos = holding.underlyingPosition;
-    if (pos.symbol.empty()) pos.symbol = trade.symbol;
+    if (pos.symbol.empty()) {
+        pos.symbol = trade.symbol;
+    }
     apply_position_change(&pos, trade);
 }
 
-void PositionEngine::apply_single_leg_option_trade(utilities::StrategyHolding& holding, const utilities::TradeData& trade) {
+void PositionEngine::apply_single_leg_option_trade(utilities::StrategyHolding& holding,
+                                                   const utilities::TradeData& trade) {
     auto it = holding.optionPositions.find(trade.symbol);
     if (it == holding.optionPositions.end()) {
         holding.optionPositions[trade.symbol] = utilities::OptionPositionData(trade.symbol);
@@ -138,46 +182,56 @@ void PositionEngine::apply_single_leg_option_trade(utilities::StrategyHolding& h
     apply_position_change(&it->second, trade);
 }
 
-utilities::ComboPositionData* PositionEngine::get_or_create_combo_position(utilities::StrategyHolding& holding,
-    const std::string& symbol, utilities::ComboType combo_type,
-    const std::vector<std::map<std::string, std::string>>* legs_meta) {
+auto PositionEngine::get_or_create_combo_position(
+    utilities::StrategyHolding& holding, const std::string& symbol, utilities::ComboType combo_type,
+    const std::vector<std::map<std::string, std::string>>* legs_meta)
+    -> utilities::ComboPositionData* {
     auto it = holding.comboPositions.find(symbol);
-    if (it != holding.comboPositions.end()) return &it->second;
+    if (it != holding.comboPositions.end()) {
+        return &it->second;
+    }
 
     std::string norm = normalize_combo_symbol(symbol);
     for (auto& kv : holding.comboPositions) {
-        if (normalize_combo_symbol(kv.first) == norm) return &kv.second;
+        if (normalize_combo_symbol(kv.first) == norm) {
+            return &kv.second;
+        }
     }
 
     holding.comboPositions[symbol] = utilities::ComboPositionData(symbol);
     utilities::ComboPositionData& combo = holding.comboPositions[symbol];
     combo.combo_type = combo_type;
-    if (legs_meta) {
+    if (legs_meta != nullptr) {
         for (const auto& m : *legs_meta) {
             auto sym_it = m.find("symbol");
-            combo.legs.push_back(utilities::OptionPositionData(sym_it != m.end() ? sym_it->second : ""));
+            combo.legs.emplace_back(sym_it != m.end() ? sym_it->second : "");
         }
     }
     return &combo;
 }
 
-utilities::OptionPositionData* PositionEngine::get_or_create_option_position(utilities::ComboPositionData& combo,
-    const utilities::TradeData& trade) {
+auto PositionEngine::get_or_create_option_position(utilities::ComboPositionData& combo,
+                                                   const utilities::TradeData& trade)
+    -> utilities::OptionPositionData* {
     for (auto& leg : combo.legs) {
-        if (leg.symbol == trade.symbol) return &leg;
+        if (leg.symbol == trade.symbol) {
+            return &leg;
+        }
     }
-    combo.legs.push_back(utilities::OptionPositionData(trade.symbol));
+    combo.legs.emplace_back(trade.symbol);
     return &combo.legs.back();
 }
 
-void PositionEngine::apply_position_change(utilities::ComboPositionData* pos, const utilities::TradeData& trade) {
+void PositionEngine::apply_position_change(utilities::ComboPositionData* pos,
+                                           const utilities::TradeData& trade) {
     int qty = static_cast<int>(std::abs(trade.volume));
     int signed_qty = (trade.direction == utilities::Direction::LONG) ? qty : -qty;
     pos->quantity += signed_qty;
     pos->cost_value = round_digits(pos->avg_cost * std::abs(pos->quantity) * pos->multiplier, 2);
 }
 
-void PositionEngine::apply_position_change(utilities::BasePosition* pos, const utilities::TradeData& trade) {
+void PositionEngine::apply_position_change(utilities::BasePosition* pos,
+                                           const utilities::TradeData& trade) {
     int qty = static_cast<int>(std::abs(trade.volume));
     int signed_qty = (trade.direction == utilities::Direction::LONG) ? qty : -qty;
     int prev_qty = pos->quantity;
@@ -185,19 +239,20 @@ void PositionEngine::apply_position_change(utilities::BasePosition* pos, const u
 
     if (prev_qty == 0 || (prev_qty > 0 && signed_qty > 0) || (prev_qty < 0 && signed_qty < 0)) {
         int total_qty = std::abs(prev_qty) + qty;
-        if (prev_qty == 0)
+        if (prev_qty == 0) {
             pos->avg_cost = round_digits(trade.price, 2);
-        else
-            pos->avg_cost = round_digits((pos->avg_cost * std::abs(prev_qty) + trade.price * qty) / total_qty, 2);
+        } else {
+            pos->avg_cost = round_digits(
+                (pos->avg_cost * std::abs(prev_qty) + trade.price * qty) / total_qty, 2);
+        }
         pos->quantity += signed_qty;
         pos->cost_value = round_digits(pos->avg_cost * std::abs(pos->quantity) * multiplier, 2);
         return;
     }
 
     int close_qty = std::min(std::abs(prev_qty), qty);
-    double pnl = (prev_qty > 0)
-        ? (trade.price - pos->avg_cost) * close_qty
-        : (pos->avg_cost - trade.price) * close_qty;
+    double pnl = (prev_qty > 0) ? (trade.price - pos->avg_cost) * close_qty
+                                : (pos->avg_cost - trade.price) * close_qty;
     pos->realized_pnl += round_digits(pnl * multiplier, 2);
 
     int new_qty = std::abs(prev_qty) - close_qty;
@@ -218,10 +273,15 @@ void PositionEngine::apply_position_change(utilities::BasePosition* pos, const u
     }
 }
 
-std::map<std::string, double> PositionEngine::accumulate_position(utilities::BasePosition* pos,
-    const utilities::OptionData* option_snapshot) {
-    double delta = 0, gamma = 0, theta = 0, vega = 0, mid_price = 0;
-    if (option_snapshot) {
+auto PositionEngine::accumulate_position(utilities::BasePosition* pos,
+                                         const utilities::OptionData* option_snapshot)
+    -> std::map<std::string, double> {
+    double delta = 0;
+    double gamma = 0;
+    double theta = 0;
+    double vega = 0;
+    double mid_price = 0;
+    if (option_snapshot != nullptr) {
         delta = option_snapshot->delta;
         gamma = option_snapshot->gamma;
         theta = option_snapshot->theta;
@@ -244,10 +304,12 @@ std::map<std::string, double> PositionEngine::accumulate_position(utilities::Bas
     return m;
 }
 
-std::map<std::string, double> PositionEngine::accumulate_position(utilities::BasePosition* pos,
-    const utilities::UnderlyingData* underlying_snapshot) {
-    double delta = 1.0, mid_price = 0;
-    if (underlying_snapshot) {
+auto PositionEngine::accumulate_position(utilities::BasePosition* pos,
+                                         const utilities::UnderlyingData* underlying_snapshot)
+    -> std::map<std::string, double> {
+    double delta = 1.0;
+    double mid_price = 0;
+    if (underlying_snapshot != nullptr) {
         delta = underlying_snapshot->theo_delta;
         mid_price = underlying_snapshot->mid_price;
     }
@@ -264,8 +326,9 @@ std::map<std::string, double> PositionEngine::accumulate_position(utilities::Bas
     return m;
 }
 
-std::map<std::string, double> PositionEngine::accumulate_combo_position(utilities::ComboPositionData& combo,
-    utilities::PortfolioData* portfolio) {
+auto PositionEngine::accumulate_combo_position(utilities::ComboPositionData& combo,
+                                               utilities::PortfolioData* portfolio)
+    -> std::map<std::string, double> {
     combo.delta = combo.gamma = combo.theta = combo.vega = 0.0;
     combo.cost_value = 0.0;
     combo.realized_pnl = 0.0;
@@ -274,7 +337,9 @@ std::map<std::string, double> PositionEngine::accumulate_combo_position(utilitie
     for (auto& leg : combo.legs) {
         const utilities::OptionData* inst = nullptr;
         auto it = portfolio->options.find(leg.symbol);
-        if (it != portfolio->options.end()) inst = &it->second;
+        if (it != portfolio->options.end()) {
+            inst = &it->second;
+        }
         auto acc = accumulate_position(&leg, inst);
         current_value += acc["cv"];
         combo.cost_value += acc["tc"];
@@ -286,9 +351,12 @@ std::map<std::string, double> PositionEngine::accumulate_combo_position(utilitie
     }
 
     if (combo.quantity != 0) {
-        combo.mid_price = round_digits(current_value / (std::abs(combo.quantity) * combo.multiplier), 2);
-        if (combo.cost_value > 0)
-            combo.avg_cost = round_digits(combo.cost_value / (std::abs(combo.quantity) * combo.multiplier), 2);
+        combo.mid_price =
+            round_digits(current_value / (std::abs(combo.quantity) * combo.multiplier), 2);
+        if (combo.cost_value > 0) {
+            combo.avg_cost =
+                round_digits(combo.cost_value / (std::abs(combo.quantity) * combo.multiplier), 2);
+        }
     }
 
     std::map<std::string, double> m;
@@ -302,39 +370,56 @@ std::map<std::string, double> PositionEngine::accumulate_combo_position(utilitie
     return m;
 }
 
-void PositionEngine::add_totals(std::map<std::string, double>& totals, const std::map<std::string, double>& metrics) {
-    for (auto& kv : totals)
-        kv.second += metrics.count(kv.first) ? metrics.at(kv.first) : 0.0;
+void PositionEngine::add_totals(std::map<std::string, double>& totals,
+                                const std::map<std::string, double>& metrics) {
+    for (auto& kv : totals) {
+        kv.second += (static_cast<unsigned int>(metrics.contains(kv.first)) != 0U)
+                         ? metrics.at(kv.first)
+                         : 0.0;
+    }
 }
 
-std::string PositionEngine::normalize_combo_symbol(const std::string& symbol) {
+auto PositionEngine::normalize_combo_symbol(const std::string& symbol) -> std::string {
     // Match engines/engine_position.py: symbol.split("_", 2) -> parts[0]_parts[2] (from left).
     size_t i1 = symbol.find('_');
-    if (i1 == std::string::npos) return symbol;
+    if (i1 == std::string::npos) {
+        return symbol;
+    }
     size_t i2 = symbol.find('_', i1 + 1);
-    if (i2 == std::string::npos) return symbol;
+    if (i2 == std::string::npos) {
+        return symbol;
+    }
     return symbol.substr(0, i1) + "_" + symbol.substr(i2 + 1);
 }
 
-void PositionEngine::update_metrics(const std::string& strategy_name, utilities::PortfolioData* portfolio) {
-    if (!portfolio) return;
+void PositionEngine::update_metrics(const std::string& strategy_name,
+                                    utilities::PortfolioData* portfolio) {
+    if (portfolio == nullptr) {
+        return;
+    }
     utilities::StrategyHolding& holding = strategy_holdings_.at(strategy_name);
 
-    std::map<std::string, double> totals{{"cv", 0.0}, {"tc", 0.0}, {"rlz", 0.0}, {"delta", 0.0}, {"gamma", 0.0}, {"theta", 0.0}, {"vega", 0.0}};
+    std::map<std::string, double> totals{{"cv", 0.0},    {"tc", 0.0},    {"rlz", 0.0},
+                                         {"delta", 0.0}, {"gamma", 0.0}, {"theta", 0.0},
+                                         {"vega", 0.0}};
 
     for (auto& kv : holding.optionPositions) {
         const utilities::OptionData* opt = nullptr;
         auto it = portfolio->options.find(kv.second.symbol);
-        if (it != portfolio->options.end()) opt = &it->second;
+        if (it != portfolio->options.end()) {
+            opt = &it->second;
+        }
         add_totals(totals, accumulate_position(&kv.second, opt));
     }
 
     if (holding.underlyingPosition.quantity != 0 || holding.underlyingPosition.realized_pnl != 0) {
-        add_totals(totals, accumulate_position(&holding.underlyingPosition, portfolio->underlying.get()));
+        add_totals(totals,
+                   accumulate_position(&holding.underlyingPosition, portfolio->underlying.get()));
     }
 
-    for (auto& kv : holding.comboPositions)
+    for (auto& kv : holding.comboPositions) {
         add_totals(totals, accumulate_combo_position(kv.second, portfolio));
+    }
 
     double unreal = totals["cv"] - totals["tc"];
     holding.summary.current_value = round_digits(totals["cv"], 2);
@@ -347,20 +432,25 @@ void PositionEngine::update_metrics(const std::string& strategy_name, utilities:
     holding.summary.theta = round_digits(totals["theta"], 4);
     holding.summary.vega = round_digits(totals["vega"], 4);
 
-    for (auto& kv : holding.optionPositions) kv.second.clear_fields();
+    for (auto& kv : holding.optionPositions) {
+        kv.second.clear_fields();
+    }
     holding.underlyingPosition.clear_fields();
-    for (auto& kv : holding.comboPositions) kv.second.clear_fields();
+    for (auto& kv : holding.comboPositions) {
+        kv.second.clear_fields();
+    }
 }
 
-std::string PositionEngine::serialize_holding(const std::string& strategy_name) const {
+auto PositionEngine::serialize_holding(const std::string& strategy_name) -> std::string {
     (void)strategy_name;
-    return "{}";  // TODO: YAML or JSON serialization to match Python
+    return "{}"; // TODO: YAML or JSON serialization to match Python
 }
 
-void PositionEngine::load_serialized_holding(const std::string& strategy_name, const std::string& data) {
+void PositionEngine::load_serialized_holding(const std::string& strategy_name,
+                                             const std::string& data) {
     (void)strategy_name;
     (void)data;
     // TODO: parse and restore holding
 }
 
-}  // namespace engines
+} // namespace engines

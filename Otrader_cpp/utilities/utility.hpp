@@ -35,4 +35,4 @@ int calculate_days_to_expiry(std::chrono::system_clock::time_point option_expiry
 /** Overload: optional expiry (returns 0 if null/invalid). */
 int calculate_days_to_expiry(std::chrono::system_clock::time_point* option_expiry);
 
-}  // namespace utilities
+} // namespace utilities

@@ -42,7 +42,7 @@ struct TimestepFrameColumnar {
 
 // Interface for loading parquet and iterating timesteps (C++20)
 class IParquetLoader {
-public:
+  public:
     virtual ~IParquetLoader() = default;
 
     // Load parquet from path (relative to project root or absolute). Returns true on success.
@@ -55,12 +55,14 @@ public:
     // Call after load(). Fills out with non-empty symbol strings.
     virtual void collect_symbols(std::unordered_set<std::string>& out) const = 0;
 
-    // Iterate (columnar frame) for each timestep. Zero-copy: frame holds column Array* + start_row/num_rows or row_indices.
-    // Callback returns false to stop. Frame arrays valid only for the duration of the callback.
-    virtual void iter_timesteps(std::function<bool(TimestepFrameColumnar const&)> const& fn) const = 0;
+    // Iterate (columnar frame) for each timestep. Zero-copy: frame holds column Array* +
+    // start_row/num_rows or row_indices. Callback returns false to stop. Frame arrays valid only
+    // for the duration of the callback.
+    virtual void
+    iter_timesteps(std::function<bool(TimestepFrameColumnar const&)> const& fn) const = 0;
 };
 
 // Factory: returns Arrow-based loader if available, else stub that fails load.
 std::unique_ptr<IParquetLoader> make_parquet_loader();
 
-}  // namespace backtest
+} // namespace backtest

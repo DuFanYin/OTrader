@@ -13,8 +13,14 @@ namespace utilities {
 struct MainEngine {
     virtual ~MainEngine() = default;
     /** Log intent: live engines call this; gateway empty => "Main". Default no-op. */
-    virtual void write_log(const std::string& msg, int level = 20, const std::string& gateway = "") { (void)msg; (void)level; (void)gateway; }
-    /** Push event into runtime queue; backtest/live Main delegate to their EventEngine. Default no-op. */
+    virtual void write_log(const std::string& msg, int level = 20,
+                           const std::string& gateway = "") {
+        (void)msg;
+        (void)level;
+        (void)gateway;
+    }
+    /** Push event into runtime queue; backtest/live Main delegate to their EventEngine. Default
+     * no-op. */
     virtual void put_event(const Event& e) { (void)e; }
 };
 
@@ -30,4 +36,4 @@ struct BaseEngine {
     virtual void close() {}
 };
 
-}  // namespace utilities
+} // namespace utilities

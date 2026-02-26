@@ -26,8 +26,8 @@ struct BaseData {
 /** Log message for EVENT_LOG (level: DEBUG=10, INFO=20, WARNING=30, ERROR=40, CRITICAL=50). */
 struct LogData : BaseData {
     std::string msg;
-    int level = 20;  // INFO
-    std::string time;  // formatted e.g. "MM-DD HH:mm:ss"
+    int level = 20;   // INFO
+    std::string time; // formatted e.g. "MM-DD HH:mm:ss"
 };
 
 // ------------------------------ Market Data ------------------------------
@@ -77,7 +77,8 @@ struct ChainMarketData : BaseData {
     void add_option(const OptionMarketData& option_data);
 };
 
-/** Compact portfolio snapshot (plan B): fixed order = portfolio option_apply_order. No per-option symbol/datetime. */
+/** Compact portfolio snapshot (plan B): fixed order = portfolio option_apply_order. No per-option
+ * symbol/datetime. */
 struct PortfolioSnapshot {
     std::string portfolio_name;
     DateTime datetime{};
@@ -248,4 +249,4 @@ struct StrategyHolding {
     PortfolioSummary summary;
 };
 
-}  // namespace utilities
+} // namespace utilities

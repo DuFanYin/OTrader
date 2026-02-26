@@ -2,11 +2,12 @@
 
 /**
  * EventEngine = dispatch 控制逻辑：按事件类型与固定顺序决定调用谁。
- * 不持有任何引擎；通过 MainEngine 的 accessor 访问各引擎并调用，执行（send_order/cancel_order/put_log_intent）也通过 Main。
- * Live 额外：queue + worker thread 处理事件。
+ * 不持有任何引擎；通过 MainEngine 的 accessor
+ * 访问各引擎并调用，执行（send_order/cancel_order/put_log_intent）也通过 Main。 Live 额外：queue +
+ * worker thread 处理事件。
  */
 
-#include "../../utilities/portfolio.hpp"  // IEventEngine, Event, EventType, OrderRequest, CancelRequest
+#include "../../utilities/portfolio.hpp" // IEventEngine, Event, EventType, OrderRequest, CancelRequest
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -25,11 +26,11 @@ using Event = utilities::Event;
 /**
  * process(Event) handles one event (dispatch by type in fixed order).
  * Snapshot: update portfolio via apply_frame (same as backtest).
- * Portfolio structure is built from Contract events (order fixed); Snapshot only updates prices/Greeks.
- * set_main_engine required for Timer/Order/Trade/Contract/Snapshot.
+ * Portfolio structure is built from Contract events (order fixed); Snapshot only updates
+ * prices/Greeks. set_main_engine required for Timer/Order/Trade/Contract/Snapshot.
  */
 class EventEngine : public utilities::IEventEngine {
-public:
+  public:
     explicit EventEngine(int interval = 1);
     ~EventEngine() override;
 
@@ -48,10 +49,13 @@ public:
 
     void put(const utilities::Event& event);
     void put(utilities::Event&& event);
-    uint64_t register_handler(utilities::EventType, std::function<void(const utilities::Event&)>) override { return 0; }
+    uint64_t register_handler(utilities::EventType,
+                              std::function<void(const utilities::Event&)>) override {
+        return 0;
+    }
     void unregister_handler(utilities::EventType, uint64_t) override {}
 
-private:
+  private:
     void dispatch_snapshot(const utilities::Event& event);
     void dispatch_timer();
     void dispatch_order(const utilities::Event& event);
@@ -72,4 +76,4 @@ private:
     std::thread timer_thread_;
 };
 
-}  // namespace engines
+} // namespace engines

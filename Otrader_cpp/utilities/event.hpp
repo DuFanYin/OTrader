@@ -19,20 +19,15 @@ enum class EventType : uint8_t {
     Snapshot,
 };
 
-using EventPayload = std::variant<
-    std::monostate,
-    OrderData,
-    TradeData,
-    ContractData,
-    PortfolioSnapshot>;
+using EventPayload =
+    std::variant<std::monostate, OrderData, TradeData, ContractData, PortfolioSnapshot>;
 
 struct Event {
     EventType type = EventType::Timer;
     EventPayload data;
 
     Event() = default;
-    Event(EventType t, EventPayload p = std::monostate{})
-        : type(t), data(std::move(p)) {}
+    Event(EventType t, EventPayload p = std::monostate{}) : type(t), data(std::move(p)) {}
 };
 
 /**
@@ -46,4 +41,4 @@ struct StrategyUpdateData {
     std::string json_payload;
 };
 
-}  // namespace utilities
+} // namespace utilities

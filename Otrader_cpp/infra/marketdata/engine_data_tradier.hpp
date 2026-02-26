@@ -3,17 +3,18 @@
 /**
  * MarketDataEngine (live): portfolios + contracts; portfolio 结构仅由 Contract 事件建立。
  * 行情/ Greeks 更新由 Snapshot 事件经 EventEngine → get_portfolio()->apply_frame(snapshot)。
- * - process_contract: 处理 Contract 事件，维护 contracts_、portfolios_（add_option/set_underlying），
- *   每次 add_option 后 finalize_chains 以便 apply_frame 可用。
+ * - process_contract: 处理 Contract 事件，维护
+ * contracts_、portfolios_（add_option/set_underlying）， 每次 add_option 后 finalize_chains 以便
+ * apply_frame 可用。
  * - get_portfolio / get_contract: 供 MainEngine、EventEngine、Strategy 等使用。
  * 接入真实行情时：组装 PortfolioSnapshot 并 put_event(EventType::Snapshot, snapshot) 即可。
  */
 
+#include "../../core/engine_log.hpp"
 #include "../../utilities/base_engine.hpp"
+#include "../../utilities/event.hpp"
 #include "../../utilities/object.hpp"
 #include "../../utilities/portfolio.hpp"
-#include "../../utilities/event.hpp"
-#include "../../core/engine_log.hpp"
 #include <memory>
 #include <set>
 #include <string>
@@ -24,12 +25,13 @@ namespace engines {
 struct MainEngine;
 
 class MarketDataEngine : public utilities::BaseEngine {
-public:
+  public:
     explicit MarketDataEngine(utilities::MainEngine* main_engine);
 
     void process_contract(const utilities::Event& event);
 
-    void subscribe_chains(const std::string& strategy_name, const std::vector<std::string>& chain_symbols);
+    void subscribe_chains(const std::string& strategy_name,
+                          const std::vector<std::string>& chain_symbols);
     void unsubscribe_chains(const std::string& strategy_name);
 
     utilities::PortfolioData* get_or_create_portfolio(const std::string& portfolio_name);
@@ -41,7 +43,7 @@ public:
     void start_market_data_update();
     void stop_market_data_update();
 
-private:
+  private:
     void write_log(const std::string& msg, int level = INFO);
 
     std::unordered_map<std::string, std::unique_ptr<utilities::PortfolioData>> portfolios_;
@@ -51,4 +53,4 @@ private:
     bool started_ = false;
 };
 
-}  // namespace engines
+} // namespace engines

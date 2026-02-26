@@ -14,7 +14,7 @@ namespace backtest {
 class MainEngine;
 
 class EventEngine : public utilities::IEventEngine {
-public:
+  public:
     EventEngine() = default;
     ~EventEngine() override = default;
 
@@ -28,7 +28,7 @@ public:
 
     void set_main_engine(MainEngine* main_engine) { main_engine_ = main_engine; }
 
-private:
+  private:
     void dispatch_snapshot(const utilities::Event& event);
     void dispatch_timer(std::vector<utilities::OrderRequest>* out_orders,
                         std::vector<utilities::CancelRequest>* out_cancels,
@@ -39,4 +39,4 @@ private:
     MainEngine* main_engine_ = nullptr;
 };
 
-}  // namespace backtest
+} // namespace backtest

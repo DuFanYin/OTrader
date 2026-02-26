@@ -8,15 +8,16 @@
 
 namespace engines {
 
-utilities::Leg ComboBuilderEngine::create_leg(const utilities::OptionData& option,
+auto ComboBuilderEngine::create_leg(const utilities::OptionData& option,
     utilities::Direction direction, int volume, std::optional<double> price,
-    ComboGetContractFn get_contract_fn) {
+    const ComboGetContractFn& get_contract_fn) -> utilities::Leg {
     const utilities::ContractData* contract = nullptr;
-    if (get_contract_fn)
+    if (get_contract_fn) {
         contract = get_contract_fn(option.symbol);
-    else if (current_get_contract_)
+    } else if (current_get_contract_) {
         contract = current_get_contract_(option.symbol);
-    if (!contract) {
+}
+    if (contract == nullptr) {
         throw std::runtime_error("Contract not found for option: " + option.symbol);
     }
     utilities::Leg leg;
@@ -31,10 +32,10 @@ utilities::Leg ComboBuilderEngine::create_leg(const utilities::OptionData& optio
     return leg;
 }
 
-std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::combo_builder(
+auto ComboBuilderEngine::combo_builder(
     const std::unordered_map<std::string, utilities::OptionData*>& option_data,
     utilities::ComboType combo_type, utilities::Direction direction, int volume,
-    ComboGetContractFn get_contract_fn, std::vector<utilities::LogData>* out_logs) {
+    ComboGetContractFn get_contract_fn, std::vector<utilities::LogData>* out_logs) -> std::pair<std::vector<utilities::Leg>, std::string> {
     current_get_contract_ = std::move(get_contract_fn);
     current_out_logs_ = out_logs;
     auto result = combo_builder_impl(option_data, combo_type, direction, volume);
@@ -43,9 +44,9 @@ std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::combo_bu
     return result;
 }
 
-std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::combo_builder_impl(
+auto ComboBuilderEngine::combo_builder_impl(
     const std::unordered_map<std::string, utilities::OptionData*>& option_data,
-    utilities::ComboType combo_type, utilities::Direction direction, int volume) {
+    utilities::ComboType combo_type, utilities::Direction direction, int volume) -> std::pair<std::vector<utilities::Leg>, std::string> {
     switch (combo_type) {
         case utilities::ComboType::STRADDLE: return straddle(option_data, direction, volume);
         case utilities::ComboType::STRANGLE: return strangle(option_data, direction, volume);
@@ -64,13 +65,14 @@ std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::combo_bu
     }
 }
 
-std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::straddle(
+auto ComboBuilderEngine::straddle(
     const std::unordered_map<std::string, utilities::OptionData*>& option_data,
-    utilities::Direction direction, int volume) {
+    utilities::Direction direction, int volume) -> std::pair<std::vector<utilities::Leg>, std::string> {
     auto it_c = option_data.find("call");
     auto it_p = option_data.find("put");
-    if (it_c == option_data.end() || it_p == option_data.end())
+    if (it_c == option_data.end() || it_p == option_data.end()) {
         throw std::runtime_error("straddle requires 'call' and 'put'");
+}
     std::vector<utilities::Leg> legs = {
         create_leg(*it_c->second, direction, volume),
         create_leg(*it_p->second, direction, volume)
@@ -78,13 +80,14 @@ std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::straddle
     return {legs, generate_combo_signature(legs)};
 }
 
-std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::strangle(
+auto ComboBuilderEngine::strangle(
     const std::unordered_map<std::string, utilities::OptionData*>& option_data,
-    utilities::Direction direction, int volume) {
+    utilities::Direction direction, int volume) -> std::pair<std::vector<utilities::Leg>, std::string> {
     auto it_c = option_data.find("call");
     auto it_p = option_data.find("put");
-    if (it_c == option_data.end() || it_p == option_data.end())
+    if (it_c == option_data.end() || it_p == option_data.end()) {
         throw std::runtime_error("strangle requires 'call' and 'put'");
+}
     std::vector<utilities::Leg> legs = {
         create_leg(*it_c->second, direction, volume),
         create_leg(*it_p->second, direction, volume)
@@ -92,14 +95,14 @@ std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::strangle
     return {legs, generate_combo_signature(legs)};
 }
 
-std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::iron_condor(
+auto ComboBuilderEngine::iron_condor(
     const std::unordered_map<std::string, utilities::OptionData*>& option_data,
-    utilities::Direction direction, int volume) {
+    utilities::Direction direction, int volume) -> std::pair<std::vector<utilities::Leg>, std::string> {
     int sign = (direction == utilities::Direction::SHORT) ? 1 : -1;
-    auto pl = option_data.at("put_lower");
-    auto pu = option_data.at("put_upper");
-    auto cl = option_data.at("call_lower");
-    auto cu = option_data.at("call_upper");
+    auto *pl = option_data.at("put_lower");
+    auto *pu = option_data.at("put_upper");
+    auto *cl = option_data.at("call_lower");
+    auto *cu = option_data.at("call_upper");
     std::vector<utilities::Leg> legs = {
         create_leg(*pl, sign > 0 ? utilities::Direction::LONG : utilities::Direction::SHORT, volume),
         create_leg(*pu, sign > 0 ? utilities::Direction::SHORT : utilities::Direction::LONG, volume),
@@ -109,12 +112,12 @@ std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::iron_con
     return {legs, generate_combo_signature(legs)};
 }
 
-std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::risk_reversal(
+auto ComboBuilderEngine::risk_reversal(
     const std::unordered_map<std::string, utilities::OptionData*>& option_data,
-    utilities::Direction direction, int volume) {
+    utilities::Direction direction, int volume) -> std::pair<std::vector<utilities::Leg>, std::string> {
     int sign = (direction == utilities::Direction::SHORT) ? 1 : -1;
-    auto ll = option_data.at("long_leg");
-    auto sl = option_data.at("short_leg");
+    auto *ll = option_data.at("long_leg");
+    auto *sl = option_data.at("short_leg");
     std::vector<utilities::Leg> legs = {
         create_leg(*ll, sign > 0 ? utilities::Direction::LONG : utilities::Direction::SHORT, volume),
         create_leg(*sl, sign > 0 ? utilities::Direction::SHORT : utilities::Direction::LONG, volume),
@@ -122,13 +125,13 @@ std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::risk_rev
     return {legs, generate_combo_signature(legs)};
 }
 
-std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::custom(
+auto ComboBuilderEngine::custom(
     const std::unordered_map<std::string, utilities::OptionData*>& option_data,
-    utilities::Direction direction, int volume) {
+    utilities::Direction direction, int volume) -> std::pair<std::vector<utilities::Leg>, std::string> {
     std::vector<utilities::Leg> legs;
     for (const auto& kv : option_data) {
         legs.push_back(create_leg(*kv.second, direction, volume));
-        if (current_out_logs_) {
+        if (current_out_logs_ != nullptr) {
             utilities::LogData log;
             log.msg = "Custom Combo Leg: " + legs.back().symbol.value_or("") +
                 " | Direction: " + std::to_string(static_cast<int>(direction)) + " | Volume: " + std::to_string(legs.back().ratio);
@@ -140,12 +143,12 @@ std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::custom(
     return {legs, generate_combo_signature(legs)};
 }
 
-std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::spread(
+auto ComboBuilderEngine::spread(
     const std::unordered_map<std::string, utilities::OptionData*>& option_data,
-    utilities::Direction direction, int volume) {
+    utilities::Direction direction, int volume) -> std::pair<std::vector<utilities::Leg>, std::string> {
     int sign = (direction == utilities::Direction::LONG) ? 1 : -1;
-    auto ll = option_data.at("long_leg");
-    auto sl = option_data.at("short_leg");
+    auto *ll = option_data.at("long_leg");
+    auto *sl = option_data.at("short_leg");
     std::vector<utilities::Leg> legs = {
         create_leg(*ll, sign > 0 ? utilities::Direction::LONG : utilities::Direction::SHORT, volume),
         create_leg(*sl, sign > 0 ? utilities::Direction::SHORT : utilities::Direction::LONG, volume),
@@ -153,12 +156,12 @@ std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::spread(
     return {legs, generate_combo_signature(legs)};
 }
 
-std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::diagonal_spread(
+auto ComboBuilderEngine::diagonal_spread(
     const std::unordered_map<std::string, utilities::OptionData*>& option_data,
-    utilities::Direction direction, int volume) {
+    utilities::Direction direction, int volume) -> std::pair<std::vector<utilities::Leg>, std::string> {
     int sign = (direction == utilities::Direction::LONG) ? 1 : -1;
-    auto ll = option_data.at("long_leg");
-    auto sl = option_data.at("short_leg");
+    auto *ll = option_data.at("long_leg");
+    auto *sl = option_data.at("short_leg");
     std::vector<utilities::Leg> legs = {
         create_leg(*ll, sign > 0 ? utilities::Direction::LONG : utilities::Direction::SHORT, volume),
         create_leg(*sl, sign > 0 ? utilities::Direction::SHORT : utilities::Direction::LONG, volume),
@@ -166,13 +169,13 @@ std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::diagonal
     return {legs, generate_combo_signature(legs)};
 }
 
-std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::ratio_spread(
+auto ComboBuilderEngine::ratio_spread(
     const std::unordered_map<std::string, utilities::OptionData*>& option_data,
-    utilities::Direction direction, int volume) {
+    utilities::Direction direction, int volume) -> std::pair<std::vector<utilities::Leg>, std::string> {
     int sign = (direction == utilities::Direction::LONG) ? 1 : -1;
     int ratio = 2;  // default 1:2 ratio, same as Python
-    auto ll = option_data.at("long_leg");
-    auto sl = option_data.at("short_leg");
+    auto *ll = option_data.at("long_leg");
+    auto *sl = option_data.at("short_leg");
     std::vector<utilities::Leg> legs = {
         create_leg(*ll, sign > 0 ? utilities::Direction::LONG : utilities::Direction::SHORT, volume),
         create_leg(*sl, sign > 0 ? utilities::Direction::SHORT : utilities::Direction::LONG, volume * ratio),
@@ -180,13 +183,13 @@ std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::ratio_sp
     return {legs, generate_combo_signature(legs)};
 }
 
-std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::butterfly(
+auto ComboBuilderEngine::butterfly(
     const std::unordered_map<std::string, utilities::OptionData*>& option_data,
-    utilities::Direction direction, int volume) {
+    utilities::Direction direction, int volume) -> std::pair<std::vector<utilities::Leg>, std::string> {
     int sign = (direction == utilities::Direction::LONG) ? 1 : -1;
-    auto body = option_data.at("body");
-    auto w1 = option_data.at("wing1");
-    auto w2 = option_data.at("wing2");
+    auto *body = option_data.at("body");
+    auto *w1 = option_data.at("wing1");
+    auto *w2 = option_data.at("wing2");
     std::vector<utilities::Leg> legs = {
         create_leg(*body, sign > 0 ? utilities::Direction::LONG : utilities::Direction::SHORT, volume),
         create_leg(*w1, sign > 0 ? utilities::Direction::SHORT : utilities::Direction::LONG, volume),
@@ -195,13 +198,13 @@ std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::butterfl
     return {legs, generate_combo_signature(legs)};
 }
 
-std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::inverse_butterfly(
+auto ComboBuilderEngine::inverse_butterfly(
     const std::unordered_map<std::string, utilities::OptionData*>& option_data,
-    utilities::Direction direction, int volume) {
+    utilities::Direction direction, int volume) -> std::pair<std::vector<utilities::Leg>, std::string> {
     int sign = (direction == utilities::Direction::LONG) ? 1 : -1;
-    auto body = option_data.at("body");
-    auto w1 = option_data.at("wing1");
-    auto w2 = option_data.at("wing2");
+    auto *body = option_data.at("body");
+    auto *w1 = option_data.at("wing1");
+    auto *w2 = option_data.at("wing2");
     std::vector<utilities::Leg> legs = {
         create_leg(*body, sign > 0 ? utilities::Direction::SHORT : utilities::Direction::LONG, volume),
         create_leg(*w1, sign > 0 ? utilities::Direction::LONG : utilities::Direction::SHORT, volume),
@@ -210,13 +213,13 @@ std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::inverse_
     return {legs, generate_combo_signature(legs)};
 }
 
-std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::iron_butterfly(
+auto ComboBuilderEngine::iron_butterfly(
     const std::unordered_map<std::string, utilities::OptionData*>& option_data,
-    utilities::Direction direction, int volume) {
+    utilities::Direction direction, int volume) -> std::pair<std::vector<utilities::Leg>, std::string> {
     int sign = (direction == utilities::Direction::LONG) ? 1 : -1;
-    auto pw = option_data.at("put_wing");
-    auto body = option_data.at("body");
-    auto cw = option_data.at("call_wing");
+    auto *pw = option_data.at("put_wing");
+    auto *body = option_data.at("body");
+    auto *cw = option_data.at("call_wing");
     std::vector<utilities::Leg> legs = {
         create_leg(*pw, sign > 0 ? utilities::Direction::LONG : utilities::Direction::SHORT, volume),
         create_leg(*body, sign > 0 ? utilities::Direction::SHORT : utilities::Direction::LONG, volume),
@@ -225,14 +228,14 @@ std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::iron_but
     return {legs, generate_combo_signature(legs)};
 }
 
-std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::condor(
+auto ComboBuilderEngine::condor(
     const std::unordered_map<std::string, utilities::OptionData*>& option_data,
-    utilities::Direction direction, int volume) {
+    utilities::Direction direction, int volume) -> std::pair<std::vector<utilities::Leg>, std::string> {
     int sign = (direction == utilities::Direction::LONG) ? 1 : -1;
-    auto lp = option_data.at("long_put");
-    auto sp = option_data.at("short_put");
-    auto sc = option_data.at("short_call");
-    auto lc = option_data.at("long_call");
+    auto *lp = option_data.at("long_put");
+    auto *sp = option_data.at("short_put");
+    auto *sc = option_data.at("short_call");
+    auto *lc = option_data.at("long_call");
     std::vector<utilities::Leg> legs = {
         create_leg(*lp, sign > 0 ? utilities::Direction::LONG : utilities::Direction::SHORT, volume),
         create_leg(*sp, sign > 0 ? utilities::Direction::SHORT : utilities::Direction::LONG, volume),
@@ -242,14 +245,14 @@ std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::condor(
     return {legs, generate_combo_signature(legs)};
 }
 
-std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::box_spread(
+auto ComboBuilderEngine::box_spread(
     const std::unordered_map<std::string, utilities::OptionData*>& option_data,
-    utilities::Direction direction, int volume) {
+    utilities::Direction direction, int volume) -> std::pair<std::vector<utilities::Leg>, std::string> {
     int sign = (direction == utilities::Direction::LONG) ? 1 : -1;
-    auto lc = option_data.at("long_call");
-    auto sc = option_data.at("short_call");
-    auto sp = option_data.at("short_put");
-    auto lp = option_data.at("long_put");
+    auto *lc = option_data.at("long_call");
+    auto *sc = option_data.at("short_call");
+    auto *sp = option_data.at("short_put");
+    auto *lp = option_data.at("long_put");
     std::vector<utilities::Leg> legs = {
         create_leg(*lc, sign > 0 ? utilities::Direction::LONG : utilities::Direction::SHORT, volume),
         create_leg(*sc, sign > 0 ? utilities::Direction::SHORT : utilities::Direction::LONG, volume),
@@ -259,26 +262,30 @@ std::pair<std::vector<utilities::Leg>, std::string> ComboBuilderEngine::box_spre
     return {legs, generate_combo_signature(legs)};
 }
 
-std::string ComboBuilderEngine::generate_combo_signature(const std::vector<utilities::Leg>& legs) {
+auto ComboBuilderEngine::generate_combo_signature(const std::vector<utilities::Leg>& legs) -> std::string {
     std::vector<std::string> parts;
     for (const auto& leg : legs) {
         std::string sym = leg.symbol.value_or("");
-        if (sym.empty()) continue;
+        if (sym.empty()) { continue;
+}
         size_t pos = 0;
         std::vector<std::string> tokens;
         for (size_t i = 0; i <= sym.size(); ++i) {
             if (i == sym.size() || sym[i] == '-') {
-                if (i > pos) tokens.push_back(sym.substr(pos, i - pos));
+                if (i > pos) { tokens.push_back(sym.substr(pos, i - pos));
+}
                 pos = i + 1;
             }
         }
-        if (tokens.size() >= 4)
+        if (tokens.size() >= 4) {
             parts.push_back(tokens[1] + tokens[2] + tokens[3]);
+}
     }
-    std::sort(parts.begin(), parts.end());
+    std::ranges::sort(parts);
     std::string result;
     for (size_t i = 0; i < parts.size(); ++i) {
-        if (i) result += "-";
+        if (i != 0U) { result += "-";
+}
         result += parts[i];
     }
     return result;

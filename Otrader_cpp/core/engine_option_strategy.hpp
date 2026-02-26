@@ -6,9 +6,9 @@
  */
 
 #include "../utilities/constant.hpp"
+#include "../utilities/event.hpp"
 #include "../utilities/object.hpp"
 #include "../utilities/portfolio.hpp"
-#include "../utilities/event.hpp"
 #include <functional>
 #include <memory>
 #include <set>
@@ -20,7 +20,7 @@
 namespace engines {
 class ComboBuilderEngine;
 class HedgeEngine;
-}
+} // namespace engines
 
 namespace strategy_cpp {
 class OptionStrategyTemplate;
@@ -28,13 +28,16 @@ class OptionStrategyTemplate;
 
 namespace core {
 
-/** 由 runtime（MainEngine）实现并注入；get_portfolio/get_contract/get_holding 非策略引擎职责，仅转发。 */
+/** 由 runtime（MainEngine）实现并注入；get_portfolio/get_contract/get_holding
+ * 非策略引擎职责，仅转发。 */
 struct RuntimeAPI {
-    std::function<std::string(const std::string& strategy_name, const utilities::OrderRequest&)> send_order;
+    std::function<std::string(const std::string& strategy_name, const utilities::OrderRequest&)>
+        send_order;
     std::function<std::string(const std::string& strategy_name, utilities::ComboType combo_type,
                               const std::string& combo_sig, utilities::Direction direction,
                               double price, double volume, const std::vector<utilities::Leg>& legs,
-                              utilities::OrderType order_type)> send_combo_order;
+                              utilities::OrderType order_type)>
+        send_combo_order;
     std::function<void(const utilities::LogData&)> write_log;
     std::function<utilities::PortfolioData*(const std::string&)> get_portfolio;
     std::function<const utilities::ContractData*(const std::string&)> get_contract;
@@ -47,7 +50,7 @@ struct RuntimeAPI {
 };
 
 class OptionStrategyEngine {
-public:
+  public:
     explicit OptionStrategyEngine(RuntimeAPI api);
     ~OptionStrategyEngine();
 
@@ -61,28 +64,26 @@ public:
     /** 当仅有一个策略时返回其 holding。 */
     utilities::StrategyHolding* get_strategy_holding() const;
 
-    utilities::PortfolioData* get_portfolio(const std::string& portfolio_name);
-    utilities::StrategyHolding* get_holding(const std::string& strategy_name);
+    utilities::PortfolioData* get_portfolio(const std::string& portfolio_name) const;
+    utilities::StrategyHolding* get_holding(const std::string& strategy_name) const;
     const utilities::ContractData* get_contract(const std::string& symbol) const;
-    void write_log(const std::string& msg, int level = 0);
-    void write_log(const utilities::LogData& log);
+    void write_log(const std::string& msg, int level = 0) const;
+    void write_log(const utilities::LogData& log) const;
 
     /** 显式带 strategy_name，内部转 api_.send_order。 */
     std::string send_order(const std::string& strategy_name, const utilities::OrderRequest& req);
     /** 便捷：按 symbol 构造 OrderRequest 后调用 send_order(strategy_name, req)。 */
-    std::vector<std::string> send_order(const std::string& strategy_name, const std::string& symbol,
-                                        utilities::Direction direction, double price, double volume,
-                                        utilities::OrderType order_type = utilities::OrderType::LIMIT);
-    std::vector<std::string> send_combo_order(const std::string& strategy_name,
-                                              utilities::ComboType combo_type,
-                                              const std::string& combo_sig,
-                                              utilities::Direction direction,
-                                              double price, double volume,
-                                              const std::vector<utilities::Leg>& legs,
-                                              utilities::OrderType order_type = utilities::OrderType::LIMIT);
+    std::vector<std::string>
+    send_order(const std::string& strategy_name, const std::string& symbol,
+               utilities::Direction direction, double price, double volume,
+               utilities::OrderType order_type = utilities::OrderType::LIMIT);
+    std::vector<std::string>
+    send_combo_order(const std::string& strategy_name, utilities::ComboType combo_type,
+                     const std::string& combo_sig, utilities::Direction direction, double price,
+                     double volume, const std::vector<utilities::Leg>& legs,
+                     utilities::OrderType order_type = utilities::OrderType::LIMIT);
 
-    void add_strategy(const std::string& class_name,
-                      const std::string& portfolio_name,
+    void add_strategy(const std::string& class_name, const std::string& portfolio_name,
                       const std::unordered_map<std::string, double>& setting = {});
 
     void init_strategy(const std::string& strategy_name);
@@ -106,17 +107,18 @@ public:
 
     void close();
 
-    engines::ComboBuilderEngine* combo_builder_engine();
-    engines::HedgeEngine* hedge_engine();
+    engines::ComboBuilderEngine* combo_builder_engine() const;
+    engines::HedgeEngine* hedge_engine() const;
 
     /** 供 backtest MainEngine 在 append_order 后插入 orderid 使用。 */
     std::unordered_set<std::string>& active_order_ids() { return all_active_order_ids_; }
     /** 供 runtime 在 cancel 时从引擎侧移除 orderid 跟踪。 */
     void remove_order_tracking(const std::string& orderid);
 
-private:
+  private:
     RuntimeAPI api_;
-    std::unordered_map<std::string, std::unique_ptr<strategy_cpp::OptionStrategyTemplate>> strategies_;
+    std::unordered_map<std::string, std::unique_ptr<strategy_cpp::OptionStrategyTemplate>>
+        strategies_;
     std::unordered_map<std::string, utilities::OrderData> orders_;
     std::unordered_map<std::string, utilities::TradeData> trades_;
     std::unordered_map<std::string, std::set<std::string>> strategy_active_orders_;
@@ -125,4 +127,4 @@ private:
     mutable std::unordered_map<std::string, std::set<std::string>> hedge_active_orders_cache_;
 };
 
-}  // namespace core
+} // namespace core

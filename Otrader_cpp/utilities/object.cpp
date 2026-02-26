@@ -6,18 +6,17 @@ namespace utilities {
 void ChainMarketData::add_option(const OptionMarketData& option_data) {
     options[option_data.symbol] = option_data;
     if (underlying_last == 0.0 && (underlying_bid > 0 || underlying_ask > 0)) {
-        if (underlying_bid > 0 && underlying_ask > 0)
+        if (underlying_bid > 0 && underlying_ask > 0) {
             underlying_last = (underlying_bid + underlying_ask) / 2.0;
-        else
+        } else {
             underlying_last = underlying_bid > 0 ? underlying_bid : underlying_ask;
+        }
     }
 }
 
-bool OrderData::is_active() const {
-    return is_active_status(status);
-}
+auto OrderData::is_active() const -> bool { return is_active_status(status); }
 
-CancelRequest OrderData::create_cancel_request() const {
+auto OrderData::create_cancel_request() const -> CancelRequest {
     CancelRequest req;
     req.orderid = orderid;
     req.symbol = symbol;
@@ -27,7 +26,8 @@ CancelRequest OrderData::create_cancel_request() const {
     return req;
 }
 
-OrderData OrderRequest::create_order_data(const std::string& orderid, const std::string& gateway_name) const {
+auto OrderRequest::create_order_data(const std::string& orderid,
+                                     const std::string& gateway_name) const -> OrderData {
     OrderData order;
     order.gateway_name = gateway_name;
     order.symbol = symbol;
@@ -46,9 +46,7 @@ OrderData OrderRequest::create_order_data(const std::string& orderid, const std:
     return order;
 }
 
-double BasePosition::current_value() const {
-    return quantity * mid_price * multiplier;
-}
+auto BasePosition::current_value() const -> double { return quantity * mid_price * multiplier; }
 
 void BasePosition::clear_fields() {
     if (quantity == 0) {
@@ -64,8 +62,9 @@ void BasePosition::clear_fields() {
 
 void ComboPositionData::clear_fields() {
     BasePosition::clear_fields();
-    for (auto& leg : legs)
+    for (auto& leg : legs) {
         leg.clear_fields();
+    }
 }
 
-}  // namespace utilities
+} // namespace utilities

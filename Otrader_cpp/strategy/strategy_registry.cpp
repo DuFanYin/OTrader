@@ -14,7 +14,7 @@ namespace strategy_cpp {
 namespace {
 
 struct Registry {
-    std::vector<std::string> names;  // 顺序稳定，用于 get_all
+    std::vector<std::string> names; // 顺序稳定，用于 get_all
     std::unordered_map<std::string, StrategyFactoryFunc> factories;
     std::mutex mtx;
 };
@@ -23,7 +23,7 @@ Registry& registry() {
     return r;
 }
 
-}  // namespace
+} // namespace
 
 void StrategyRegistry::add(const std::string& class_name) {
     std::lock_guard<std::mutex> lock(registry().mtx);
@@ -42,7 +42,8 @@ void StrategyRegistry::add_factory(const std::string& class_name, StrategyFactor
 
 bool StrategyRegistry::has(const std::string& class_name) {
     std::lock_guard<std::mutex> lock(registry().mtx);
-    return std::find(registry().names.begin(), registry().names.end(), class_name) != registry().names.end();
+    return std::find(registry().names.begin(), registry().names.end(), class_name) !=
+           registry().names.end();
 }
 
 std::vector<std::string> StrategyRegistry::get_all_strategy_class_names() {
@@ -50,10 +51,8 @@ std::vector<std::string> StrategyRegistry::get_all_strategy_class_names() {
     return registry().names;
 }
 
-void* StrategyRegistry::create(const std::string& class_name,
-                               void* engine,
-                               const std::string& strategy_name,
-                               const std::string& portfolio_name,
+void* StrategyRegistry::create(const std::string& class_name, void* engine,
+                               const std::string& strategy_name, const std::string& portfolio_name,
                                const std::unordered_map<std::string, double>& setting) {
     std::lock_guard<std::mutex> lock(registry().mtx);
     auto it = registry().factories.find(class_name);
@@ -65,4 +64,4 @@ void* StrategyRegistry::create(const std::string& class_name,
 // 集中登记：新策略在此加一行 REGISTER_STRATEGY(ClassName); 并在本文件顶部 include 对应头文件
 REGISTER_STRATEGY(HighFrequencyMomentumStrategy);
 
-}  // namespace strategy_cpp
+} // namespace strategy_cpp

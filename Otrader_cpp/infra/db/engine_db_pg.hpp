@@ -2,15 +2,16 @@
 
 /**
  * DatabaseEngine (live): PostgreSQL contract/order/trade 持久化（libpqxx）。
- * load_contracts() 按固定顺序发出 Contract 事件，由 EventEngine 派发至 MarketDataEngine::process_contract，
- * 建立 portfolio 结构；后续 Snapshot 事件经 dispatch_snapshot → apply_frame 更新行情/Greeks。
+ * load_contracts() 按固定顺序发出 Contract 事件，由 EventEngine 派发至
+ * MarketDataEngine::process_contract， 建立 portfolio 结构；后续 Snapshot 事件经 dispatch_snapshot
+ * → apply_frame 更新行情/Greeks。
  */
 
+#include "../../core/engine_log.hpp"
 #include "../../utilities/base_engine.hpp"
 #include "../../utilities/constant.hpp"
-#include "../../utilities/object.hpp"
 #include "../../utilities/event.hpp"
-#include "../../core/engine_log.hpp"
+#include "../../utilities/object.hpp"
 #include <memory>
 #include <mutex>
 #include <string>
@@ -26,16 +27,15 @@ namespace engines {
 struct MainEngine;
 
 class DatabaseEngine : public utilities::BaseEngine {
-public:
+  public:
     /** conninfo: PostgreSQL connection string (e.g. "dbname=trading" or env DATABASE_URL). */
-    explicit DatabaseEngine(utilities::MainEngine* main_engine,
-                           const std::string& conninfo = "");
+    explicit DatabaseEngine(utilities::MainEngine* main_engine, const std::string& conninfo = "");
     ~DatabaseEngine() override;
 
     void load_contracts();
     void save_contract_data(const utilities::ContractData& contract, const std::string& symbol_key);
-    std::unordered_map<std::string, utilities::ContractData> load_contract_data(
-        const std::string* symbol_key = nullptr);
+    std::unordered_map<std::string, utilities::ContractData>
+    load_contract_data(const std::string* symbol_key = nullptr);
 
     void save_order_data(const std::string& strategy_name, const utilities::OrderData& order);
     void save_trade_data(const std::string& strategy_name, const utilities::TradeData& trade);
@@ -45,7 +45,7 @@ public:
 
     void close() override;
 
-private:
+  private:
     void create_tables();
     void cleanup_expired_options();
     void write_log(const std::string& msg, int level = INFO);
@@ -55,4 +55,4 @@ private:
     std::mutex db_mutex_;
 };
 
-}  // namespace engines
+} // namespace engines

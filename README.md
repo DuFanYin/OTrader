@@ -2,9 +2,9 @@
 
 <div align="center">
 
-*A strategy-oriented live option trading platform that supports your own quantitative option strategies*
+*A strategy-oriented option trading & research platform that supports your own quantitative option strategies*
 
-> **[C++ version](Otrader_cpp/):** Work in progress
+> **[C++ version](Otrader_cpp/ARCHITECTURE.md):** Work in progress; code is for demonstration purposes; CMake files and third-party libraries are not included
 
 ---
 

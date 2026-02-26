@@ -2,27 +2,28 @@
 
 /**
  * C++ equivalent of engines/engine_gateway.py (IbGateway).
- * Interface: connect, disconnect, send_order, cancel_order, query_account, query_position, query_portfolio.
- * Actual IB connectivity via IbApi implementation (stub or TWS).
+ * Interface: connect, disconnect, send_order, cancel_order, query_account, query_position,
+ * query_portfolio. Actual IB connectivity via IbApi implementation (stub or TWS).
  */
 
-#include "../../utilities/object.hpp"
-#include "../../utilities/event.hpp"
 #include "../../core/engine_log.hpp"
+#include "../../utilities/event.hpp"
+#include "../../utilities/object.hpp"
 #include <memory>
 #include <string>
 
 namespace engines {
 
 struct MainEngine;
-class IbApiTws;  // TWS implementation in engine_gateway.cpp; needs to call gateway private callbacks
+class IbApiTws; // TWS implementation in engine_gateway.cpp; needs to call gateway private callbacks
 
 /** Abstract API for IB connectivity (stub or real TWS). */
 class IbApi {
-public:
+  public:
     virtual ~IbApi() = default;
     virtual bool is_connected() const { return false; }
-    virtual void connect(const std::string& host, int port, int client_id, const std::string& account) = 0;
+    virtual void connect(const std::string& host, int port, int client_id,
+                         const std::string& account) = 0;
     virtual void close() = 0;
     virtual void check_connection() = 0;
     virtual std::string send_order(const utilities::OrderRequest& req) = 0;
@@ -37,7 +38,8 @@ public:
 class IbGateway {
     friend class IbApi;
     friend class IbApiTws;
-public:
+
+  public:
     explicit IbGateway(MainEngine* main_engine);
     ~IbGateway();
 
@@ -65,7 +67,7 @@ public:
     Setting& default_setting() { return default_setting_; }
     const Setting& default_setting() const { return default_setting_; }
 
-private:
+  private:
     void write_log(const std::string& msg, int level = engines::INFO);
     void on_order(const utilities::OrderData& order);
     void on_trade(const utilities::TradeData& trade);
@@ -74,8 +76,8 @@ private:
     MainEngine* main_engine_ = nullptr;
     std::string gateway_name_ = "IBGateway";
     Setting default_setting_;
-    int     count_ = 0;
+    int count_ = 0;
     std::unique_ptr<IbApi> api_;
 };
 
-}  // namespace engines
+} // namespace engines

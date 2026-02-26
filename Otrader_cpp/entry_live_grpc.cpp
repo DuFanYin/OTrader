@@ -9,8 +9,8 @@
  */
 
 #include "engine_event.hpp"
-#include "engine_main.hpp"
 #include "engine_grpc.hpp"
+#include "engine_main.hpp"
 
 #include <grpcpp/grpcpp.h>
 
@@ -54,4 +54,3 @@ int main(int argc, char* argv[]) {
 
     return 0;
 }
-

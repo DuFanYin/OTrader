@@ -18,9 +18,12 @@ struct OptionSnapshot {
     std::optional<int> ask_sz;
 
     [[nodiscard]] std::optional<double> mid() const {
-        if (bid_px && ask_px) return (*bid_px + *ask_px) / 2.0;
-        if (bid_px) return *bid_px;
-        if (ask_px) return *ask_px;
+        if (bid_px && ask_px)
+            return (*bid_px + *ask_px) / 2.0;
+        if (bid_px)
+            return *bid_px;
+        if (ask_px)
+            return *ask_px;
         return std::nullopt;
     }
 };
@@ -32,9 +35,12 @@ struct UnderlyingSnapshot {
     std::optional<int> ask_sz;
 
     [[nodiscard]] std::optional<double> mid() const {
-        if (bid_px && ask_px) return (*bid_px + *ask_px) / 2.0;
-        if (bid_px) return *bid_px;
-        if (ask_px) return *ask_px;
+        if (bid_px && ask_px)
+            return (*bid_px + *ask_px) / 2.0;
+        if (bid_px)
+            return *bid_px;
+        if (ask_px)
+            return *ask_px;
         return std::nullopt;
     }
 };
@@ -52,14 +58,14 @@ struct BacktestResult {
     int total_timesteps = 0;
     int processed_timesteps = 0;
     double final_pnl = 0.0;
-    int total_orders = 0;  // 订单数量（不再区分 trade 与 win/lose）
+    int total_orders = 0; // 订单数量（不再区分 trade 与 win/lose）
     double max_delta = 0.0;
     double max_gamma = 0.0;
     double max_theta = 0.0;
-    double max_drawdown = 0.0;  // Maximum drawdown (peak to trough)
+    double max_drawdown = 0.0; // Maximum drawdown (peak to trough)
     // Counters for data volume
-    int64_t total_frames = 0;  // number of timestep frames processed
-    int64_t total_rows = 0;    // total number of rows processed (columnar frames)
+    int64_t total_frames = 0; // number of timestep frames processed
+    int64_t total_rows = 0;   // total number of rows processed (columnar frames)
     std::vector<std::string> errors;
 };
 
@@ -71,4 +77,4 @@ struct DataMeta {
     std::string ts_end;
 };
 
-}  // namespace backtest
+} // namespace backtest
