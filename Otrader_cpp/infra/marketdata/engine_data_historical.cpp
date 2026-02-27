@@ -8,11 +8,11 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <ctime>
 #include <iomanip>
 #include <iostream>
 #include <unordered_map>
 #include <unordered_set>
-#include <ctime>
 
 namespace backtest {
 
@@ -258,8 +258,7 @@ auto BacktestDataEngine::build_snapshot_from_frame(TimestepFrameColumnar const& 
                                : 0.0;
         snapshot.bid[idx] = bid;
         snapshot.ask[idx] = ask;
-        snapshot.last[idx] = (bid > 0.0 && ask > 0.0) ? 0.5 * (bid + ask)
-                                                      : (bid > 0.0 ? bid : ask);
+        snapshot.last[idx] = (bid > 0.0 && ask > 0.0) ? 0.5 * (bid + ask) : (bid > 0.0 ? bid : ask);
     }
 
     snapshot.underlying_bid = u_bid;

@@ -1,9 +1,11 @@
 /**
  * Shared PositionEngine (from engines/engine_position.py).
  * Same logic: holdings, process_order/process_trade, apply_position_change, update_metrics.
+ * Serialize/load_serialized_holding use protobuf (StrategyHoldingMsg) for binary schema.
  */
 
 #include "engine_position.hpp"
+#include "otrader_engine.pb.h"
 #include <cmath>
 #include <sstream>
 #include <stdexcept>
@@ -63,6 +65,65 @@ auto combo_type_from_string(const std::string& s) -> utilities::ComboType {
         return utilities::ComboType::BOX_SPREAD;
     }
     return utilities::ComboType::CUSTOM;
+}
+
+/** ComboType to enum name (uppercase) for JSON; matches Python ComboType.name. */
+inline auto combo_type_to_enum_name(utilities::ComboType t) -> std::string {
+    switch (t) {
+    case utilities::ComboType::CUSTOM:
+        return "CUSTOM";
+    case utilities::ComboType::SPREAD:
+        return "SPREAD";
+    case utilities::ComboType::STRADDLE:
+        return "STRADDLE";
+    case utilities::ComboType::STRANGLE:
+        return "STRANGLE";
+    case utilities::ComboType::DIAGONAL_SPREAD:
+        return "DIAGONAL_SPREAD";
+    case utilities::ComboType::RATIO_SPREAD:
+        return "RATIO_SPREAD";
+    case utilities::ComboType::RISK_REVERSAL:
+        return "RISK_REVERSAL";
+    case utilities::ComboType::BUTTERFLY:
+        return "BUTTERFLY";
+    case utilities::ComboType::INVERSE_BUTTERFLY:
+        return "INVERSE_BUTTERFLY";
+    case utilities::ComboType::IRON_CONDOR:
+        return "IRON_CONDOR";
+    case utilities::ComboType::IRON_BUTTERFLY:
+        return "IRON_BUTTERFLY";
+    case utilities::ComboType::CONDOR:
+        return "CONDOR";
+    case utilities::ComboType::BOX_SPREAD:
+        return "BOX_SPREAD";
+    }
+    return "CUSTOM";
+}
+
+void base_position_to_msg(const utilities::BasePosition& pos, otrader::BasePositionMsg* msg) {
+    msg->set_symbol(pos.symbol);
+    msg->set_quantity(pos.quantity);
+    msg->set_avg_cost(pos.avg_cost);
+    msg->set_cost_value(pos.cost_value);
+    msg->set_realized_pnl(pos.realized_pnl);
+    msg->set_mid_price(pos.mid_price);
+    msg->set_delta(pos.delta);
+    msg->set_gamma(pos.gamma);
+    msg->set_theta(pos.theta);
+    msg->set_vega(pos.vega);
+}
+
+void msg_to_base_position(const otrader::BasePositionMsg& msg, utilities::BasePosition* pos) {
+    pos->symbol = msg.symbol();
+    pos->quantity = msg.quantity();
+    pos->avg_cost = msg.avg_cost();
+    pos->cost_value = msg.cost_value();
+    pos->realized_pnl = msg.realized_pnl();
+    pos->mid_price = msg.mid_price();
+    pos->delta = msg.delta();
+    pos->gamma = msg.gamma();
+    pos->theta = msg.theta();
+    pos->vega = msg.vega();
 }
 } // namespace
 
@@ -441,16 +502,102 @@ void PositionEngine::update_metrics(const std::string& strategy_name,
     }
 }
 
-auto PositionEngine::serialize_holding(const std::string& strategy_name) -> std::string {
-    (void)strategy_name;
-    return "{}"; // TODO: YAML or JSON serialization to match Python
+auto PositionEngine::serialize_holding(const std::string& strategy_name) const -> std::string {
+    auto it = strategy_holdings_.find(strategy_name);
+    if (it == strategy_holdings_.end()) {
+        return "";
+    }
+    const utilities::StrategyHolding& holding = it->second;
+    otrader::StrategyHoldingMsg msg;
+    base_position_to_msg(holding.underlyingPosition, msg.mutable_underlying());
+    for (const auto& kv : holding.optionPositions) {
+        base_position_to_msg(kv.second, &(*msg.mutable_options())[kv.first]);
+    }
+    for (const auto& kv : holding.comboPositions) {
+        const utilities::ComboPositionData& c = kv.second;
+        otrader::ComboPositionMsg* cm = msg.add_combos();
+        cm->set_symbol(c.symbol);
+        cm->set_quantity(c.quantity);
+        cm->set_combo_type(combo_type_to_enum_name(c.combo_type));
+        cm->set_avg_cost(c.avg_cost);
+        cm->set_cost_value(c.cost_value);
+        cm->set_realized_pnl(c.realized_pnl);
+        cm->set_mid_price(c.mid_price);
+        cm->set_delta(c.delta);
+        cm->set_gamma(c.gamma);
+        cm->set_theta(c.theta);
+        cm->set_vega(c.vega);
+        for (const auto& leg : c.legs) {
+            base_position_to_msg(leg, cm->add_legs());
+        }
+    }
+    otrader::PortfolioSummaryMsg* sm = msg.mutable_summary();
+    sm->set_total_cost(holding.summary.total_cost);
+    sm->set_current_value(holding.summary.current_value);
+    sm->set_unrealized_pnl(holding.summary.unrealized_pnl);
+    sm->set_realized_pnl(holding.summary.realized_pnl);
+    sm->set_pnl(holding.summary.pnl);
+    sm->set_delta(holding.summary.delta);
+    sm->set_gamma(holding.summary.gamma);
+    sm->set_theta(holding.summary.theta);
+    sm->set_vega(holding.summary.vega);
+    std::string out;
+    return msg.SerializeToString(&out) ? out : "";
 }
 
 void PositionEngine::load_serialized_holding(const std::string& strategy_name,
                                              const std::string& data) {
-    (void)strategy_name;
-    (void)data;
-    // TODO: parse and restore holding
+    if (data.empty()) {
+        return;
+    }
+    otrader::StrategyHoldingMsg msg;
+    if (!msg.ParseFromString(data)) {
+        return;
+    }
+    get_create_strategy_holding(strategy_name);
+    utilities::StrategyHolding& holding = strategy_holdings_[strategy_name];
+
+    if (msg.has_underlying()) {
+        msg_to_base_position(msg.underlying(), &holding.underlyingPosition);
+    }
+    holding.optionPositions.clear();
+    for (const auto& [sym, optMsg] : msg.options()) {
+        utilities::OptionPositionData opt(sym);
+        msg_to_base_position(optMsg, &opt);
+        holding.optionPositions[sym] = std::move(opt);
+    }
+    holding.comboPositions.clear();
+    for (const auto& cm : msg.combos()) {
+        utilities::ComboPositionData combo(cm.symbol());
+        combo.quantity = cm.quantity();
+        combo.combo_type = combo_type_from_string(cm.combo_type());
+        combo.avg_cost = cm.avg_cost();
+        combo.cost_value = cm.cost_value();
+        combo.realized_pnl = cm.realized_pnl();
+        combo.mid_price = cm.mid_price();
+        combo.delta = cm.delta();
+        combo.gamma = cm.gamma();
+        combo.theta = cm.theta();
+        combo.vega = cm.vega();
+        for (const auto& legMsg : cm.legs()) {
+            utilities::OptionPositionData leg(legMsg.symbol());
+            msg_to_base_position(legMsg, &leg);
+            combo.legs.push_back(std::move(leg));
+        }
+        holding.comboPositions[combo.symbol] = std::move(combo);
+    }
+    if (msg.has_summary()) {
+        const otrader::PortfolioSummaryMsg& sm = msg.summary();
+        holding.summary.total_cost = sm.total_cost();
+        holding.summary.current_value = sm.current_value();
+        holding.summary.unrealized_pnl = sm.unrealized_pnl();
+        holding.summary.realized_pnl = sm.realized_pnl();
+        holding.summary.pnl = sm.pnl();
+        holding.summary.delta = sm.delta();
+        holding.summary.gamma = sm.gamma();
+        holding.summary.theta = sm.theta();
+        holding.summary.vega = sm.vega();
+    }
 }
 
 } // namespace engines

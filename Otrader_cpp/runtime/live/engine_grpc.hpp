@@ -64,6 +64,10 @@ class GrpcLiveEngineService final : public ::otrader::EngineService::Service {
     ::grpc::Status ListPortfolios(::grpc::ServerContext* context, const ::otrader::Empty* request,
                                   ::otrader::ListPortfoliosResponse* response) override;
 
+    ::grpc::Status QueryPortfolio(::grpc::ServerContext* context,
+                                  const ::otrader::PortfolioRequest* request,
+                                  ::otrader::Empty* response) override;
+
     ::grpc::Status ListStrategyClasses(::grpc::ServerContext* context,
                                        const ::otrader::Empty* request,
                                        ::otrader::ListStrategyClassesResponse* response) override;

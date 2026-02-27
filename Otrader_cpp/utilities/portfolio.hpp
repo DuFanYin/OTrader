@@ -81,8 +81,6 @@ struct OptionData {
     void set_portfolio(PortfolioData* p);
     void set_chain(ChainData* c);
     void set_underlying(UnderlyingData* u);
-    std::optional<double> moneyness(bool use_log = false) const;
-    bool is_otm() const;
 };
 
 struct UnderlyingData {
@@ -144,7 +142,7 @@ struct PortfolioData {
 
     double risk_free_rate_ = 0.05;
     std::string iv_price_mode_ = "mid"; // "mid" | "bid" | "ask" for IV input price
-    DateTime dte_ref_{};               // reference date for DTE (defaults to "now")
+    DateTime dte_ref_{};                // reference date for DTE (defaults to "now")
 
     explicit PortfolioData(std::string name);
     void set_risk_free_rate(double rate);

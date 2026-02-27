@@ -1,9 +1,9 @@
 #include "engine_grpc.hpp"
+#include "../../core/log_sink.hpp"
 #include "../../strategy/strategy_registry.hpp"
 #include "../../strategy/template.hpp"
 #include "../../utilities/event.hpp"
 #include "engine_db_pg.hpp"
-#include "../../core/log_sink.hpp"
 
 #include <cstdlib>
 #include <exception>
@@ -66,8 +66,8 @@ auto GrpcLiveEngineService::GetStatus(::grpc::ServerContext* /*context*/,
     const bool running = (main_engine_ != nullptr);
     response->set_running(running);
 
-    const bool ib_connected =
-        running && (main_engine_->ib_gateway() != nullptr) && main_engine_->ib_gateway()->is_connected();
+    const bool ib_connected = running && (main_engine_->ib_gateway() != nullptr) &&
+                              main_engine_->ib_gateway()->is_connected();
     response->set_connected(ib_connected);
 
     const bool md_running = running && main_engine_->market_data_running();
@@ -229,12 +229,12 @@ auto GrpcLiveEngineService::StreamLogs(::grpc::ServerContext* context,
             return out;
         };
         std::string json = "{";
-        json += "\"src\":\"live\"";
-        json += ",\"time\":\"" + escape(log.time) + "\"";
+        json += R"("src":"live")";
+        json += R"(,"time":")" + escape(log.time) + "\"";
         json += ",\"level\":" + std::to_string(log.level);
-        json += ",\"level_str\":\"" + escape(level_str) + "\"";
-        json += ",\"gateway\":\"" + escape(log.gateway_name) + "\"";
-        json += ",\"msg\":\"" + escape(log.msg) + "\"";
+        json += R"(,"level_str":")" + escape(level_str) + "\"";
+        json += R"(,"gateway":")" + escape(log.gateway_name) + "\"";
+        json += R"(,"msg":")" + escape(log.msg) + "\"";
         json += "}";
         msg.set_line(json);
         if (!writer->Write(msg)) {
@@ -379,6 +379,20 @@ auto GrpcLiveEngineService::ListPortfolios(::grpc::ServerContext* /*context*/,
         for (const std::string& n : main_engine_->get_all_portfolio_names()) {
             response->add_portfolios(n);
         }
+        return ::grpc::Status::OK;
+    } catch (const std::exception& e) {
+        return ::grpc::Status(::grpc::StatusCode::INTERNAL, e.what());
+    }
+}
+
+auto GrpcLiveEngineService::QueryPortfolio(::grpc::ServerContext* /*context*/,
+                                           const ::otrader::PortfolioRequest* request,
+                                           ::otrader::Empty* /*response*/) -> ::grpc::Status {
+    if ((main_engine_ == nullptr) || (request == nullptr)) {
+        return ::grpc::Status(::grpc::StatusCode::FAILED_PRECONDITION, "main engine is null");
+    }
+    try {
+        main_engine_->query_portfolio(request->portfolio());
         return ::grpc::Status::OK;
     } catch (const std::exception& e) {
         return ::grpc::Status(::grpc::StatusCode::INTERNAL, e.what());

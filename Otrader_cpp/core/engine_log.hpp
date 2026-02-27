@@ -8,8 +8,11 @@
 
 #include "../utilities/base_engine.hpp"
 #include "../utilities/object.hpp"
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
+#include <mutex>
 #include <string>
 
 namespace engines {
@@ -36,13 +39,24 @@ class LogEngine : public utilities::BaseEngine {
     void set_level(int level) { level_ = level; }
     int level() const { return level_; }
 
+    /** 组帧、写入 stream buffer、并 process_log_intent（供 Main 等直接打 log）。 */
+    void write_log(const std::string& msg, int level = INFO, const std::string& gateway = "");
+
     /** Consume LogIntent (EventEngine routes here). */
     void process_log_intent(const utilities::LogData& data);
 
+    /** 供 gRPC StreamLogs 从 buffer 取 log。 */
+    bool pop_log_for_stream(utilities::LogData& out, int timeout_ms);
+
   private:
+    static constexpr size_t kMaxStreamBuffer = 1000;
+
     bool active_ = true;
     int level_ = INFO; // only output when data.level >= level_
     LogSink sink_;
+    std::deque<utilities::LogData> stream_buffer_;
+    std::mutex stream_mutex_;
+    std::condition_variable stream_cv_;
 };
 
 } // namespace engines

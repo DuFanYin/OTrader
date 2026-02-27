@@ -6,6 +6,7 @@
  */
 
 #include "../../core/engine_combo_builder.hpp"
+#include "../../core/engine_execution.hpp"
 #include "../../core/engine_hedge.hpp"
 #include "../../core/engine_log.hpp"
 #include "../../core/engine_option_strategy.hpp"
@@ -22,6 +23,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <unordered_set>
 
 namespace engines {
 
@@ -35,6 +37,7 @@ class MainEngine : public utilities::MainEngine {
     DatabaseEngine* db_engine() { return db_engine_.get(); }
     MarketDataEngine* market_data_engine() { return market_data_engine_.get(); }
     IbGateway* ib_gateway() { return ib_gateway_.get(); }
+    core::ExecutionEngine* execution_engine() { return execution_engine_.get(); }
     core::OptionStrategyEngine* option_strategy_engine() { return option_strategy_engine_.get(); }
     PositionEngine* position_engine() { return position_engine_.get(); }
     HedgeEngine* hedge_engine();
@@ -62,6 +65,7 @@ class MainEngine : public utilities::MainEngine {
     std::string send_order(const utilities::OrderRequest& req);
     void query_account();
     void query_position();
+    void query_portfolio(const std::string& portfolio_name);
 
     utilities::OrderData* get_order(const std::string& orderid);
     utilities::TradeData* get_trade(const std::string& tradeid);
@@ -99,6 +103,7 @@ class MainEngine : public utilities::MainEngine {
     std::unique_ptr<DatabaseEngine> db_engine_;
     std::unique_ptr<MarketDataEngine> market_data_engine_;
     std::unique_ptr<IbGateway> ib_gateway_;
+    std::unique_ptr<core::ExecutionEngine> execution_engine_;
     std::unique_ptr<core::OptionStrategyEngine> option_strategy_engine_;
     std::unique_ptr<PositionEngine> position_engine_;
     std::unique_ptr<HedgeEngine> hedge_engine_;
@@ -108,10 +113,7 @@ class MainEngine : public utilities::MainEngine {
     std::mutex strategy_updates_mutex_;
     std::condition_variable strategy_updates_cv_;
 
-    std::deque<utilities::LogData> log_stream_buffer_;
-    std::mutex log_stream_mutex_;
-    std::condition_variable log_stream_cv_;
-
+    std::unordered_set<std::string> dummy_active_ids_;
     bool market_data_running_ = false;
 };
 

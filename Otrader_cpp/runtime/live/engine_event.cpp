@@ -3,6 +3,7 @@
  */
 
 #include "engine_event.hpp"
+#include "../../core/engine_execution.hpp"
 #include "../../core/engine_hedge.hpp"
 #include "../../core/engine_option_strategy.hpp"
 #include "../../utilities/event.hpp"
@@ -162,16 +163,19 @@ void EventEngine::dispatch_timer() {
 void EventEngine::dispatch_order(const utilities::Event& event) {
     if (const auto* pd = std::get_if<utilities::OrderData>(&event.data)) {
         utilities::OrderData order = *pd;
+        core::ExecutionEngine* ex = main_engine_->execution_engine();
+        if (ex != nullptr) {
+            std::string strategy_name = ex->get_strategy_name_for_order(order.orderid);
+            ex->store_order(strategy_name, order);
+            if (!strategy_name.empty()) {
+                main_engine_->save_order_data(strategy_name, order);
+            }
+        }
         if (main_engine_->position_engine() != nullptr) {
             main_engine_->position_engine()->process_order(order);
         }
         if (main_engine_->option_strategy_engine() != nullptr) {
             main_engine_->option_strategy_engine()->process_order(order);
-            std::string sn =
-                main_engine_->option_strategy_engine()->get_strategy_name_for_order(order.orderid);
-            if (!sn.empty()) {
-                main_engine_->save_order_data(sn, order);
-            }
         }
     }
 }
@@ -179,16 +183,20 @@ void EventEngine::dispatch_order(const utilities::Event& event) {
 void EventEngine::dispatch_trade(const utilities::Event& event) {
     if (const auto* pd = std::get_if<utilities::TradeData>(&event.data)) {
         utilities::TradeData trade = *pd;
+        core::ExecutionEngine* ex = main_engine_->execution_engine();
+        std::string strategy_name;
+        if (ex != nullptr) {
+            ex->store_trade(trade);
+            strategy_name = ex->get_strategy_name_for_order(trade.orderid);
+            if (!strategy_name.empty()) {
+                main_engine_->save_trade_data(strategy_name, trade);
+            }
+        }
+        if (main_engine_->position_engine() != nullptr) {
+            main_engine_->position_engine()->process_trade(strategy_name, trade);
+        }
         if (main_engine_->option_strategy_engine() != nullptr) {
             main_engine_->option_strategy_engine()->process_trade(trade);
-            std::string sn =
-                main_engine_->option_strategy_engine()->get_strategy_name_for_order(trade.orderid);
-            if (!sn.empty()) {
-                main_engine_->save_trade_data(sn, trade);
-                if (main_engine_->position_engine() != nullptr) {
-                    main_engine_->position_engine()->process_trade(sn, trade);
-                }
-            }
         }
     }
 }

@@ -58,11 +58,11 @@ class HedgeEngine {
     }
 
   private:
-    void run_strategy_hedging_with_params(const std::string& strategy_name, HedgeConfig& config,
-                                          const HedgeParams& params,
-                                          std::vector<utilities::OrderRequest>* out_orders,
-                                          std::vector<utilities::CancelRequest>* out_cancels,
-                                          std::vector<utilities::LogData>* out_logs);
+    static void run_strategy_hedging_with_params(const std::string& strategy_name,
+                                                 HedgeConfig& config, const HedgeParams& params,
+                                                 std::vector<utilities::OrderRequest>* out_orders,
+                                                 std::vector<utilities::CancelRequest>* out_cancels,
+                                                 std::vector<utilities::LogData>* out_logs);
     static std::optional<std::tuple<std::string, utilities::Direction, double, double>>
     compute_hedge_plan(const std::string& strategy_name, HedgeConfig& config,
                        const HedgeParams& params);

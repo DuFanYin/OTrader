@@ -27,9 +27,7 @@ void BacktestEngine::configure_execution(double fee_rate, double slippage_bps) {
     if (fee_rate < 0.0) {
         throw std::runtime_error("fee_rate must be >= 0");
     }
-    if (slippage_bps < 0.0) {
-        slippage_bps = 0.0;
-    }
+    slippage_bps = std::max(slippage_bps, 0.0);
     fee_rate_ = fee_rate;
     slippage_bps_ = slippage_bps;
 }
@@ -89,7 +87,7 @@ auto BacktestEngine::calculate_order_fee(const utilities::OrderRequest& req,
     return total_contracts * fee_rate_;
 }
 
-std::string BacktestEngine::submit_order(const utilities::OrderRequest& req) {
+auto BacktestEngine::submit_order(const utilities::OrderRequest& req) -> std::string {
     order_counter_++;
     std::string orderid = "backtest_order_" + std::to_string(order_counter_);
     pending_orders_.emplace_back(orderid, req);
@@ -99,8 +97,7 @@ std::string BacktestEngine::submit_order(const utilities::OrderRequest& req) {
 void BacktestEngine::execute_order_impl(const utilities::OrderRequest& req,
                                         const std::string& orderid) {
     const double limit = req.price;
-    const bool is_limit_order =
-        (req.type == utilities::OrderType::LIMIT && limit > 0.0);
+    const bool is_limit_order = (req.type == utilities::OrderType::LIMIT && limit > 0.0);
 
     double fill_price = 0.0;
     bool filled = false;
@@ -236,7 +233,8 @@ void BacktestEngine::execute_order_impl(const utilities::OrderRequest& req,
                     continue;
                 }
                 auto [leg_bid, leg_ask] = get_market_bid_ask(*leg.symbol);
-                double leg_price = (leg.direction == utilities::Direction::LONG) ? leg_ask : leg_bid;
+                double leg_price =
+                    (leg.direction == utilities::Direction::LONG) ? leg_ask : leg_bid;
                 if (leg_price <= 0.0) {
                     leg_price = fill_price; // fallback for combo aggregate
                 }
@@ -244,8 +242,8 @@ void BacktestEngine::execute_order_impl(const utilities::OrderRequest& req,
                 leg_trade.gateway_name = "Backtest";
                 leg_trade.symbol = *leg.symbol;
                 leg_trade.exchange = leg.exchange;
-                leg_trade.tradeid =
-                    "backtest_trade_" + std::to_string(trade_counter_) + "_leg_" + std::to_string(i++);
+                leg_trade.tradeid = "backtest_trade_" + std::to_string(trade_counter_) + "_leg_" +
+                                    std::to_string(i++);
                 leg_trade.orderid = orderid;
                 leg_trade.direction = leg.direction;
                 leg_trade.price = leg_price;
@@ -361,7 +359,8 @@ auto BacktestEngine::run() -> BacktestResult {
             // So we execute pending (from Timer(step_count-1)) now that we "see" this bar's BBO.
             execute_pending_orders();
 
-            // Timer(step_count): strategy runs with this bar's info and may send orders (pending for next step).
+            // Timer(step_count): strategy runs with this bar's info and may send orders (pending
+            // for next step).
             event_engine_->put_event(utilities::Event(utilities::EventType::Timer));
 
             auto* holding = strategy_engine->get_strategy_holding();
@@ -435,13 +434,10 @@ void BacktestEngine::reset() {
     order_counter_ = 0;
     trade_counter_ = 0;
 
-    // Clear strategy (but keep engine alive)
-    if (main_engine_ && (main_engine_->option_strategy_engine() != nullptr)) {
-        auto* strategy_engine = main_engine_->option_strategy_engine();
-        // Stop and clear strategy if exists
-        if (strategy_engine->get_strategy() != nullptr) {
-            strategy_engine->get_strategy()->on_stop();
-        }
+    // 清理 runtime 状态，避免多日/多文件回测之间持仓与订单“串日”导致尾部几天 PnL 异常。
+    // 使用 MainEngine::close 来统一关闭策略 / 执行引擎 / 事件引擎。
+    if (main_engine_) {
+        main_engine_->close();
     }
 }
 

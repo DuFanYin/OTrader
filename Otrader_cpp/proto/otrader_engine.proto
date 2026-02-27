@@ -110,7 +110,59 @@ message GetRemovedStrategiesResponse {
 }
 
 message StrategyHoldingsResponse {
-  map<string, string> holdings = 1;  // strategy_name -> JSON string
+  map<string, string> holdings = 1;  // strategy_name -> serialized StrategyHoldingMsg (binary proto)
+}
+
+// -------- Strategy holding serialization (binary proto, schema for external deserialization) --------
+message BasePositionMsg {
+  string symbol = 1;
+  int32 quantity = 2;
+  double avg_cost = 3;
+  double cost_value = 4;
+  double realized_pnl = 5;
+  double mid_price = 6;
+  double delta = 7;
+  double gamma = 8;
+  double theta = 9;
+  double vega = 10;
+}
+
+message ComboPositionMsg {
+  string symbol = 1;
+  int32 quantity = 2;
+  string combo_type = 3;  // e.g. "CUSTOM", "SPREAD"
+  double avg_cost = 4;
+  double cost_value = 5;
+  double realized_pnl = 6;
+  double mid_price = 7;
+  double delta = 8;
+  double gamma = 9;
+  double theta = 10;
+  double vega = 11;
+  repeated BasePositionMsg legs = 12;
+}
+
+message PortfolioSummaryMsg {
+  double total_cost = 1;
+  double current_value = 2;
+  double unrealized_pnl = 3;
+  double realized_pnl = 4;
+  double pnl = 5;
+  double delta = 6;
+  double gamma = 7;
+  double theta = 8;
+  double vega = 9;
+}
+
+message StrategyHoldingMsg {
+  BasePositionMsg underlying = 1;
+  map<string, BasePositionMsg> options = 2;
+  repeated ComboPositionMsg combos = 3;
+  PortfolioSummaryMsg summary = 4;
+}
+
+message PortfolioRequest {
+  string portfolio = 1;
 }
 
 // 面向 live 的引擎控制 / 查询服务。
@@ -136,6 +188,7 @@ service EngineService {
   // 主服务：订单/成交、组合列表
   rpc GetOrdersAndTrades(Empty) returns (OrdersAndTradesResponse);
   rpc ListPortfolios(Empty) returns (ListPortfoliosResponse);
+  rpc QueryPortfolio(PortfolioRequest) returns (Empty);
 
   // 策略服务：类列表、组合元数据、已移除策略
   rpc ListStrategyClasses(Empty) returns (ListStrategyClassesResponse);

@@ -10,11 +10,11 @@ OptionStrategyTemplate::OptionStrategyTemplate(
     std::string portfolio_name, const std::unordered_map<std::string, double>& setting)
     : engine_(strategy_engine), strategy_name_(std::move(strategy_name)),
       portfolio_name_(std::move(portfolio_name)) {
-    if (!engine_) {
+    if (engine_ == nullptr) {
         throw std::runtime_error("Strategy engine is null");
     }
     portfolio_ = engine_->get_portfolio(portfolio_name_);
-    if (!portfolio_) {
+    if (portfolio_ == nullptr) {
         throw std::runtime_error("Portfolio not found: " + portfolio_name_);
     }
     underlying_ = portfolio_->underlying.get();
@@ -70,94 +70,105 @@ void OptionStrategyTemplate::subscribe_chains(const std::vector<std::string>& ch
     }
 }
 
-utilities::ChainData* OptionStrategyTemplate::get_chain(const std::string& chain_symbol) const {
+auto OptionStrategyTemplate::get_chain(const std::string& chain_symbol) const -> utilities::ChainData* {
     auto it = chain_map_.find(chain_symbol);
     return it == chain_map_.end() ? nullptr : it->second;
 }
 
-std::vector<std::string> OptionStrategyTemplate::underlying_order(utilities::Direction direction,
+auto OptionStrategyTemplate::underlying_order(utilities::Direction direction,
                                                                   double price, double volume,
-                                                                  utilities::OrderType order_type) {
-    if (!underlying_) {
+                                                                  utilities::OrderType order_type) -> std::vector<std::string> {
+    if (underlying_ == nullptr) {
         return {};
     }
     return engine_->send_order(strategy_name_, underlying_->symbol, direction, price, volume,
                                order_type);
 }
 
-std::vector<std::string>
+auto
 OptionStrategyTemplate::option_order(const utilities::OptionData& option_data,
                                      utilities::Direction direction, double price, double volume,
-                                     utilities::OrderType order_type) {
+                                     utilities::OrderType order_type) -> std::vector<std::string> {
     return engine_->send_order(strategy_name_, option_data.symbol, direction, price, volume,
                                order_type);
 }
 
-std::vector<std::string> OptionStrategyTemplate::combo_order(
+auto OptionStrategyTemplate::combo_order(
     utilities::ComboType combo_type,
     const std::unordered_map<std::string, utilities::OptionData*>& option_data,
-    utilities::Direction direction, double price, double volume, utilities::OrderType order_type) {
+    utilities::Direction direction, double price, double volume, utilities::OrderType order_type) -> std::vector<std::string> {
     auto* cb = engine_->combo_builder_engine();
-    if (!cb)
+    if (cb == nullptr) {
         return {};
-    auto get_contract = [this](const std::string& s) { return engine_->get_contract(s); };
+}
+    auto get_contract = [this](const std::string& s) -> const utilities::ContractData * { return engine_->get_contract(s); };
     std::vector<utilities::LogData> combo_logs;
     auto [legs, sig] = cb->combo_builder(option_data, combo_type, direction,
                                          static_cast<int>(volume), get_contract, &combo_logs);
-    for (const auto& l : combo_logs)
+    for (const auto& l : combo_logs) {
         engine_->write_log(l.msg, l.level);
+}
     return engine_->send_combo_order(strategy_name_, combo_type, sig, direction, price, volume,
                                      legs, order_type);
 }
 
 void OptionStrategyTemplate::register_hedging(int timer_trigger, int delta_target,
                                               int delta_range) {
-    if (!engine_)
+    if (engine_ == nullptr) {
         return;
+}
     auto* hedge = engine_->hedge_engine();
-    if (!hedge)
+    if (hedge == nullptr) {
         return;
+}
     hedge->register_strategy(strategy_name(), timer_trigger, delta_target, delta_range);
 }
 
 void OptionStrategyTemplate::unregister_hedging() {
-    if (!engine_)
+    if (engine_ == nullptr) {
         return;
+}
     auto* hedge = engine_->hedge_engine();
-    if (!hedge)
+    if (hedge == nullptr) {
         return;
+}
     hedge->unregister_strategy(strategy_name_);
 }
 
 void OptionStrategyTemplate::close_all_strategy_positions() {
-    if (!holding_)
+    if (holding_ == nullptr) {
         return;
+}
     for (const auto& [_, combo] : holding_->comboPositions) {
-        if (combo.quantity == 0)
+        if (combo.quantity == 0) {
             continue;
+}
         std::unordered_map<std::string, utilities::OptionData*> option_data;
         for (const auto& leg : combo.legs) {
             auto it = portfolio_->options.find(leg.symbol);
-            if (it != portfolio_->options.end())
+            if (it != portfolio_->options.end()) {
                 option_data[leg.symbol] = &it->second;
+}
         }
-        if (option_data.empty())
+        if (option_data.empty()) {
             continue;
+}
         utilities::Direction dir =
             combo.quantity > 0 ? utilities::Direction::SHORT : utilities::Direction::LONG;
         combo_order(utilities::ComboType::CUSTOM, option_data, dir, 0.0,
                     std::abs(static_cast<double>(combo.quantity)), utilities::OrderType::MARKET);
     }
     for (const auto& [sym, pos] : holding_->optionPositions) {
-        if (pos.quantity == 0)
+        if (pos.quantity == 0) {
             continue;
+}
         utilities::Direction dir =
             pos.quantity > 0 ? utilities::Direction::SHORT : utilities::Direction::LONG;
         engine_->send_order(strategy_name_, sym, dir, 0.0,
                             std::abs(static_cast<double>(pos.quantity)),
                             utilities::OrderType::MARKET);
     }
-    if (holding_->underlyingPosition.quantity != 0 && underlying_) {
+    if (holding_->underlyingPosition.quantity != 0 && (underlying_ != nullptr)) {
         utilities::Direction dir = holding_->underlyingPosition.quantity > 0
                                        ? utilities::Direction::SHORT
                                        : utilities::Direction::LONG;
@@ -175,8 +186,9 @@ void OptionStrategyTemplate::set_error(const std::string& msg) {
 }
 
 void OptionStrategyTemplate::write_log(const std::string& msg) const {
-    if (engine_)
+    if (engine_ != nullptr) {
         engine_->write_log("[" + strategy_name_ + "] " + msg, 20 /* INFO */);
+}
 }
 
 } // namespace strategy_cpp

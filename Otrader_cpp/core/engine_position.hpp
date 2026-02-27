@@ -49,8 +49,10 @@ class PositionEngine {
     /** Update metrics; caller passes portfolio from outside. */
     void update_metrics(const std::string& strategy_name, utilities::PortfolioData* portfolio);
 
-    static std::string serialize_holding(const std::string& strategy_name);
-    static void load_serialized_holding(const std::string& strategy_name, const std::string& data);
+    /** Serialize strategy holding to JSON (same shape as Python serialize_holding dict). */
+    std::string serialize_holding(const std::string& strategy_name) const;
+    /** Load strategy holding from JSON string (same shape as Python load_serialized_holding). */
+    void load_serialized_holding(const std::string& strategy_name, const std::string& data);
 
   private:
     static void apply_underlying_trade(utilities::StrategyHolding& holding,

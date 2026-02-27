@@ -6,6 +6,7 @@
  */
 
 #include "../../core/engine_combo_builder.hpp"
+#include "../../core/engine_execution.hpp"
 #include "../../core/engine_hedge.hpp"
 #include "../../core/engine_log.hpp"
 #include "../../core/engine_option_strategy.hpp"
@@ -19,6 +20,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace backtest {
 
@@ -73,6 +75,7 @@ class MainEngine : public utilities::MainEngine {
     utilities::IEventEngine* event_engine() { return event_engine_; }
     const utilities::IEventEngine* event_engine() const { return event_engine_; }
 
+    core::ExecutionEngine* execution_engine() { return execution_engine_.get(); }
     core::OptionStrategyEngine* option_strategy_engine() { return option_strategy_engine_.get(); }
     const core::OptionStrategyEngine* option_strategy_engine() const {
         return option_strategy_engine_.get();
@@ -93,15 +96,16 @@ class MainEngine : public utilities::MainEngine {
     utilities::IEventEngine* event_engine_ = nullptr;
     std::unordered_map<std::string, utilities::PortfolioData*> portfolios_;
     std::unordered_map<std::string, utilities::ContractData> contracts_;
-    std::unordered_map<std::string, utilities::OrderData> orders_;
     int order_counter_ = 0;
     OrderExecutor order_executor_;
+    std::unique_ptr<core::ExecutionEngine> execution_engine_;
     std::unique_ptr<core::OptionStrategyEngine> option_strategy_engine_;
     std::unique_ptr<BacktestDataEngine> data_engine_;
     std::unique_ptr<engines::PositionEngine> position_engine_;
     std::unique_ptr<engines::ComboBuilderEngine> combo_builder_engine_;
     std::unique_ptr<engines::HedgeEngine> hedge_engine_;
     std::unique_ptr<engines::LogEngine> log_engine_;
+    std::unordered_set<std::string> dummy_active_ids_;
 };
 
 } // namespace backtest

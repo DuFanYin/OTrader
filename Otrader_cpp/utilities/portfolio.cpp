@@ -17,34 +17,6 @@ void OptionData::set_portfolio(PortfolioData* p) { portfolio = p; }
 void OptionData::set_chain(ChainData* c) { chain = c; }
 void OptionData::set_underlying(UnderlyingData* u) { underlying = u; }
 
-auto OptionData::moneyness(bool use_log) const -> std::optional<double> {
-    if ((underlying == nullptr) || !strike_price || *strike_price == 0) {
-        return std::nullopt;
-    }
-    double s = underlying->mid_price;
-    double k = *strike_price;
-    double ratio = s / k;
-    if (use_log) {
-        if (ratio <= 0) {
-            return std::nullopt;
-        }
-        return std::log(ratio);
-    }
-    return ratio;
-}
-
-auto OptionData::is_otm() const -> bool {
-    if ((underlying == nullptr) || !strike_price) {
-        return false;
-    }
-    double s = underlying->mid_price;
-    double k = *strike_price;
-    if (option_type > 0) {
-        return k > s;
-    }
-    return k < s;
-}
-
 UnderlyingData::UnderlyingData(const ContractData& contract)
     : symbol(contract.symbol), exchange(contract.exchange), size(contract.size),
       theo_delta(contract.size) {}
@@ -203,7 +175,14 @@ auto ChainData::best_iv(const std::unordered_map<std::string, OptionData*>& opti
     double min_diff = 1e30;
     std::optional<double> best;
     for (const auto& [_, opt] : options_map) {
-        if (opt->mid_iv == 0 || !opt->is_otm()) {
+        if ((opt == nullptr) || opt->mid_iv == 0 || !opt->strike_price || (opt->underlying == nullptr)) {
+            continue;
+        }
+        double s = opt->underlying->mid_price;
+        double k = *opt->strike_price;
+        // 仅考虑 out-of-the-money 期权：CALL 要 K>S，PUT 要 K<S
+        bool otm = (opt->option_type > 0) ? (k > s) : (k < s);
+        if (!otm) {
             continue;
         }
         double size = opt->size != 0 ? opt->size : 1.0;
@@ -239,16 +218,14 @@ void PortfolioData::set_risk_free_rate(double rate) {
 
 void PortfolioData::set_iv_price_mode(std::string mode) {
     std::ranges::transform(mode, mode.begin(), [](unsigned char c) -> char {
-        return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return static_cast<char>(std::tolower(c));
     });
     if (mode == "mid" || mode == "bid" || mode == "ask") {
         iv_price_mode_ = std::move(mode);
     }
 }
 
-void PortfolioData::set_dte_ref(DateTime ref) {
-    dte_ref_ = ref;
-}
+void PortfolioData::set_dte_ref(DateTime ref) { dte_ref_ = ref; }
 
 void PortfolioData::update_option_chain(const ChainMarketData& market_data) {
     auto it = chains.find(market_data.chain_symbol);
@@ -274,11 +251,11 @@ void PortfolioData::apply_frame(const PortfolioSnapshot& snapshot) {
         return;
     }
     const double spot = (snapshot.underlying_bid > 0.0 || snapshot.underlying_ask > 0.0)
-                           ? ((snapshot.underlying_bid > 0.0 && snapshot.underlying_ask > 0.0)
-                                  ? 0.5 * (snapshot.underlying_bid + snapshot.underlying_ask)
-                                  : (snapshot.underlying_bid > 0.0 ? snapshot.underlying_bid
-                                                                  : snapshot.underlying_ask))
-                           : snapshot.underlying_last;
+                            ? ((snapshot.underlying_bid > 0.0 && snapshot.underlying_ask > 0.0)
+                                   ? 0.5 * (snapshot.underlying_bid + snapshot.underlying_ask)
+                                   : (snapshot.underlying_bid > 0.0 ? snapshot.underlying_bid
+                                                                    : snapshot.underlying_ask))
+                            : snapshot.underlying_last;
 
     std::vector<double> iv_vec(n, 0.0);
     std::vector<double> delta_vec(n, 0.0);
@@ -297,7 +274,7 @@ void PortfolioData::apply_frame(const PortfolioSnapshot& snapshot) {
             break;
         }
         threads.emplace_back([this, &snapshot, spot, start, end, &iv_vec, &delta_vec, &gamma_vec,
-                              &theta_vec, &vega_vec]() {
+                              &theta_vec, &vega_vec]() -> void {
             for (size_t i = start; i < end; ++i) {
                 OptionData* opt = option_apply_order_[i];
                 if (opt == nullptr) {
@@ -373,6 +350,11 @@ auto PortfolioData::get_chain(const std::string& chain_symbol) -> ChainData* {
     }
     auto chain = std::make_unique<ChainData>(chain_symbol);
     chain->set_portfolio(this);
+    // 如果组合已经有 underlying，则新建的链也应立即挂上 underlying 指针，
+    // 以便后续 calculate_atm_price 能够使用正确的标的价格。
+    if (underlying) {
+        chain->set_underlying(underlying.get());
+    }
     ChainData* ptr = chain.get();
     chains[chain_symbol] = std::move(chain);
     return ptr;

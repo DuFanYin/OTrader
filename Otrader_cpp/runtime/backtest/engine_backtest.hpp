@@ -28,8 +28,7 @@ class BacktestEngine {
                       std::unordered_map<std::string, double> const& setting = {});
 
     void register_timestep_callback(TimestepCallback cb);
-    void configure_execution(double fee_rate,
-                            double slippage_bps = 5.0);
+    void configure_execution(double fee_rate, double slippage_bps = 5.0);
     double get_cumulative_fees() const { return cumulative_fees_; }
 
     BacktestResult run();
@@ -54,7 +53,8 @@ class BacktestEngine {
     void execute_order_impl(const utilities::OrderRequest& req, const std::string& orderid);
     /** Run all pending orders (sent in previous timestep) with current step's market. */
     void execute_pending_orders();
-    /** Return (bid, ask) for symbol; (0, 0) if not found. Used for LIMIT crossing and MARKET buy=ask/sell=bid. */
+    /** Return (bid, ask) for symbol; (0, 0) if not found. Used for LIMIT crossing and MARKET
+     * buy=ask/sell=bid. */
     std::pair<double, double> get_market_bid_ask(const std::string& symbol) const;
     static double default_contract_size(const std::string& symbol);
     double calculate_order_fee(const utilities::OrderRequest& req, double fill_price) const;

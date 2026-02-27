@@ -21,50 +21,96 @@ MainEngine::MainEngine(utilities::IEventEngine* event_engine) {
     event_engine_->start();
     position_engine_ = std::make_unique<engines::PositionEngine>();
     log_engine_ = std::make_unique<engines::LogEngine>(this);
+    execution_engine_ = std::make_unique<core::ExecutionEngine>();
+    execution_engine_->set_send_impl(
+        [this](const utilities::OrderRequest& req) -> std::string { return append_order(req); });
     log_engine_->set_level(
         engines::DISABLED); // no log by default; call set_log_level(engines::INFO) etc. to enable
     core::RuntimeAPI api;
-    api.send_order = [this](const std::string&, const utilities::OrderRequest& req) -> std::string {
-        return append_order(req);
+    // Execution API
+    api.execution.send_order = [this](const std::string& strategy_name,
+                                      const utilities::OrderRequest& req) -> std::string {
+        return execution_engine_ ? execution_engine_->send_order(strategy_name, req)
+                                 : std::string{};
     };
-    api.send_combo_order = [this](const std::string&, utilities::ComboType combo_type,
-                                  const std::string& combo_sig, utilities::Direction direction,
-                                  double price, double volume,
-                                  const std::vector<utilities::Leg>& legs,
-                                  utilities::OrderType order_type) -> std::string {
-        utilities::OrderRequest req;
-        req.symbol = "combo_" + combo_sig;
-        req.exchange = utilities::Exchange::SMART;
-        req.direction = direction;
-        req.type = order_type;
-        req.volume = volume;
-        req.price =
-            (order_type == utilities::OrderType::MARKET) ? 0.0 : utilities::round_to(price, 0.01);
-        req.is_combo = true;
-        req.combo_type = combo_type;
-        req.legs = legs;
-        if (!legs.empty() && legs.front().trading_class) {
-            req.trading_class = *legs.front().trading_class;
+    api.execution.cancel_order = [this](const utilities::CancelRequest& req) -> void {
+        cancel_order(req);
+    };
+    api.execution.get_order = [this](const std::string& oid) -> utilities::OrderData* {
+        return execution_engine_ ? execution_engine_->get_order(oid) : nullptr;
+    };
+    api.execution.get_trade = [this](const std::string& tid) -> utilities::TradeData* {
+        return execution_engine_ ? execution_engine_->get_trade(tid) : nullptr;
+    };
+    api.execution.get_strategy_name_for_order = [this](const std::string& oid) -> std::string {
+        return execution_engine_ ? execution_engine_->get_strategy_name_for_order(oid)
+                                 : std::string{};
+    };
+    api.execution.get_all_orders = [this]() -> std::vector<utilities::OrderData> {
+        return execution_engine_ ? execution_engine_->get_all_orders()
+                                 : std::vector<utilities::OrderData>{};
+    };
+    api.execution.get_all_trades = [this]() -> std::vector<utilities::TradeData> {
+        return execution_engine_ ? execution_engine_->get_all_trades()
+                                 : std::vector<utilities::TradeData>{};
+    };
+    api.execution.get_all_active_orders = [this]() -> std::vector<utilities::OrderData> {
+        return execution_engine_ ? execution_engine_->get_all_active_orders()
+                                 : std::vector<utilities::OrderData>{};
+    };
+    api.execution.get_strategy_active_orders =
+        [this]() -> const std::unordered_map<std::string, std::set<std::string>>& {
+        static const std::unordered_map<std::string, std::set<std::string>> empty;
+        return execution_engine_ ? execution_engine_->get_strategy_active_orders() : empty;
+    };
+    api.execution.remove_order_tracking = [this](const std::string& oid) -> void {
+        if (execution_engine_) {
+            execution_engine_->remove_order_tracking(oid);
         }
-        return append_order(req);
     };
-    api.write_log = [this](const utilities::LogData& log) -> void { put_log_intent(log); };
-    api.get_portfolio = [this](const std::string& name) -> utilities::PortfolioData* {
+    api.execution.get_active_order_ids = [this]() -> std::unordered_set<std::string>& {
+        return execution_engine_ ? execution_engine_->active_order_ids() : dummy_active_ids_;
+    };
+    api.execution.ensure_strategy_key = [this](const std::string& name) -> void {
+        if (execution_engine_) {
+            execution_engine_->ensure_strategy_key(name);
+        }
+    };
+    api.execution.remove_strategy_tracking = [this](const std::string& name) -> void {
+        if (execution_engine_) {
+            execution_engine_->remove_strategy_tracking(name);
+        }
+    };
+
+    // Portfolio API
+    api.portfolio.get_portfolio = [this](const std::string& name) -> utilities::PortfolioData* {
         return get_portfolio(name);
     };
-    api.get_contract = [this](const std::string& symbol) -> const utilities::ContractData* {
+    api.portfolio.get_contract =
+        [this](const std::string& symbol) -> const utilities::ContractData* {
         return get_contract(symbol);
     };
-    api.get_holding = [this](const std::string& name) -> utilities::StrategyHolding* {
+    api.portfolio.get_holding = [this](const std::string& name) -> utilities::StrategyHolding* {
         return get_holding(name);
     };
-    api.get_or_create_holding = [this](const std::string& name) -> void {
+    api.portfolio.get_or_create_holding = [this](const std::string& name) -> void {
         get_or_create_holding(name);
     };
-    api.get_combo_builder_engine = [this]() -> engines::ComboBuilderEngine* {
+    api.portfolio.remove_strategy_holding = [this](const std::string& name) -> void {
+        if (position_engine_) {
+            position_engine_->remove_strategy_holding(name);
+        }
+    };
+
+    // System API
+    api.system.write_log = [this](const utilities::LogData& log) -> void { put_log_intent(log); };
+    // backtest 暂不需要对外推送策略事件，这里留空实现占位
+    api.system.put_strategy_event = [](const utilities::StrategyUpdateData&) -> void {};
+    api.system.get_combo_builder_engine = [this]() -> engines::ComboBuilderEngine* {
         return combo_builder_engine();
     };
-    api.get_hedge_engine = [this]() -> engines::HedgeEngine* { return hedge_engine(); };
+    api.system.get_hedge_engine = [this]() -> engines::HedgeEngine* { return hedge_engine(); };
+
     option_strategy_engine_ = std::make_unique<core::OptionStrategyEngine>(std::move(api));
     put_log_intent("Main engine initialization successful", INFO);
 }
@@ -117,32 +163,29 @@ auto MainEngine::send_order(const utilities::OrderRequest& req) -> std::string {
 }
 
 void MainEngine::add_order(std::string orderid, utilities::OrderData order) {
-    orders_[std::move(orderid)] = std::move(order);
+    order.orderid = std::move(orderid);
+    if (execution_engine_) {
+        execution_engine_->add_order(order);
+    }
 }
 
 void MainEngine::cancel_order(const utilities::CancelRequest& req) {
-    if (option_strategy_engine_) {
-        option_strategy_engine_->remove_order_tracking(req.orderid);
-    }
-    auto it = orders_.find(req.orderid);
-    if (it != orders_.end()) {
-        it->second.status = utilities::Status::CANCELLED;
-        put_event(utilities::Event(utilities::EventType::Order, it->second));
+    if (execution_engine_) {
+        execution_engine_->remove_order_tracking(req.orderid);
+        utilities::OrderData* o = execution_engine_->get_order(req.orderid);
+        if (o != nullptr) {
+            o->status = utilities::Status::CANCELLED;
+            put_event(utilities::Event(utilities::EventType::Order, *o));
+        }
     }
 }
 
 auto MainEngine::get_order(const std::string& orderid) const -> utilities::OrderData* {
-    if (!option_strategy_engine_) {
-        return nullptr;
-    }
-    return option_strategy_engine_->get_order(orderid);
+    return execution_engine_ ? execution_engine_->get_order(orderid) : nullptr;
 }
 
 auto MainEngine::get_trade(const std::string& tradeid) const -> utilities::TradeData* {
-    if (!option_strategy_engine_) {
-        return nullptr;
-    }
-    return option_strategy_engine_->get_trade(tradeid);
+    return execution_engine_ ? execution_engine_->get_trade(tradeid) : nullptr;
 }
 
 auto MainEngine::get_all_orders() const -> std::vector<utilities::OrderData> {
@@ -188,6 +231,9 @@ auto MainEngine::log_level() const -> int {
 void MainEngine::close() {
     if (option_strategy_engine_) {
         option_strategy_engine_->close();
+    }
+    if (execution_engine_) {
+        execution_engine_->clear();
     }
     if (event_engine_ != nullptr) {
         event_engine_->stop();
