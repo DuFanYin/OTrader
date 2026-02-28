@@ -4,6 +4,53 @@
 
 ---
 
+```
+Otrader/
+├── entry_backtest.cpp                  # Backtest executable entry
+├── entry_live.cpp                      # Live trading executable entry (no gRPC)
+├── entry_live_grpc.cpp                 # Live trading + gRPC service entry
+│
+├── runtime/                            # Runtime: concentrates differences between backtest and live
+│   ├── backtest/
+│   │   ├── engine_backtest.{cpp,hpp}         # Backtest top-level controller
+│   │   ├── engine_event.{cpp,hpp}            # Backtest event engine (synchronous dispatch)
+│   │   └── engine_main.{cpp,hpp}             # Backtest MainEngine
+│   │   
+│   └── live/
+│       ├── engine_event.{cpp,hpp}            # Live event engine (queue + worker threads)
+│       ├── engine_main.{cpp,hpp}             # Live MainEngine
+│       └── engine_grpc.{cpp,hpp}             # gRPC service implementation (holds MainEngine*)
+│
+├── infra/                                      # Infrastructure: data, persistence, gateways
+│   ├── marketdata/
+│   │   ├── engine_data_historical.{cpp,hpp}    # Backtest data engine (parquet → snapshot)
+│   │   └── engine_data_tradier.{cpp,hpp}       # Live market data/combo engine (Contract + Snapshot)
+│   ├── db/
+│   │   └── engine_db_pg.{cpp,hpp}              # PostgreSQL contract/order/trade
+│   └── gateway/
+│       └── engine_gateway_ib.{cpp,hpp}         # IB TWS gateway
+│
+├── proto/
+│   └── otrader_engine.proto                     # gRPC service and message definitions
+│
+├── core/                                        # Domain core: strategy engine and auxiliaries (no Context, caller passes parameters or uses RuntimeAPI)
+│   ├── engine_option_strategy.{cpp,hpp}         # Unified strategy engine + RuntimeAPI
+│   ├── engine_position.{cpp,hpp}                # Strategy position management
+│   ├── engine_hedge.{cpp,hpp}                   # Hedge engine (produces orders/cancels/logs)
+│   ├── engine_combo_builder.{cpp,hpp}           # Combo legs builder
+│   ├── engine_log.{cpp,hpp}                     # Log engine (consumes LogIntent)
+│   └── log_sink.hpp
+│
+├── strategy/                              # Strategy implementations and registry
+│   ├── template.{cpp,hpp}                      # Strategy template base class
+│   ├── high_frequency_momentum.{cpp,hpp}       # Example strategy
+│   └── strategy_registry.{cpp,hpp}             # Strategy class name → factory
+│
+└── utilities/                             # Common data models and infrastructure
+
+```
+
+
 ## 0. high‑level overview
 
 ### 0.1 Scope

@@ -4,7 +4,12 @@
 
 *A strategy-oriented option trading & research platform that supports your own quantitative option strategies*
 
-> **[C++ version](Otrader_cpp/ARCHITECTURE.md):** Work in progress; code is for demonstration purposes; CMake files and third-party libraries are not included
+---
+
+> **🚧 [C++ version](Otrader_cpp/README.md) — Work in progress**  
+> Code is for demonstration purposes; CMake files and third-party libraries are not included.
+
+---
 
 ---
 
