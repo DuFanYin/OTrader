@@ -1,5 +1,5 @@
 #include "engine_grpc.hpp"
-#include "../../core/log_sink.hpp"
+#include "../../core/engine_log.hpp"
 #include "../../strategy/strategy_registry.hpp"
 #include "../../strategy/template.hpp"
 #include "../../utilities/event.hpp"
@@ -216,7 +216,7 @@ auto GrpcLiveEngineService::StreamLogs(::grpc::ServerContext* context,
         ::otrader::LogLine msg;
         // Send structured JSON string; frontend is responsible for formatting.
         // Minimal escaping for quotes and backslashes in msg.
-        std::string level_str = log_sink::level_to_string(log.level);
+        std::string level_str = engines::level_to_string(log.level);
         auto escape = [](const std::string& in) -> std::string {
             std::string out;
             out.reserve(in.size());
@@ -379,20 +379,6 @@ auto GrpcLiveEngineService::ListPortfolios(::grpc::ServerContext* /*context*/,
         for (const std::string& n : main_engine_->get_all_portfolio_names()) {
             response->add_portfolios(n);
         }
-        return ::grpc::Status::OK;
-    } catch (const std::exception& e) {
-        return ::grpc::Status(::grpc::StatusCode::INTERNAL, e.what());
-    }
-}
-
-auto GrpcLiveEngineService::QueryPortfolio(::grpc::ServerContext* /*context*/,
-                                           const ::otrader::PortfolioRequest* request,
-                                           ::otrader::Empty* /*response*/) -> ::grpc::Status {
-    if ((main_engine_ == nullptr) || (request == nullptr)) {
-        return ::grpc::Status(::grpc::StatusCode::FAILED_PRECONDITION, "main engine is null");
-    }
-    try {
-        main_engine_->query_portfolio(request->portfolio());
         return ::grpc::Status::OK;
     } catch (const std::exception& e) {
         return ::grpc::Status(::grpc::StatusCode::INTERNAL, e.what());

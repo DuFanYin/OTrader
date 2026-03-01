@@ -81,6 +81,7 @@ auto ExecutionEngine::get_strategy_name_for_order(const std::string& orderid) co
 
 auto ExecutionEngine::get_all_orders() const -> std::vector<utilities::OrderData> {
     std::vector<utilities::OrderData> out;
+    out.reserve(orders_.size());
     for (const auto& [_, o] : orders_) {
         out.push_back(o);
     }
@@ -89,6 +90,7 @@ auto ExecutionEngine::get_all_orders() const -> std::vector<utilities::OrderData
 
 auto ExecutionEngine::get_all_trades() const -> std::vector<utilities::TradeData> {
     std::vector<utilities::TradeData> out;
+    out.reserve(trades_.size());
     for (const auto& [_, t] : trades_) {
         out.push_back(t);
     }

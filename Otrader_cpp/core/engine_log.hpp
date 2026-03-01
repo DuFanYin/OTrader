@@ -2,8 +2,8 @@
 
 /**
  * Log engine (shared): consumes LogIntent via process_log_intent (no event subscription).
- * Sink stays here (set_sink / default_sink). EventEngine routes log intent into LogEngine (no
- * context interface).
+ * Formatting and default stdout sink are in engine_log.cpp. EventEngine routes log intent
+ * into LogEngine (no context interface).
  */
 
 #include "../utilities/base_engine.hpp"
@@ -25,6 +25,9 @@ inline constexpr int ERROR = 40;
 inline constexpr int CRITICAL = 50;
 /** Set as min level to disable all output (no message has level >= this). */
 inline constexpr int DISABLED = 99;
+
+/** Map level number to string (DEBUG=10, INFO=20, WARNING=30, ERROR=40, CRITICAL=50). */
+std::string level_to_string(int level);
 
 /** Optional sink for log output; if not set, default_sink (stdout) is used. */
 using LogSink = std::function<void(const utilities::LogData&)>;

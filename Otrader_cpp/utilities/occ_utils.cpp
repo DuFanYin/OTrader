@@ -1,5 +1,6 @@
 #include "occ_utils.hpp"
 #include "constant.hpp"
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
@@ -34,7 +35,7 @@ auto parse_occ_symbol(const std::string& symbol)
         tm_utc.tm_min = 0;
         tm_utc.tm_sec = 0;
         tm_utc.tm_isdst = 0;
-        std::time_t t;
+        std::time_t t = 0;
 #ifdef _WIN32
         t = _mkgmtime(&tm_utc);
 #else
@@ -118,10 +119,10 @@ auto format_expiry_yyyymmdd(Timestamp expiry) -> std::string {
     if (tm == nullptr) {
         return "";
     }
-    char buf[16];
-    std::snprintf(buf, sizeof(buf), "%04d%02d%02d", tm->tm_year + 1900, tm->tm_mon + 1,
+    std::array<char, 16> buf{};
+    std::snprintf(buf.data(), buf.size(), "%04d%02d%02d", tm->tm_year + 1900, tm->tm_mon + 1,
                   tm->tm_mday);
-    return buf;
+    return buf.data();
 }
 
 } // namespace backtest

@@ -106,7 +106,7 @@ void BacktestDataEngine::load_parquet(std::string const& rel_path, std::string c
             tm_utc.tm_min = 0;
             tm_utc.tm_sec = 0;
             tm_utc.tm_isdst = 0;
-            std::time_t t;
+            std::time_t t = 0;
 #ifdef _WIN32
             t = _mkgmtime(&tm_utc);
 #else
@@ -116,6 +116,10 @@ void BacktestDataEngine::load_parquet(std::string const& rel_path, std::string c
                 dte_ref = std::chrono::system_clock::from_time_t(t);
             }
         } catch (...) {
+            if (main_engine_ != nullptr) {
+                main_engine_->write_log("Backtest DTE parse failed from ts_start; using default",
+                                        30);
+            }
         }
     }
 
@@ -180,8 +184,15 @@ void BacktestDataEngine::build_occ_to_option(std::unordered_set<std::string> con
             std::string expiry_str = format_expiry_yyyymmdd(*expiry);
             std::string opt_type_str = (*opt_type == utilities::OptionType::CALL) ? "CALL" : "PUT";
             int multiplier = 100;
-            std_sym = under + "-" + expiry_str + "-" + opt_type_str + "-" +
-                      std::to_string(static_cast<int>(*strike)) + "-" + std::to_string(multiplier);
+            std_sym = under;
+            std_sym += "-";
+            std_sym += expiry_str;
+            std_sym += "-";
+            std_sym += opt_type_str;
+            std_sym += "-";
+            std_sym += std::to_string(static_cast<int>(*strike));
+            std_sym += "-";
+            std_sym += std::to_string(multiplier);
             occ_to_standard_symbol_[occ_sym] = std_sym;
         }
         auto opt_it = portfolio_data_->options.find(std_sym);
@@ -333,9 +344,15 @@ void BacktestDataEngine::create_portfolio_data(std::vector<std::string> const& s
         std::string expiry_str = format_expiry_yyyymmdd(*expiry);
         std::string opt_type_str = (*opt_type == utilities::OptionType::CALL) ? "CALL" : "PUT";
         int multiplier = 100;
-        std::string standard_symbol = under + "-" + expiry_str + "-" + opt_type_str + "-" +
-                                      std::to_string(static_cast<int>(*strike)) + "-" +
-                                      std::to_string(multiplier);
+        std::string standard_symbol = under;
+        standard_symbol += "-";
+        standard_symbol += expiry_str;
+        standard_symbol += "-";
+        standard_symbol += opt_type_str;
+        standard_symbol += "-";
+        standard_symbol += std::to_string(static_cast<int>(*strike));
+        standard_symbol += "-";
+        standard_symbol += std::to_string(multiplier);
 
         utilities::ContractData option_contract;
         option_contract.gateway_name = "BacktestData";
@@ -345,11 +362,11 @@ void BacktestDataEngine::create_portfolio_data(std::vector<std::string> const& s
         option_contract.product = utilities::Product::OPTION;
         option_contract.size = static_cast<double>(multiplier);
         option_contract.pricetick = 0.01;
-        option_contract.option_strike = *strike;
-        option_contract.option_type = *opt_type;
-        option_contract.option_expiry = *expiry;
+        option_contract.option_strike = strike;
+        option_contract.option_type = opt_type;
+        option_contract.option_expiry = expiry;
         option_contract.option_underlying = under;
-        option_contract.option_index = std::to_string(static_cast<int>(*strike));
+        option_contract.option_index = std::to_string(static_cast<int>(strike.value()));
         portfolio_data_->add_option(option_contract);
         if (main_engine_ != nullptr) {
             main_engine_->register_contract(option_contract);

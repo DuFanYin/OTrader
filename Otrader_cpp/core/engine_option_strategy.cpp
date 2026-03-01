@@ -173,7 +173,7 @@ auto OptionStrategyEngine::assemble_order_request(
         out_req.price =
             (order_type == utilities::OrderType::MARKET) ? 0.0 : utilities::round_to(price, 0.01);
         out_req.is_combo = true;
-        out_req.combo_type = *combo_type;
+        out_req.combo_type = combo_type;
         out_req.legs = *legs;
         if (!legs->empty() && legs->front().trading_class) {
             out_req.trading_class = *legs->front().trading_class;
@@ -364,6 +364,7 @@ auto OptionStrategyEngine::get_strategy_active_orders() const
 
 auto OptionStrategyEngine::get_strategy_names() const -> std::vector<std::string> {
     std::vector<std::string> out;
+    out.reserve(strategies_.size());
     for (const auto& kv : strategies_) {
         out.push_back(kv.first);
     }

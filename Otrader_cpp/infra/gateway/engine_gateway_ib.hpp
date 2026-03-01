@@ -2,8 +2,8 @@
 
 /**
  * C++ equivalent of engines/engine_gateway.py (IbGateway).
- * Interface: connect, disconnect, send_order, cancel_order, query_account, query_position,
- * query_portfolio. Actual IB connectivity via IbApi implementation (stub or TWS).
+ * Interface: connect, disconnect, send_order, cancel_order, query_account, query_position.
+ * Actual IB connectivity via IbApi implementation (stub or TWS).
  */
 
 #include "../../core/engine_log.hpp"
@@ -30,7 +30,6 @@ class IbApi {
     virtual void cancel_order(const utilities::CancelRequest& req) = 0;
     virtual void query_account() = 0;
     virtual void query_position() = 0;
-    virtual void query_portfolio(const std::string& underlying) = 0;
     /** Call periodically when connected to drain TWS message queue (no-op for stub). */
     virtual void process_pending_messages() {}
 };
@@ -49,7 +48,6 @@ class IbGateway {
     void cancel_order(const utilities::CancelRequest& req);
     void query_account();
     void query_position();
-    void query_portfolio(const std::string& underlying);
 
     void process_timer_event(const utilities::Event& event);
 
@@ -71,7 +69,6 @@ class IbGateway {
     void write_log(const std::string& msg, int level = engines::INFO);
     void on_order(const utilities::OrderData& order);
     void on_trade(const utilities::TradeData& trade);
-    void on_contract(const utilities::ContractData& contract);
 
     MainEngine* main_engine_ = nullptr;
     std::string gateway_name_ = "IBGateway";

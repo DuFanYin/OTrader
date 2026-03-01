@@ -65,7 +65,6 @@ class MainEngine : public utilities::MainEngine {
     std::string send_order(const utilities::OrderRequest& req);
     void query_account();
     void query_position();
-    void query_portfolio(const std::string& portfolio_name);
 
     utilities::OrderData* get_order(const std::string& orderid);
     utilities::TradeData* get_trade(const std::string& tradeid);

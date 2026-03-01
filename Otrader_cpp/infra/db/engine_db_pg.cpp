@@ -1,7 +1,6 @@
 /**
- * DatabaseEngine (live): PostgreSQL 持久化（libpqxx），模仿 engines/engine_db.py。
- * load_contracts 发出 Contract 事件（先 equity 后 option），由 EventEngine → MarketDataEngine 建立
- * portfolio。
+ * DatabaseEngine (live): PostgreSQL 持久化（libpqxx）。load_contracts 两段
+ * apply_option/apply_underlying，阻塞，不经事件。
  */
 
 #include "engine_db_pg.hpp"
@@ -160,12 +159,12 @@ auto str_to_datetime(const std::string& s) -> std::chrono::system_clock::time_po
         return {};
     }
     std::tm tm = {};
-    int y;
-    int M;
-    int d;
-    int h;
-    int m;
-    int sec;
+    int y = 0;
+    int M = 0;
+    int d = 0;
+    int h = 0;
+    int m = 0;
+    int sec = 0;
     if (std::sscanf(s.c_str(), "%d-%d-%d %d:%d:%d", &y, &M, &d, &h, &m, &sec) >= 6) {
         tm.tm_year = y - 1900;
         tm.tm_mon = M - 1;
@@ -214,7 +213,7 @@ DatabaseEngine::DatabaseEngine(utilities::MainEngine* main_engine, const std::st
     }
 }
 
-DatabaseEngine::~DatabaseEngine() { close(); }
+DatabaseEngine::~DatabaseEngine() { DatabaseEngine::close(); }
 
 void DatabaseEngine::write_log(const std::string& msg, int level) {
     if (main_engine != nullptr) {
@@ -265,155 +264,45 @@ void DatabaseEngine::cleanup_expired_options() {
     }
 }
 
-void DatabaseEngine::load_contracts() {
-    if (main_engine == nullptr) {
-        return;
+void DatabaseEngine::load_contracts(
+    const std::function<void(const utilities::ContractData&)>& apply_option,
+    const std::function<void(const utilities::ContractData&)>& apply_underlying) {
+    auto options = load_option_contract_data(nullptr);
+    for (const auto& kv : options) {
+        apply_option(kv.second);
     }
-    auto contracts = load_contract_data(nullptr);
-    for (auto& kv : contracts) {
-        main_engine->put_event(utilities::Event(utilities::EventType::Contract, kv.second));
+    auto equities = load_equity_contract_data(nullptr);
+    for (const auto& kv : equities) {
+        apply_underlying(kv.second);
     }
-    write_log("Loaded " + std::to_string(contracts.size()) + " contracts", INFO);
-}
-
-void DatabaseEngine::save_contract_data(const utilities::ContractData& contract,
-                                        const std::string& symbol_key) {
-    std::scoped_lock lock(db_mutex_);
-    if (!conn_) {
-        return;
-    }
-    try {
-        std::string ex = utilities::to_string(contract.exchange);
-        std::string prod = utilities::to_string(contract.product);
-        int con_id = contract.con_id.value_or(0);
-        double max_vol = contract.max_volume.value_or(0.0);
-
-        if (contract.product == utilities::Product::OPTION) {
-            std::string opt_type =
-                contract.option_type ? utilities::to_string(*contract.option_type) : "";
-            double strike = contract.option_strike.value_or(0.0);
-            std::string expiry = contract.option_expiry ? date_to_str(*contract.option_expiry) : "";
-            std::string underlying = contract.option_underlying.value_or("");
-            std::string portfolio = contract.option_portfolio.value_or("");
-            std::string strike_index = contract.option_index.value_or("");
-
-            pqxx::work w(*conn_);
-            w.exec(pqxx::zview("INSERT INTO contract_option (symbol, exchange, name, product, "
-                               "size, pricetick, min_volume, "
-                               "net_position, history_data, stop_supported, gateway_name, con_id, "
-                               "trading_class, max_volume, extra, "
-                               "portfolio, type, strike, strike_index, expiry, underlying) "
-                               "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, "
-                               "$14, NULL, $15, $16, $17, $18, $19, $20) "
-                               "ON CONFLICT (symbol) DO UPDATE SET exchange=$2, name=$3, "
-                               "product=$4, size=$5, pricetick=$6, min_volume=$7, "
-                               "net_position=$8, history_data=$9, stop_supported=$10, "
-                               "gateway_name=$11, con_id=$12, trading_class=$13, "
-                               "max_volume=$14, portfolio=$15, type=$16, strike=$17, "
-                               "strike_index=$18, expiry=$19, underlying=$20"),
-                   pqxx::params{symbol_key,
-                                ex,
-                                contract.name,
-                                prod,
-                                contract.size,
-                                contract.pricetick,
-                                contract.min_volume,
-                                contract.net_position ? 1 : 0,
-                                contract.history_data ? 1 : 0,
-                                contract.stop_supported ? 1 : 0,
-                                contract.gateway_name,
-                                con_id,
-                                contract.trading_class.value_or(""),
-                                max_vol,
-                                portfolio,
-                                opt_type,
-                                strike,
-                                strike_index,
-                                expiry,
-                                underlying});
-            w.commit();
-        } else {
-            pqxx::work w(*conn_);
-            w.exec(pqxx::zview(
-                       "INSERT INTO contract_equity (symbol, exchange, name, product, size, "
-                       "pricetick, min_volume, "
-                       "net_position, history_data, stop_supported, gateway_name, con_id, "
-                       "trading_class, max_volume, extra) "
-                       "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NULL) "
-                       "ON CONFLICT (symbol) DO UPDATE SET exchange=$2, name=$3, product=$4, "
-                       "size=$5, pricetick=$6, min_volume=$7, "
-                       "net_position=$8, history_data=$9, stop_supported=$10, gateway_name=$11, "
-                       "con_id=$12, trading_class=$13, max_volume=$14"),
-                   pqxx::params{symbol_key, ex, contract.name, prod, contract.size,
-                                contract.pricetick, contract.min_volume,
-                                contract.net_position ? 1 : 0, contract.history_data ? 1 : 0,
-                                contract.stop_supported ? 1 : 0, contract.gateway_name, con_id,
-                                contract.trading_class.value_or(""), max_vol});
-            w.commit();
-        }
-    } catch (const std::exception& e) {
-        write_log(std::string("Failed to save ContractData: ") + e.what(), ERROR);
+    if (main_engine != nullptr) {
+        write_log("Loaded " + std::to_string(options.size() + equities.size()) + " contracts",
+                  INFO);
     }
 }
 
-auto DatabaseEngine::load_contract_data(const std::string* symbol_key)
+auto DatabaseEngine::load_option_contract_data(const std::string* symbol_key)
     -> std::unordered_map<std::string, utilities::ContractData> {
     std::scoped_lock lock(db_mutex_);
-    std::unordered_map<std::string, utilities::ContractData> contracts;
+    std::unordered_map<std::string, utilities::ContractData> out;
     if (!conn_) {
-        return contracts;
+        return out;
     }
     try {
         pqxx::work w(*conn_);
-        std::string eq_sql = "SELECT symbol, exchange, product, size, pricetick, min_volume, "
-                             "net_position, history_data, "
-                             "stop_supported, gateway_name, con_id, trading_class, name, "
-                             "max_volume FROM contract_equity";
-        pqxx::result r;
-        if (symbol_key != nullptr) {
-            r = w.exec(pqxx::zview(eq_sql + " WHERE symbol = $1"), pqxx::params{*symbol_key});
-        } else {
-            r = w.exec(eq_sql);
-        }
-
-        for (auto row : r) {
-            utilities::ContractData c;
-            std::string row_sym = row[0].as<std::string>();
-            c.symbol = row[0].as<std::string>();
-            c.exchange = exchange_from_string(row[1].as<std::string>());
-            c.product = product_from_string(row[2].as<std::string>());
-            c.size = row[3].as<double>();
-            c.pricetick = row[4].as<double>();
-            c.min_volume = row[5].as<double>();
-            c.net_position = row[6].as<int>() != 0;
-            c.history_data = row[7].as<int>() != 0;
-            c.stop_supported = row[8].as<int>() != 0;
-            c.gateway_name = row[9].as<std::string>();
-            c.con_id = row[10].as<int>(0);
-            if (!row[11].is_null()) {
-                c.trading_class = row[11].as<std::string>();
-            }
-            c.name = row[12].as<std::string>();
-            if (!row[13].is_null()) {
-                c.max_volume = row[13].as<double>();
-            }
-            contracts[row_sym] = std::move(c);
-        }
-
         std::string opt_sql =
             "SELECT symbol, exchange, product, size, pricetick, min_volume, net_position, "
             "history_data, "
             "stop_supported, gateway_name, con_id, trading_class, name, max_volume, portfolio, "
             "type, strike, strike_index, expiry, underlying FROM contract_option";
+        pqxx::result r;
         if (symbol_key != nullptr) {
             r = w.exec(pqxx::zview(opt_sql + " WHERE symbol = $1"), pqxx::params{*symbol_key});
         } else {
             r = w.exec(opt_sql);
         }
-
         for (auto row : r) {
             utilities::ContractData c;
-            std::string row_sym = row[0].as<std::string>();
             c.symbol = row[0].as<std::string>();
             c.exchange = exchange_from_string(row[1].as<std::string>());
             c.product = product_from_string(row[2].as<std::string>());
@@ -450,13 +339,61 @@ auto DatabaseEngine::load_contract_data(const std::string* symbol_key)
             if (row.size() > 19 && !row[19].is_null()) {
                 c.option_underlying = row[19].as<std::string>();
             }
-            contracts[row_sym] = std::move(c);
+            out[c.symbol] = std::move(c);
         }
         w.commit();
     } catch (const std::exception& e) {
-        write_log(std::string("Failed to load ContractData: ") + e.what(), ERROR);
+        write_log(std::string("Failed to load option ContractData: ") + e.what(), ERROR);
     }
-    return contracts;
+    return out;
+}
+
+auto DatabaseEngine::load_equity_contract_data(const std::string* symbol_key)
+    -> std::unordered_map<std::string, utilities::ContractData> {
+    std::scoped_lock lock(db_mutex_);
+    std::unordered_map<std::string, utilities::ContractData> out;
+    if (!conn_) {
+        return out;
+    }
+    try {
+        pqxx::work w(*conn_);
+        std::string eq_sql = "SELECT symbol, exchange, product, size, pricetick, min_volume, "
+                             "net_position, history_data, "
+                             "stop_supported, gateway_name, con_id, trading_class, name, "
+                             "max_volume FROM contract_equity";
+        pqxx::result r;
+        if (symbol_key != nullptr) {
+            r = w.exec(pqxx::zview(eq_sql + " WHERE symbol = $1"), pqxx::params{*symbol_key});
+        } else {
+            r = w.exec(eq_sql);
+        }
+        for (auto row : r) {
+            utilities::ContractData c;
+            c.symbol = row[0].as<std::string>();
+            c.exchange = exchange_from_string(row[1].as<std::string>());
+            c.product = product_from_string(row[2].as<std::string>());
+            c.size = row[3].as<double>();
+            c.pricetick = row[4].as<double>();
+            c.min_volume = row[5].as<double>();
+            c.net_position = row[6].as<int>() != 0;
+            c.history_data = row[7].as<int>() != 0;
+            c.stop_supported = row[8].as<int>() != 0;
+            c.gateway_name = row[9].as<std::string>();
+            c.con_id = row[10].as<int>(0);
+            if (!row[11].is_null()) {
+                c.trading_class = row[11].as<std::string>();
+            }
+            c.name = row[12].as<std::string>();
+            if (!row[13].is_null()) {
+                c.max_volume = row[13].as<double>();
+            }
+            out[c.symbol] = std::move(c);
+        }
+        w.commit();
+    } catch (const std::exception& e) {
+        write_log(std::string("Failed to load equity ContractData: ") + e.what(), ERROR);
+    }
+    return out;
 }
 
 void DatabaseEngine::save_order_data(const std::string& strategy_name,

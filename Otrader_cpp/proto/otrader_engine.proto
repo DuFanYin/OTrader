@@ -161,10 +161,6 @@ message StrategyHoldingMsg {
   PortfolioSummaryMsg summary = 4;
 }
 
-message PortfolioRequest {
-  string portfolio = 1;
-}
-
 // 面向 live 的引擎控制 / 查询服务。
 service EngineService {
   // 通用状态
@@ -188,7 +184,6 @@ service EngineService {
   // 主服务：订单/成交、组合列表
   rpc GetOrdersAndTrades(Empty) returns (OrdersAndTradesResponse);
   rpc ListPortfolios(Empty) returns (ListPortfoliosResponse);
-  rpc QueryPortfolio(PortfolioRequest) returns (Empty);
 
   // 策略服务：类列表、组合元数据、已移除策略
   rpc ListStrategyClasses(Empty) returns (ListStrategyClassesResponse);

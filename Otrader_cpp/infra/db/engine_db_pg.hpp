@@ -2,9 +2,7 @@
 
 /**
  * DatabaseEngine (live): PostgreSQL contract/order/trade 持久化（libpqxx）。
- * load_contracts() 按固定顺序发出 Contract 事件，由 EventEngine 派发至
- * MarketDataEngine::process_contract， 建立 portfolio 结构；后续 Snapshot 事件经 dispatch_snapshot
- * → apply_frame 更新行情/Greeks。
+ * load_contracts(apply_option, apply_underlying) 两段 load，load 后调用方 finalize_all_chains。
  */
 
 #include "../../core/engine_log.hpp"
@@ -12,6 +10,7 @@
 #include "../../utilities/constant.hpp"
 #include "../../utilities/event.hpp"
 #include "../../utilities/object.hpp"
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -32,10 +31,11 @@ class DatabaseEngine : public utilities::BaseEngine {
     explicit DatabaseEngine(utilities::MainEngine* main_engine, const std::string& conninfo = "");
     ~DatabaseEngine() override;
 
-    void load_contracts();
-    void save_contract_data(const utilities::ContractData& contract, const std::string& symbol_key);
-    std::unordered_map<std::string, utilities::ContractData>
-    load_contract_data(const std::string* symbol_key = nullptr);
+    /** Option table → apply_option; equity table → apply_underlying. Blocking, no event pipeline.
+     */
+    void
+    load_contracts(const std::function<void(const utilities::ContractData&)>& apply_option,
+                   const std::function<void(const utilities::ContractData&)>& apply_underlying);
 
     void save_order_data(const std::string& strategy_name, const utilities::OrderData& order);
     void save_trade_data(const std::string& strategy_name, const utilities::TradeData& trade);
@@ -49,6 +49,10 @@ class DatabaseEngine : public utilities::BaseEngine {
     void create_tables();
     void cleanup_expired_options();
     void write_log(const std::string& msg, int level = INFO);
+    std::unordered_map<std::string, utilities::ContractData>
+    load_option_contract_data(const std::string* symbol_key);
+    std::unordered_map<std::string, utilities::ContractData>
+    load_equity_contract_data(const std::string* symbol_key);
 
     std::string conninfo_;
     std::unique_ptr<pqxx::connection> conn_;

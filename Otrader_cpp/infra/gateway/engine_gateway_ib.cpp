@@ -21,6 +21,7 @@
 #include "OrderCancel.h"
 #include "OrderState.h"
 
+#include <array>
 #include <ctime>
 #include <memory>
 #include <mutex>
@@ -156,6 +157,9 @@ class IbApiTws : public IbApi, public DefaultEWrapper {
         port_ = port;
         client_id_ = client_id;
         account_ = account;
+        if (client_ == nullptr) {
+            client_ = new EClientSocket(this, &os_signal_);
+        }
         bool ok = client_->eConnect(host.c_str(), port, client_id, false);
         if (!ok) {
             if (gateway_ != nullptr) {
@@ -175,7 +179,7 @@ class IbApiTws : public IbApi, public DefaultEWrapper {
     }
 
     void close() override {
-        if (!status_ && !client_->isConnected()) {
+        if (client_ == nullptr || (!status_ && !client_->isConnected())) {
             return;
         }
         if (reader_) {
@@ -269,10 +273,10 @@ class IbApiTws : public IbApi, public DefaultEWrapper {
 #else
         gmtime_r(&now, &t);
 #endif
-        char buf[32];
-        std::snprintf(buf, sizeof(buf), "%04d%02d%02d-%02d:%02d:%02d", t.tm_year + 1900,
+        std::array<char, 32> buf{};
+        std::snprintf(buf.data(), buf.size(), "%04d%02d%02d-%02d:%02d:%02d", t.tm_year + 1900,
                       t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
-        oc.manualOrderCancelTime = buf;
+        oc.manualOrderCancelTime = buf.data();
         client_->cancelOrder(std::stol(req.orderid), oc);
     }
 
@@ -291,50 +295,6 @@ class IbApiTws : public IbApi, public DefaultEWrapper {
             return;
         }
         client_->reqPositions();
-    }
-
-    void query_portfolio(const std::string& underlying) override {
-        if (!client_->isConnected()) {
-            return;
-        }
-        std::vector<std::string> parts;
-        std::istringstream ss(underlying);
-        std::string p;
-        while (std::getline(ss, p, '-')) {
-            parts.push_back(p);
-        }
-        if (parts.size() < 4) {
-            return;
-        }
-        Contract c;
-        c.symbol = parts[0];
-        c.currency = parts.size() > 1 ? parts[1] : "USD";
-        c.secType = parts[2];
-        c.exchange = (parts[2] == "IND") ? "CBOE" : parts[3];
-        {
-            std::scoped_lock lock(mutex_);
-            req_id_++;
-            client_->reqContractDetails(req_id_, c);
-        }
-        if (parts[2] == "STK") {
-            c.secType = "OPT";
-            c.exchange = "SMART";
-            std::scoped_lock lock(mutex_);
-            req_id_++;
-            client_->reqContractDetails(req_id_, c);
-            reqid_underlying_map_[req_id_] = underlying;
-        } else if (parts[2] == "IND") {
-            for (const char* tc : {"SPX", "SPXW"}) {
-                Contract opt = c;
-                opt.secType = "OPT";
-                opt.exchange = "CBOE";
-                opt.tradingClass = tc;
-                std::scoped_lock lock(mutex_);
-                req_id_++;
-                client_->reqContractDetails(req_id_, opt);
-                reqid_underlying_map_[req_id_] = underlying;
-            }
-        }
     }
 
     // --- EWrapper callbacks ---
@@ -502,50 +462,6 @@ class IbApiTws : public IbApi, public DefaultEWrapper {
 
     void positionEnd() override {}
 
-    void contractDetails(int reqId, const ContractDetails& details) override {
-        const Contract& c = details.contract;
-        if (product_ib2vt(c.secType) == utilities::Product::UNKNOWN) {
-            return;
-        }
-        utilities::Exchange exch =
-            exchange_ib2vt(c.exchange.empty() ? c.primaryExchange : c.exchange);
-        utilities::ContractData cd;
-        cd.gateway_name = gateway_name_;
-        cd.symbol = contract_to_formatted_symbol(c);
-        cd.exchange = exch;
-        cd.name = details.longName;
-        cd.product = product_ib2vt(c.secType);
-        cd.size = c.multiplier.empty() ? 1.0 : std::stod(c.multiplier);
-        cd.pricetick = details.minTick;
-        cd.min_volume = (details.minSize == UNSET_DECIMAL)
-                            ? 1.0
-                            : DecimalFunctions::decimalToDouble(details.minSize);
-        cd.net_position = true;
-        cd.history_data = true;
-        cd.stop_supported = true;
-        cd.con_id = c.conId;
-        if (!c.tradingClass.empty()) {
-            cd.trading_class = c.tradingClass;
-        }
-        if (cd.product == utilities::Product::OPTION) {
-            cd.option_type = option_ib2vt(c.right);
-            cd.option_strike = c.strike;
-        }
-        std::scoped_lock lock(mutex_);
-        if (!contracts_.contains(cd.symbol)) {
-            gateway_->on_contract(cd);
-            contracts_[cd.symbol] = cd;
-        }
-    }
-
-    void contractDetailsEnd(int reqId) override {
-        std::scoped_lock lock(mutex_);
-        auto it = reqid_underlying_map_.find(reqId);
-        if (it != reqid_underlying_map_.end() && (gateway_ != nullptr)) {
-            gateway_->write_log("Option portfolio query complete: " + it->second, INFO);
-        }
-    }
-
   private:
     void clear_account_data() {
         std::scoped_lock lock(mutex_);
@@ -555,7 +471,7 @@ class IbApiTws : public IbApi, public DefaultEWrapper {
     IbGateway* gateway_ = nullptr;
     std::string gateway_name_;
     bool status_ = false;
-    int order_id_ = 0;
+    OrderId order_id_ = 0;
     int req_id_ = 0;
     int req_id_counter_ = 9000;
     int client_id_ = 0;
@@ -572,8 +488,6 @@ class IbApiTws : public IbApi, public DefaultEWrapper {
     std::unordered_map<std::string, std::pair<utilities::Status, double>> last_order_status_;
     std::unordered_set<std::string> pending_orders_;
     std::unordered_set<std::string> completed_orders_;
-    std::unordered_map<std::string, utilities::ContractData> contracts_;
-    std::unordered_map<int, std::string> reqid_underlying_map_;
     std::unordered_map<std::string, std::unordered_map<std::string, std::string>> account_values_;
 };
 
@@ -603,12 +517,6 @@ void IbGateway::on_trade(const utilities::TradeData& trade) {
     }
 }
 
-void IbGateway::on_contract(const utilities::ContractData& contract) {
-    if (main_engine_ != nullptr) {
-        main_engine_->put_event(utilities::Event(utilities::EventType::Contract, contract));
-    }
-}
-
 void IbGateway::connect() {
     api_->connect(default_setting_.host, default_setting_.port, default_setting_.client_id,
                   default_setting_.account);
@@ -627,10 +535,6 @@ void IbGateway::cancel_order(const utilities::CancelRequest& req) { api_->cancel
 void IbGateway::query_account() { api_->query_account(); }
 
 void IbGateway::query_position() { api_->query_position(); }
-
-void IbGateway::query_portfolio(const std::string& underlying) {
-    api_->query_portfolio(underlying);
-}
 
 void IbGateway::process_timer_event(const utilities::Event& /*unused*/) {
     if (api_) {

@@ -1,7 +1,9 @@
 #include "portfolio.hpp"
+
 #include "black_scholes.hpp"
 #include <algorithm>
 #include <cmath>
+#include <math.h>
 #include <sstream>
 #include <thread>
 
@@ -136,7 +138,7 @@ void ChainData::calculate_atm_price() {
         return;
     }
     double underlying_price = (underlying != nullptr) ? underlying->mid_price : 0;
-    double selected_strike;
+    double selected_strike = NAN;
     std::string selected_index;
     if (underlying_price > 0) {
         auto best = std::ranges::min_element(
@@ -175,7 +177,8 @@ auto ChainData::best_iv(const std::unordered_map<std::string, OptionData*>& opti
     double min_diff = 1e30;
     std::optional<double> best;
     for (const auto& [_, opt] : options_map) {
-        if ((opt == nullptr) || opt->mid_iv == 0 || !opt->strike_price || (opt->underlying == nullptr)) {
+        if ((opt == nullptr) || opt->mid_iv == 0 || !opt->strike_price ||
+            (opt->underlying == nullptr)) {
             continue;
         }
         double s = opt->underlying->mid_price;

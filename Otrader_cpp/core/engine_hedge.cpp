@@ -5,7 +5,9 @@
  */
 
 #include "engine_hedge.hpp"
+
 #include <cmath>
+#include <math.h>
 
 namespace engines {
 
@@ -88,15 +90,10 @@ auto HedgeEngine::compute_hedge_plan(const std::string& strategy_name, HedgeConf
     }
 
     int qty = params.holding->underlyingPosition.quantity;
-    utilities::Direction direction;
-    double available;
-    if (hedge_volume > 0) {
-        direction = utilities::Direction::LONG;
-        available = qty < 0 ? std::abs(qty) : 0;
-    } else {
-        direction = utilities::Direction::SHORT;
-        available = qty > 0 ? static_cast<double>(qty) : 0;
-    }
+    utilities::Direction direction =
+        (hedge_volume > 0) ? utilities::Direction::LONG : utilities::Direction::SHORT;
+    double available = (hedge_volume > 0) ? (qty < 0 ? std::abs(qty) : 0.0)
+                                          : (qty > 0 ? static_cast<double>(qty) : 0.0);
     return std::make_tuple(symbol, direction, available, std::abs(hedge_volume));
 }
 

@@ -1,5 +1,6 @@
 #include "parquet_loader.hpp"
 #include <algorithm>
+#include <array>
 #include <arrow/api.h>
 #include <arrow/io/api.h>
 #include <chrono>
@@ -43,10 +44,10 @@ auto TsToIso(Timestamp ts) -> std::string {
     if (tm == nullptr) {
         return "";
     }
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ", tm->tm_year + 1900,
+    std::array<char, 32> buf{};
+    std::snprintf(buf.data(), buf.size(), "%04d-%02d-%02dT%02d:%02d:%02dZ", tm->tm_year + 1900,
                   tm->tm_mon + 1, tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec);
-    return buf;
+    return buf.data();
 }
 
 // 直接单 chunk：列只读 chunk(0)，行索引直接用 i

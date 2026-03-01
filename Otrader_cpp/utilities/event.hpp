@@ -15,12 +15,10 @@ enum class EventType : uint8_t {
     Timer,
     Order,
     Trade,
-    Contract,
     Snapshot,
 };
 
-using EventPayload =
-    std::variant<std::monostate, OrderData, TradeData, ContractData, PortfolioSnapshot>;
+using EventPayload = std::variant<std::monostate, OrderData, TradeData, PortfolioSnapshot>;
 
 struct Event {
     EventType type = EventType::Timer;

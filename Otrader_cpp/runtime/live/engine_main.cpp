@@ -121,9 +121,16 @@ MainEngine::MainEngine(EventEngine* event_engine) {
     option_strategy_engine_ = std::make_unique<core::OptionStrategyEngine>(std::move(api));
     event_engine_ptr_->set_main_engine(this);
 
-    // DatabaseEngine 从 PostgreSQL 加载合约并 put_event(Contract)，由 EventEngine 派发到
-    // MarketDataEngine::process_contract，建立 portfolio
-    db_engine_->load_contracts();
+    // Engine 先创建 portfolio，再两段 load（option → equity）仅 find；最后 finalize_all_chains
+    market_data_engine_->ensure_portfolios_created();
+    db_engine_->load_contracts(
+        [this](const utilities::ContractData& c) -> void {
+            market_data_engine_->process_option(c);
+        },
+        [this](const utilities::ContractData& c) -> void {
+            market_data_engine_->process_underlying(c);
+        });
+    market_data_engine_->finalize_all_chains();
 
     // 自检：打印已注册策略 class 列表
     {
@@ -131,18 +138,26 @@ MainEngine::MainEngine(EventEngine* event_engine) {
             strategy_cpp::StrategyRegistry::get_all_strategy_class_names();
         std::ostringstream os;
         os << "Registered strategy classes: " << classes.size();
-        write_log(os.str(), INFO);
+        MainEngine::write_log(os.str(), INFO);
     }
 
-    // 自检：打印已检测到的 portfolio 名称
+    // 自检：对每个 portfolio 打印 name、chains 数、options 数
     {
-        std::vector<std::string> portfolios = get_all_portfolio_names();
-        std::ostringstream os;
-        os << "Portfolios detected after contract load: " << portfolios.size();
-        write_log(os.str(), INFO);
+        for (const std::string& name : get_all_portfolio_names()) {
+            utilities::PortfolioData* p = get_portfolio(name);
+            if (p == nullptr) {
+                continue;
+            }
+            std::string underlying_str =
+                (p->underlying != nullptr) ? p->underlying->symbol : "None";
+            MainEngine::write_log(p->name + " (underlying: " + underlying_str + ")", INFO);
+            MainEngine::write_log("  chains: " + std::to_string(p->chains.size()), INFO);
+            MainEngine::write_log("  options: " + std::to_string(p->option_apply_order().size()),
+                                  INFO);
+        }
     }
 
-    write_log("Main engine initialization successful", INFO);
+    MainEngine::write_log("Main engine initialization successful", INFO);
 }
 
 MainEngine::~MainEngine() { close(); }
@@ -215,12 +230,6 @@ auto MainEngine::send_order(const utilities::OrderRequest& req) -> std::string {
 void MainEngine::query_account() { ib_gateway_->query_account(); }
 
 void MainEngine::query_position() { ib_gateway_->query_position(); }
-
-void MainEngine::query_portfolio(const std::string& portfolio_name) {
-    if (ib_gateway_ != nullptr) {
-        ib_gateway_->query_portfolio(portfolio_name);
-    }
-}
 
 auto MainEngine::get_order(const std::string& orderid) -> utilities::OrderData* {
     return execution_engine_ ? execution_engine_->get_order(orderid) : nullptr;

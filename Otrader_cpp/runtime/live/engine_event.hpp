@@ -26,8 +26,9 @@ using Event = utilities::Event;
 /**
  * process(Event) handles one event (dispatch by type in fixed order).
  * Snapshot: update portfolio via apply_frame (same as backtest).
- * Portfolio structure is built from Contract events (order fixed); Snapshot only updates
- * prices/Greeks. set_main_engine required for Timer/Order/Trade/Contract/Snapshot.
+ * Portfolio structure is built by load_contracts() from DB (no Contract event, no IB query);
+ * Snapshot only updates
+ * prices/Greeks. set_main_engine required for Timer/Order/Trade/Snapshot.
  */
 class EventEngine : public utilities::IEventEngine {
   public:
@@ -60,8 +61,6 @@ class EventEngine : public utilities::IEventEngine {
     void dispatch_timer();
     void dispatch_order(const utilities::Event& event);
     void dispatch_trade(const utilities::Event& event);
-    void dispatch_contract(const utilities::Event& event);
-
     void run();
     void run_timer();
     void process(const utilities::Event& event);

@@ -16,7 +16,7 @@ namespace engines {
 
 EventEngine::EventEngine(int interval) : interval_(interval) {}
 
-EventEngine::~EventEngine() { stop(); }
+EventEngine::~EventEngine() { EventEngine::stop(); }
 
 void EventEngine::start() {
     if (active_.exchange(true)) {
@@ -92,9 +92,6 @@ void EventEngine::process(const utilities::Event& event) {
         break;
     case utilities::EventType::Trade:
         dispatch_trade(event);
-        break;
-    case utilities::EventType::Contract:
-        dispatch_contract(event);
         break;
     default:
         break;
@@ -207,12 +204,6 @@ void EventEngine::dispatch_snapshot(const utilities::Event& event) {
         if (portfolio != nullptr) {
             portfolio->apply_frame(*snap);
         }
-    }
-}
-
-void EventEngine::dispatch_contract(const utilities::Event& event) {
-    if (main_engine_->market_data_engine() != nullptr) {
-        main_engine_->market_data_engine()->process_contract(event);
     }
 }
 

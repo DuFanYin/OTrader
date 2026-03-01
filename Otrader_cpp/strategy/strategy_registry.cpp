@@ -32,7 +32,7 @@ void StrategyRegistry::add(const std::string& class_name) {
     auto it = std::find(registry().names.begin(), registry().names.end(), class_name);
     if (it == registry().names.end()) {
         registry().names.push_back(class_name);
-}
+    }
 }
 
 void StrategyRegistry::add_factory(const std::string& class_name, StrategyFactoryFunc factory) {
@@ -41,7 +41,7 @@ void StrategyRegistry::add_factory(const std::string& class_name, StrategyFactor
     auto it = std::find(registry().names.begin(), registry().names.end(), class_name);
     if (it == registry().names.end()) {
         registry().names.push_back(class_name);
-}
+    }
 }
 
 auto StrategyRegistry::has(const std::string& class_name) -> bool {
@@ -56,13 +56,13 @@ auto StrategyRegistry::get_all_strategy_class_names() -> std::vector<std::string
 }
 
 auto StrategyRegistry::create(const std::string& class_name, void* engine,
-                               const std::string& strategy_name, const std::string& portfolio_name,
-                               const std::unordered_map<std::string, double>& setting) -> void* {
+                              const std::string& strategy_name, const std::string& portfolio_name,
+                              const std::unordered_map<std::string, double>& setting) -> void* {
     std::scoped_lock lock(registry().mtx);
     auto it = registry().factories.find(class_name);
     if (it == registry().factories.end() || !it->second) {
         return nullptr;
-}
+    }
     return it->second(engine, strategy_name, portfolio_name, setting);
 }
 
