@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Strategy Manager - OTrader</title>
+    <link rel="stylesheet" href="/static/dist/assets/index-Cplv8gwS.css">
+</head>
+<body class="bg-dark-bg text-dark-text min-h-screen flex flex-col">
+    <!-- Header with Navigation -->
+    <div id="header-container"></div>
+
+    <!-- Main Content -->
+    <main class="flex-1 p-6 flex flex-col min-h-0">
+        <!-- Strategy Manager Content -->
+        <div id="strategy-manager-content" class="flex flex-col flex-1 min-h-0">
+            <!-- System Control Section -->
+            <div class="bg-dark-surface rounded-lg border border-dark-border p-3 mb-3 flex-shrink-0">
+                <div class="flex justify-between items-center">
+                    <div class="flex gap-2">
+                        <button id="add-strategy-btn" class="px-4 py-2 bg-accent text-white rounded-md hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed">
+                            Add Strategy
+                        </button>
+                        <button id="restore-strategy-btn" class="px-4 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed">
+                            Restore Strategy
+                        </button>
+                    </div>
+                    <div class="flex gap-2">
+                        <button id="connect-btn" class="px-4 py-2 bg-accent text-white rounded-md hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed">
+                            Connect
+                        </button>
+                        <button id="disconnect-btn" class="px-4 py-2 bg-warning text-white rounded-md hover:bg-yellow-600 disabled:opacity-50 disabled:cursor-not-allowed">
+                            Disconnect
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Main Content Area - Vertical Stack -->
+            <div class="flex flex-col gap-3 flex-1 min-h-0">
+                <!-- Strategy Management Section -->
+                <div class="bg-dark-surface rounded-lg border border-dark-border p-3 flex flex-col min-h-0 flex-1">
+                    <div class="flex justify-between items-center mb-3 flex-shrink-0">
+                        <div class="flex gap-2">
+                            <button id="init-strategy-btn" class="px-3 py-1 bg-blue-500 text-white rounded text-xs hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed">
+                                Initialize
+                            </button>
+                            <button id="start-strategy-btn" class="px-3 py-1 bg-green-500 text-white rounded text-xs hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed">
+                                Start
+                            </button>
+                            <button id="stop-strategy-btn" class="px-3 py-1 bg-yellow-500 text-white rounded text-xs hover:bg-yellow-600 disabled:opacity-50 disabled:cursor-not-allowed">
+                                Stop
+                            </button>
+                            <button id="remove-strategy-btn" class="px-3 py-1 bg-red-500 text-white rounded text-xs hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed">
+                                Remove
+                            </button>
+                            <button id="delete-strategy-btn" class="px-3 py-1 bg-red-600 text-white rounded text-xs hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed">
+                                Delete
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <!-- Strategy Table -->
+                    <div id="strategy-table-container" class="bg-dark-bg border border-dark-border rounded-md overflow-auto flex-1 min-h-0">
+                        <!-- Strategy table will be loaded here -->
+                    </div>
+                </div>
+
+                <!-- System Logs Section -->
+                <div class="bg-dark-surface rounded-lg border border-dark-border p-3 flex flex-col h-80 flex-shrink-0">
+                    <div class="flex justify-between items-center mb-3 flex-shrink-0">
+                        <div class="flex gap-2">
+                            <button id="clear-logs-btn" class="px-3 py-1 bg-gray-500 text-white rounded text-xs hover:bg-gray-600">
+                                Clear
+                            </button>
+                            <button id="refresh-logs-btn" class="px-3 py-1 bg-accent text-white rounded text-xs hover:bg-accent-hover">
+                                Refresh
+                            </button>
+                        </div>
+                    </div>
+                    <div id="log-container" class="bg-dark-bg border border-dark-border rounded-md p-3 font-mono text-sm overflow-auto flex-1 min-h-0">
+                        <!-- Logs will be displayed here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Load JavaScript modules -->
+    <script src="/static/js/core/config.js"></script>
+    <script src="/static/js/core/error_handler.js"></script>
+    <script src="/static/js/core/apiClient.js"></script>
+    <script src="/static/js/core/websocket_manager.js"></script>
+    <script src="/static/js/utils/ui_utils.js"></script>
+    <script src="/static/js/components/dialog.js"></script>
+    <script src="/static/js/components/navigation.js"></script>
+    <script src="/static/js/pages/strategyManager.js"></script>
+    <script>
+        // Initialize Strategy Manager page
+        document.addEventListener('DOMContentLoaded', () => {
+            // Initialize navigation
+            const nav = new Navigation();
+            const headerContainer = document.getElementById('header-container');
+            headerContainer.appendChild(nav.createHeader());
+            nav.startPeriodicUpdates();
+            
+            // Initialize strategy manager
+            const strategyManager = new StrategyManagerPage();
+            strategyManager.init();
+        });
+    </script>
+</body>
+</html>

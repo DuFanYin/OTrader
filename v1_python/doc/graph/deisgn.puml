@@ -1,0 +1,393 @@
+@startuml name
+title OTrader Core Class Diagram
+
+
+skinparam ranksep 50
+skinparam nodesep 50
+skinparam packagePadding 60
+
+' ========= ORCHESTRATOR =========
+package "Orchestrator" {
+  class MainEngine {
+    - event_engine: EventEngine
+    - log_engine: LogEngine
+    - db_engine: DatabaseEngine
+    - ib_gateway: IbGateway
+    - market_data_engine: MarketDataEngine
+    - option_strategy_engine: OptionStrategyEngine
+  }
+
+  class EventEngine {
+    + start()
+    + stop()
+    + put()
+    + register()
+    + unregister()
+    + register_general()
+    + unregister_general()
+  }
+}
+
+' ========= BROKER INTERFACE =========
+package "Broker Interface" {
+  class IbGateway #BCA8E6 {
+    - api: IbApi
+    - status: bool
+    + connect()
+    + disconnect()
+    + send_order()
+    + cancel_order()
+    + query_account()
+    + query_position()
+    + query_portfolio()
+  }
+
+  class IbApi #DAD0EF {
+    + connect()
+    + close()
+    + check_connection()
+    + send_order()
+    + cancel_order()
+    + query_account()
+    + query_position()
+    + query_portfolio()
+    + generate_ib_single_contract()
+    + generate_ib_combo_contract()
+  }
+}
+
+' ========= MAIN SYSTEM =========
+package "Main System" {
+
+  class LogEngine #BCA8E6 {
+    + write_log()
+  }
+
+  class DatabaseEngine #BCA8E6 {
+    - db_path: Path
+    - conn: sqlite3.Connection
+    - cursor: sqlite3.Cursor
+    - lock: Lock
+    + load_contracts()
+    + save_trade_data()
+    + save_order_data()
+    + save_contract_data()
+    + load_contract_data()
+    + query_portfolio()
+    + delete_portfolio()
+    + wipe_trading_data()
+  }
+
+  class MarketDataEngine #BCA8E6 {
+    - portfolios: dict[str, PortfolioData]
+    - contracts: dict[str, ContractData]
+    - active_chains: dict[str, set[str]]
+    - strategy_chains: dict[str, set[str]]
+    + subscribe_chains()
+    + unsubscribe_chains()
+    + get_or_create_portfolio()
+    + start_market_data_update()
+    + stop_market_data_update()
+  }
+
+}
+
+' ========= STRATEGY SYSTEM =========
+package "Strategy System" {
+  class OptionStrategyEngine #BCA8E6 {
+    - strategies: dict[str, OptionStrategyTemplate]
+    - position_engine: PositionEngine
+    - hedge_engine: HedgeEngine
+    - combo_builder_engine: ComboBuilderEngine
+    - orders: dict[str, OrderData]
+    - trades: dict[str, TradeData]
+    - strategy_active_orders: dict[str, set[str]]
+    - strategy_data: dict[str, dict]
+    - strategy_setting: dict[str, dict]
+    + strategy_management_methods()
+    + data_file_operations()
+  }
+
+  class PositionEngine #DAD0EF {
+    - strategy_holdings: dict[str, StrategyHolding]
+    + process_order()
+    + process_trade()
+    + update_metrics()
+    + close_position_helper()
+  }
+
+  class HedgeEngine #DAD0EF {
+    + register_strategy()
+    + unregister_strategy()
+    + run_strategy_hedging()
+    + compute_hedge_plan()
+    + execute_hedge_orders()
+  }
+
+  class ComboBuilderEngine #DAD0EF {
+    + create_leg()
+  }
+
+  class OptionStrategyInstance #E88A8A {
+    # portfolio: PortfolioData
+    # strategy_name: str
+    # chain_map: dict[str, ChainData]
+    # holding: StrategyHolding
+    + on_init_logic() {abstract}
+    + on_stop_logic() {abstract}
+    + on_timer_logic() {abstract}
+    + on_order()
+    + on_trade()
+    + subscribe_chains()
+    + register_hedging()
+    + unregister_hedging()
+    + order_helpers()
+    + close_position_helpers()
+  }
+
+}
+
+' ========= EXTERNAL DATA PROVIDERS =========
+package "External Data Providers" {
+  class InteractiveBrokers {
+    + Connection Status
+    + Order Management
+    + Contract Details
+  }
+
+  class Tradier {
+    + Rate Limit: 100/min
+    + Option Chain Snapshot
+    + Underlying Quote
+  }
+}
+
+' ========= DATA MODELS =========
+package "Portfolio Data" {
+  class PortfolioData #5B8CCF {
+    + update_underlying_tick()
+    + add_option()
+    + get_chain_by_expiry()
+    + update_option_chain()
+    + update_underlying_tick()
+  }
+
+  class InstrumentData {
+    + symbol: str
+    + exchange: Exchange
+    + size: float
+    + mid_price: float
+    + tick: TickData
+    + portfolio: PortfolioData
+    + set_portfolio()
+  }
+
+  class UnderlyingData #A8C4E2 {
+    + theo_delta: float
+    + chains: dict[str, ChainData]
+    + add_chain()
+    + update_underlying_tick()
+  }
+
+  class ChainData #A8C4E2 {
+    + expiration: date
+    + update_option_chain()
+    + calculate_atm_price()
+  }
+
+  class OptionData #A8C4E2 {
+    + strike_price: float
+    + option_expiry: datetime
+    + delta: float
+    + gamma: float
+    + theta: float
+    + vega: float
+    + mid_iv: float
+  }
+
+  
+
+  class TickData {
+    + symbol: str
+    + exchange: Exchange
+    + datetime: datetime
+    + last_price: float
+  }
+
+  class ChainMarketData {
+    + chain_symbol: str
+    + datetime: datetime
+    + options: dict[str, OptionMarketData]
+  }
+
+  class OptionMarketData {
+    + symbol: str
+    + exchange: Exchange
+    + datetime: datetime
+    + last_price: float
+    + delta: float
+    + gamma: float
+    + theta: float
+    + vega: float
+    + mid_iv: float
+  }
+
+}
+
+' ========= STAGING HOLDING =========
+package "Staging Holding" {
+  class BasePosition {
+    + symbol: str
+    + quantity: int
+    + avg_cost: float
+    + cost_value: float
+    + realized_pnl: float
+    + mid_price: float
+    + Greeks
+    + multiplier: float
+    + current_value: float
+  }
+
+  class OptionPositionData #A8C4E2 {
+    + multiplier: float = 100.0
+  }
+
+  class UnderlyingPositionData #A8C4E2 {
+    + symbol: str = "Underlying"
+    + delta: float = 1.0
+  }
+
+  class ComboPositionData #A8C4E2 {
+    + combo_type: ComboType
+    + legs: list[OptionPositionData]
+    + multiplier: float = 100.0
+  }
+
+  class PortfolioSummary {
+    + total_cost: float
+    + current_value: float
+    + unrealized_pnl: float
+    + realized_pnl: float
+    + pnl: float
+    + Greeks
+  }
+
+  class StrategyHolding #5B8CCF {
+    + underlyingPosition: UnderlyingPositionData
+    + optionPositions: dict[str, OptionPositionData]
+    + comboPositions: dict[str, ComboPositionData]
+    + summary: PortfolioSummary
+  }
+
+}
+
+' ========= RELATIONSHIPS =========
+
+MainEngine *-- EventEngine
+MainEngine *-- LogEngine
+MainEngine *-- DatabaseEngine
+MainEngine *-- IbGateway
+MainEngine *-- MarketDataEngine
+MainEngine *-- OptionStrategyEngine
+
+OptionStrategyEngine *-- PositionEngine
+OptionStrategyEngine *-- HedgeEngine
+OptionStrategyEngine *-- ComboBuilderEngine
+IbGateway *-- IbApi
+
+MarketDataEngine *-- PortfolioData
+PortfolioData *-- UnderlyingData
+PortfolioData *-- ChainData
+ChainData *-- OptionData
+ChainMarketData *-- OptionMarketData
+InstrumentData <|-- UnderlyingData
+InstrumentData <|-- OptionData
+
+OptionStrategyEngine *-- OptionStrategyInstance
+
+' ========= DATA FLOW (BLUE) =========
+' Data flows from Tradier API through market data objects to Portfolio
+Tradier -[#blue]-> OptionMarketData
+Tradier -[#blue]-> TickData
+OptionMarketData -[#blue]-> ChainMarketData
+ChainMarketData -[#blue]-> PortfolioData
+TickData -[#blue]-> PortfolioData
+PortfolioData -[#blue]-> UnderlyingData
+PortfolioData -[#blue]-> ChainData
+ChainData -[#blue]-> OptionData
+
+' ========= DATA PERSISTENCE =========
+package "Data Persistence" {
+  class SQLiteDatabase {
+    + trading.db
+    + contract_equity table
+    + contract_option table
+    + orders table
+    + trades table
+  }
+
+  class YAMLFiles {
+    + strategy_data.yaml
+    + strategy_setting.yaml
+  }
+}
+
+' ========= EXTERNAL PROVIDER RELATIONSHIPS =========
+IbApi ..> InteractiveBrokers
+MarketDataEngine ..> Tradier
+
+' ========= DATA PERSISTENCE RELATIONSHIPS =========
+DatabaseEngine ..> SQLiteDatabase
+OptionStrategyEngine ..> YAMLFiles
+PositionEngine ..> YAMLFiles
+
+' ========= STAGING HOLDING RELATIONSHIPS =========
+BasePosition <|-- OptionPositionData
+BasePosition <|-- UnderlyingPositionData
+BasePosition <|-- ComboPositionData
+StrategyHolding *-- UnderlyingPositionData
+StrategyHolding *-- OptionPositionData
+StrategyHolding *-- ComboPositionData
+StrategyHolding *-- PortfolioSummary
+ComboPositionData *-- OptionPositionData
+
+' ========= EVENT-DRIVEN RELATIONSHIPS =========
+' Bidirectional: engines that both emit and receive events
+EventEngine <-[#red]-> IbGateway
+EventEngine <-[#red]-> DatabaseEngine
+EventEngine <-[#red]-> MarketDataEngine
+EventEngine <-[#red]-> OptionStrategyEngine
+EventEngine <-[#red]-> HedgeEngine
+EventEngine <-[#red]-> MainEngine
+
+' Unidirectional: engines that only receive events
+EventEngine -[#red]-> LogEngine
+EventEngine -[#red]-> PositionEngine
+
+' ========= DELEGATION RELATIONSHIPS =========
+MainEngine ..> IbGateway
+MainEngine ..> MarketDataEngine
+MainEngine ..> DatabaseEngine
+OptionStrategyEngine ..> PositionEngine
+OptionStrategyEngine ..> HedgeEngine
+OptionStrategyEngine ..> ComboBuilderEngine
+DatabaseEngine ..> IbGateway
+PositionEngine ..> OptionStrategyInstance
+HedgeEngine ..> OptionStrategyInstance
+OptionStrategyEngine ..> OptionStrategyInstance
+HedgeEngine ..> PortfolioData
+ComboBuilderEngine ..> PortfolioData
+OptionStrategyInstance ..> PortfolioData
+PositionEngine ..> PortfolioData
+
+HedgeEngine ..> StrategyHolding
+OptionStrategyInstance ..> StrategyHolding
+
+PortfolioSummary ..> ComboPositionData
+PortfolioSummary ..> OptionPositionData
+PortfolioSummary ..> UnderlyingPositionData
+
+' ========= CLASS TO OBJECT RELATIONSHIPS =========
+MarketDataEngine ..> PortfolioData
+PositionEngine ..> StrategyHolding
+@enduml

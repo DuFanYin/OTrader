@@ -1,0 +1,6 @@
+metadata:
+  version: '1.0'
+  created_at: '2025-10-23T15:52:01.947705'
+  schema_version: portfolio_v1
+  description: Portfolio strategy data
+data: {}
