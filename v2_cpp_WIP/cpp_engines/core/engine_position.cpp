@@ -168,8 +168,7 @@ void option_msg_to_option_position(const otrader::OptionPositionMsg& om,
 }
 } // namespace
 
-void PositionEngine::process_timer_event(const GetPortfolioFn& get_portfolio,
-                                         std::vector<utilities::LogData>* out_logs) {
+void PositionEngine::process_timer_event(const GetPortfolioFn& get_portfolio) {
     if (!get_portfolio) {
         return;
     }
@@ -185,13 +184,8 @@ void PositionEngine::process_timer_event(const GetPortfolioFn& get_portfolio,
                 update_metrics(kv.first, portfolio);
             }
         } catch (const std::exception& e) {
-            if (out_logs != nullptr) {
-                utilities::LogData log;
-                log.msg = std::string("[PositionEngine] Metrics update error: ") + e.what();
-                log.level = 0;
-                log.gateway_name = "Position";
-                out_logs->push_back(log);
-            }
+            write_log(std::string("[PositionEngine] Metrics update error: ") + e.what(), 0,
+                      "Position");
         }
     }
 }

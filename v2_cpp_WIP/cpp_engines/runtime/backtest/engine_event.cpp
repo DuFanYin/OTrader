@@ -6,6 +6,7 @@
 #include "../../utilities/intent.hpp"
 #include "engine_main.hpp"
 #include <chrono>
+#include <utility>
 #include <variant>
 
 namespace backtest {
@@ -40,21 +41,21 @@ auto EventEngine::put_intent(const utilities::Intent& intent) -> std::optional<s
     }
 }
 
-void EventEngine::put_event(const utilities::Event& event) {
+void EventEngine::run_dispatch(utilities::Event* p) {
     auto* main = static_cast<MainEngine*>(main_engine);
     if (main == nullptr) {
         return;
     }
     std::vector<utilities::OrderRequest> orders;
     std::vector<utilities::CancelRequest> cancels;
-    std::vector<utilities::LogData> logs;
-    switch (event.type) {
+    std::vector<utilities::LogData*> logs;
+    switch (p->type) {
         using enum utilities::EventType;
     case Snapshot:
-        dispatch_snapshot(event);
+        dispatch_snapshot(*p);
         break;
     case Timer: {
-        dispatch_timer(&orders, &cancels, &logs);
+        dispatch_timer(&orders, &cancels, &logs, [main]() { return main->acquire_log(); });
         core::OptionStrategyEngine* se = main->option_strategy_engine();
         std::string strategy_name = (se != nullptr && se->get_strategy() != nullptr)
                                         ? se->get_strategy()->strategy_name()
@@ -65,20 +66,68 @@ void EventEngine::put_event(const utilities::Event& event) {
         for (const auto& c : cancels) {
             put_intent(utilities::IntentCancelOrder{c});
         }
-        for (const auto& l : logs) {
-            put_intent(utilities::IntentLog{l});
+        for (utilities::LogData* ptr : logs) {
+            put_intent(utilities::IntentLog{*ptr});
+            main->release_log(ptr);
         }
         break;
     }
     case Order:
-        dispatch_order(event);
+        dispatch_order(*p);
         break;
     case Trade:
-        dispatch_trade(event);
+        dispatch_trade(*p);
         break;
     default:
         break;
     }
+}
+
+void EventEngine::release_event_payload(utilities::Event* e) {
+    if (e == nullptr) {
+        return;
+    }
+    if (e->type == utilities::EventType::Snapshot) {
+        if (const auto* slot = std::get_if<utilities::PortfolioSnapshot*>(&e->data)) {
+            if (*slot != nullptr) {
+                release_snapshot(*slot);
+            }
+        }
+    } else if (e->type == utilities::EventType::Order) {
+        if (const auto* slot = std::get_if<utilities::OrderData*>(&e->data)) {
+            if (*slot != nullptr) {
+                release_order(*slot);
+            }
+        }
+    } else if (e->type == utilities::EventType::Trade) {
+        if (const auto* slot = std::get_if<utilities::TradeData*>(&e->data)) {
+            if (*slot != nullptr) {
+                release_trade(*slot);
+            }
+        }
+    }
+}
+
+void EventEngine::put_event(const utilities::Event& event) {
+    if (main_engine == nullptr) {
+        return;
+    }
+    utilities::Event* p = event_pool_.acquire();
+    *p = event;
+    run_dispatch(p);
+    release_event_payload(p);
+    event_pool_.release(p);
+}
+
+void EventEngine::put_event(utilities::Event&& event) {
+    if (main_engine == nullptr) {
+        return;
+    }
+    utilities::Event* p = event_pool_.acquire();
+    *p = event;
+    run_dispatch(p);
+    release_event_payload(p);
+    event_pool_.release(p);
 }
 
 void EventEngine::dispatch_snapshot(const utilities::Event& event) {
@@ -86,17 +135,22 @@ void EventEngine::dispatch_snapshot(const utilities::Event& event) {
     if (main == nullptr) {
         return;
     }
-    if (const auto* snap = std::get_if<utilities::PortfolioSnapshot>(&event.data)) {
-        utilities::PortfolioData* portfolio = main->get_portfolio(snap->portfolio_name);
-        if (portfolio != nullptr) {
-            portfolio->apply_frame(*snap);
+    if (const auto* slot = std::get_if<utilities::PortfolioSnapshot*>(&event.data)) {
+        utilities::PortfolioSnapshot* snap = *slot;
+        if (snap != nullptr) {
+            utilities::PortfolioData* portfolio = main->get_portfolio(snap->portfolio_name);
+            if (portfolio != nullptr) {
+                portfolio->apply_frame(*snap);
+            }
+            // Do not release here; release_event_payload() releases after run_dispatch.
         }
     }
 }
 
 void EventEngine::dispatch_timer(std::vector<utilities::OrderRequest>* out_orders,
                                  std::vector<utilities::CancelRequest>* out_cancels,
-                                 std::vector<utilities::LogData>* out_logs) {
+                                 std::vector<utilities::LogData*>* out_logs,
+                                 const std::function<utilities::LogData*()>& acquire_log) {
     auto* main = static_cast<MainEngine*>(main_engine);
     if (main == nullptr) {
         return;
@@ -130,7 +184,7 @@ void EventEngine::dispatch_timer(std::vector<utilities::OrderRequest>* out_order
             return se->get_order(oid);
         };
         hedge->process_hedging(se->get_strategy()->strategy_name(), params, out_orders, out_cancels,
-                               out_logs);
+                               out_logs, acquire_log);
     }
 }
 
@@ -139,26 +193,28 @@ void EventEngine::dispatch_order(const utilities::Event& event) {
     if (main == nullptr) {
         return;
     }
-    if (const auto* p = std::get_if<utilities::OrderData>(&event.data)) {
-        utilities::OrderData order = *p;
+    if (const auto* slot = std::get_if<utilities::OrderData*>(&event.data)) {
+        utilities::OrderData* ord = *slot;
+        if (ord == nullptr) {
+            return;
+        }
         core::ExecutionEngine* ex = main->execution_engine();
         std::string strategy_name;
         if (ex != nullptr) {
-            strategy_name = ex->get_strategy_name_for_order(order.orderid);
-            // Backtest: Order before register_active_order; fallback to single strategy
+            strategy_name = ex->get_strategy_name_for_order(ord->orderid);
             if (strategy_name.empty()) {
                 core::OptionStrategyEngine* se = main->option_strategy_engine();
                 if (se != nullptr && se->get_strategy() != nullptr) {
                     strategy_name = se->get_strategy()->strategy_name();
                 }
             }
-            ex->store_order(strategy_name, order);
+            ex->store_order(strategy_name, *ord);
         }
         if (main->position_engine() != nullptr) {
-            main->position_engine()->process_order(strategy_name, order);
+            main->position_engine()->process_order(strategy_name, *ord);
         }
         if (main->option_strategy_engine() != nullptr) {
-            main->option_strategy_engine()->process_order(order);
+            main->option_strategy_engine()->process_order(*ord);
         }
     }
 }
@@ -168,13 +224,16 @@ void EventEngine::dispatch_trade(const utilities::Event& event) {
     if (main == nullptr) {
         return;
     }
-    if (const auto* p = std::get_if<utilities::TradeData>(&event.data)) {
-        utilities::TradeData trade = *p;
+    if (const auto* slot = std::get_if<utilities::TradeData*>(&event.data)) {
+        utilities::TradeData* tr = *slot;
+        if (tr == nullptr) {
+            return;
+        }
         core::ExecutionEngine* ex = main->execution_engine();
         std::string strategy_name;
         if (ex != nullptr) {
-            ex->store_trade(trade);
-            strategy_name = ex->get_strategy_name_for_order(trade.orderid);
+            ex->store_trade(*tr);
+            strategy_name = ex->get_strategy_name_for_order(tr->orderid);
             if (strategy_name.empty()) {
                 core::OptionStrategyEngine* se = main->option_strategy_engine();
                 if (se != nullptr && se->get_strategy() != nullptr) {
@@ -183,10 +242,10 @@ void EventEngine::dispatch_trade(const utilities::Event& event) {
             }
         }
         if (main->position_engine() != nullptr) {
-            main->position_engine()->process_trade(strategy_name, trade);
+            main->position_engine()->process_trade(strategy_name, *tr);
         }
         if (main->option_strategy_engine() != nullptr) {
-            main->option_strategy_engine()->process_trade(trade);
+            main->option_strategy_engine()->process_trade(*tr);
         }
     }
 }

@@ -224,7 +224,7 @@ auto OptionStrategyEngine::assemble_order_request(
         out_req.price =
             (order_type == utilities::OrderType::MARKET) ? 0.0 : utilities::round_to(price, 0.01);
         out_req.is_combo = true;
-        out_req.combo_type = combo_type.value();
+        out_req.combo_type = combo_type;
         out_req.legs = std::vector<utilities::Leg>(legs.begin(), legs.end());
         if (!legs.empty() && legs.front().trading_class) {
             out_req.trading_class = *legs.front().trading_class;
@@ -444,10 +444,6 @@ void OptionStrategyEngine::close() {
         }
     }
     strategies_.clear();
-}
-
-auto OptionStrategyEngine::combo_builder_engine() const -> engines::ComboBuilderEngine* {
-    return api_.system.get_combo_builder_engine ? api_.system.get_combo_builder_engine() : nullptr;
 }
 
 auto OptionStrategyEngine::hedge_engine() const -> engines::HedgeEngine* {

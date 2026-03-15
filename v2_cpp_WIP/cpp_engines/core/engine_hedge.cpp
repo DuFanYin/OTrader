@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <math.h>
+#include <utility>
 
 namespace engines {
 
@@ -30,7 +31,8 @@ void HedgeEngine::unregister_strategy(const std::string& strategy_name) {
 void HedgeEngine::process_hedging(const std::string& strategy_name, const HedgeParams& params,
                                   std::vector<utilities::OrderRequest>* out_orders,
                                   std::vector<utilities::CancelRequest>* out_cancels,
-                                  std::vector<utilities::LogData>* out_logs) {
+                                  std::vector<utilities::LogData*>* out_logs,
+                                  const AcquireLogFn& acquire_log) {
     if ((out_orders == nullptr) && (out_cancels == nullptr) && (out_logs == nullptr)) {
         return;
     }
@@ -39,13 +41,14 @@ void HedgeEngine::process_hedging(const std::string& strategy_name, const HedgeP
         return;
     }
     run_strategy_hedging_with_params(strategy_name, it->second, params, out_orders, out_cancels,
-                                     out_logs);
+                                     out_logs, acquire_log);
 }
 
 void HedgeEngine::run_strategy_hedging_with_params(
     const std::string& strategy_name, HedgeConfig& config, const HedgeParams& params,
     std::vector<utilities::OrderRequest>* out_orders,
-    std::vector<utilities::CancelRequest>* out_cancels, std::vector<utilities::LogData>* out_logs) {
+    std::vector<utilities::CancelRequest>* out_cancels, std::vector<utilities::LogData*>* out_logs,
+    const AcquireLogFn& acquire_log) {
     if (!check_strategy_orders_finished(strategy_name, params)) {
         cancel_strategy_orders(strategy_name, params, out_cancels);
         return;
@@ -56,7 +59,7 @@ void HedgeEngine::run_strategy_hedging_with_params(
     }
     auto [symbol, direction, available, order_volume] = plan.value();
     execute_hedge_orders(strategy_name, symbol, direction, available, order_volume, params,
-                         out_orders, out_logs);
+                         out_orders, out_logs, acquire_log);
 }
 
 auto HedgeEngine::compute_hedge_plan(const std::string& strategy_name, HedgeConfig& config,
@@ -101,7 +104,8 @@ void HedgeEngine::execute_hedge_orders(const std::string& strategy_name, const s
                                        utilities::Direction direction, double available,
                                        double order_volume, const HedgeParams& params,
                                        std::vector<utilities::OrderRequest>* out_orders,
-                                       std::vector<utilities::LogData>* out_logs) {
+                                       std::vector<utilities::LogData*>* out_logs,
+                                       const AcquireLogFn& acquire_log) {
     if ((out_orders == nullptr) && (out_logs == nullptr)) {
         return;
     }
@@ -109,12 +113,12 @@ void HedgeEngine::execute_hedge_orders(const std::string& strategy_name, const s
     if (available > 0) {
         double close_vol = std::min(available, order_volume);
         submit_hedge_order(strategy_name, symbol, direction, close_vol, params, out_orders,
-                           out_logs);
+                           out_logs, acquire_log);
         remaining -= close_vol;
     }
     if (remaining > 0) {
         submit_hedge_order(strategy_name, symbol, direction, remaining, params, out_orders,
-                           out_logs);
+                           out_logs, acquire_log);
     }
 }
 
@@ -122,7 +126,8 @@ void HedgeEngine::submit_hedge_order(const std::string& strategy_name, const std
                                      utilities::Direction direction, double volume,
                                      const HedgeParams& params,
                                      std::vector<utilities::OrderRequest>* out_orders,
-                                     std::vector<utilities::LogData>* out_logs) {
+                                     std::vector<utilities::LogData*>* out_logs,
+                                     const AcquireLogFn& acquire_log) {
     if (!params.get_contract) {
         return;
     }
@@ -143,14 +148,16 @@ void HedgeEngine::submit_hedge_order(const std::string& strategy_name, const std
         out_orders->push_back(req);
     }
 
-    if (out_logs != nullptr) {
-        utilities::LogData log;
-        log.msg = std::string("Hedge sending order: dir=") +
-                  (direction == utilities::Direction::LONG ? "LONG" : "SHORT") +
-                  ", vol=" + std::to_string(volume) + ", symbol=" + symbol;
-        log.level = 0;
-        log.gateway_name = APP_NAME;
-        out_logs->push_back(log);
+    if (out_logs != nullptr && acquire_log) {
+        utilities::LogData* p = acquire_log();
+        if (p != nullptr) {
+            p->msg = std::string("Hedge sending order: dir=") +
+                     (direction == utilities::Direction::LONG ? "LONG" : "SHORT") +
+                     ", vol=" + std::to_string(volume) + ", symbol=" + symbol;
+            p->level = 0;
+            p->gateway_name = APP_NAME;
+            out_logs->push_back(p);
+        }
     }
 }
 

@@ -94,7 +94,6 @@ class OptionStrategyEngine : public utilities::BaseEngine {
 
     void close() override;
 
-    engines::ComboBuilderEngine* combo_builder_engine() const;
     engines::HedgeEngine* hedge_engine() const;
 
     /** Backtest: insert orderid after append_order. */

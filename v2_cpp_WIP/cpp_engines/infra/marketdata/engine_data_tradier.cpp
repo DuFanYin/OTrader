@@ -174,57 +174,6 @@ auto parse_tradier_quote_json(const std::string& body) -> std::pair<double, doub
 MarketDataEngine::MarketDataEngine(utilities::MainEngine* main_engine)
     : BaseEngine(main_engine, "MarketData") {}
 
-void MarketDataEngine::process_option(const utilities::ContractData& contract) {
-    process_contract(contract, true);
-}
-void MarketDataEngine::ensure_portfolios_created() {
-    for (const std::string& name : kPortfolioNamesToCreate) {
-        get_or_create_portfolio(name);
-    }
-}
-
-void MarketDataEngine::process_underlying(const utilities::ContractData& contract) {
-    process_contract(contract, false);
-}
-
-void MarketDataEngine::process_contract(const utilities::ContractData& contract, bool is_option) {
-    contracts_[contract.symbol] = contract;
-    size_t pos = contract.symbol.find('-');
-    std::string prefix =
-        (pos != std::string::npos) ? contract.symbol.substr(0, pos) : contract.symbol;
-    std::string portfolio_name =
-        is_option ? (contract.trading_class.has_value() && !contract.trading_class->empty()
-                         ? *contract.trading_class
-                         : prefix)
-                  : portfolio_name_for_underlying(prefix);
-    utilities::PortfolioData* port = get_portfolio(portfolio_name);
-    if (port == nullptr) {
-        if (is_option) {
-            write_log("Option portfolio \"" + portfolio_name + "\" not created (skip option " +
-                          contract.symbol + ").",
-                      30);
-        } else {
-            write_log("Underlying " + contract.symbol + " has no portfolio \"" + portfolio_name +
-                          "\" (skip bind).",
-                      30);
-        }
-        return;
-    }
-    if (is_option) {
-        port->add_option(contract);
-    } else {
-        port->set_underlying(contract);
-    }
-}
-
-void MarketDataEngine::finalize_all_chains() {
-    for (auto& kv : portfolios_) {
-        if (kv.second) {
-            kv.second->finalize_chains();
-        }
-    }
-}
-
 void MarketDataEngine::subscribe_chains(const std::string& strategy_name,
                                         std::span<const std::string> chain_symbols) {
     for (const auto& chain_symbol : chain_symbols) {
@@ -253,44 +202,6 @@ void MarketDataEngine::unsubscribe_chains(const std::string& strategy_name) {
     }
     strategy_chains_.erase(it);
     write_log(std::format("Strategy {} unsubscribed from all chains", strategy_name), INFO);
-}
-
-auto MarketDataEngine::get_or_create_portfolio(const std::string& portfolio_name)
-    -> utilities::PortfolioData* {
-    auto it = portfolios_.find(portfolio_name);
-    if (it != portfolios_.end()) {
-        return it->second.get();
-    }
-    portfolios_[portfolio_name] = std::make_unique<utilities::PortfolioData>(portfolio_name);
-    return portfolios_[portfolio_name].get();
-}
-
-auto MarketDataEngine::get_portfolio(const std::string& portfolio_name)
-    -> utilities::PortfolioData* {
-    auto it = portfolios_.find(portfolio_name);
-    return (it != portfolios_.end()) ? it->second.get() : nullptr;
-}
-
-auto MarketDataEngine::get_all_portfolio_names() const -> std::vector<std::string> {
-    std::vector<std::string> out;
-    out.reserve(portfolios_.size());
-    for (const auto& kv : portfolios_) {
-        out.push_back(kv.first);
-    }
-    return out;
-}
-
-auto MarketDataEngine::get_contract(const std::string& symbol) const
-    -> const utilities::ContractData* {
-    auto it = contracts_.find(symbol);
-    return (it != contracts_.end()) ? &it->second : nullptr;
-}
-
-auto MarketDataEngine::get_all_contracts() const -> std::vector<utilities::ContractData> {
-    std::vector<utilities::ContractData> out;
-    out.reserve(contracts_.size());
-    std::ranges::copy(contracts_ | std::views::values, std::back_inserter(out));
-    return out;
 }
 
 void MarketDataEngine::set_tradier_config(std::string base_url, std::string token) {
@@ -429,7 +340,7 @@ void MarketDataEngine::start_market_data_update() {
         tradier_base_url_ = kTradierBaseUrl;
     }
     started_ = true;
-    poll_thread_ = std::jthread([this](std::stop_token st) { poll_market_data_loop(std::move(st)); });
+    poll_thread_ = std::jthread([this](const std::stop_token& st) { poll_market_data_loop(st); });
     write_log("Market data update started (Tradier poll)", INFO);
 }
 
@@ -555,9 +466,8 @@ void MarketDataEngine::inject_tradier_chain(const std::string& chain_key,
         snapshot.last[idx] = last;
     }
 
-    if (main_engine != nullptr) {
-        main_engine->put_event(
-            utilities::Event(utilities::EventType::Snapshot, std::move(snapshot)));
+    if (snapshot_callback_) {
+        snapshot_callback_(snapshot);
     }
 }
 

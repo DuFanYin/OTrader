@@ -2,12 +2,12 @@
 
 /** Backtest MainEngine: holds engines, EventEngine dispatch, accessors. */
 
-#include "../../core/engine_combo_builder.hpp"
 #include "../../core/engine_execution.hpp"
 #include "../../core/engine_hedge.hpp"
 #include "../../core/engine_log.hpp"
 #include "../../core/engine_option_strategy.hpp"
 #include "../../core/engine_position.hpp"
+#include "../../core/portfolio_structure.hpp"
 #include "../../utilities/base_engine.hpp"
 #include "../../utilities/constant.hpp"
 #include "../../utilities/event.hpp"
@@ -31,10 +31,11 @@ class MainEngine : public utilities::MainEngine {
     MainEngine();
     ~MainEngine();
 
-    void register_portfolio(utilities::PortfolioData* portfolio);
+    engines::PortfolioStructure* portfolio_structure() { return portfolio_structure_.get(); }
+    const engines::PortfolioStructure* portfolio_structure() const {
+        return portfolio_structure_.get();
+    }
     utilities::PortfolioData* get_portfolio(const std::string& portfolio_name) const;
-
-    void register_contract(utilities::ContractData contract);
     const utilities::ContractData* get_contract(const std::string& symbol) const;
 
     BacktestDataEngine* load_backtest_data(const std::string& parquet_path,
@@ -52,6 +53,8 @@ class MainEngine : public utilities::MainEngine {
     std::vector<utilities::OrderData> get_all_active_orders() const;
 
     void put_event(const utilities::Event& e) override;
+    void put_event(utilities::Event&& e) override;
+    void put_event(utilities::Event& e) override;
 
     /** Forward write_log to put_log_intent. */
     void write_log(const std::string& msg, int level = INFO,
@@ -61,6 +64,13 @@ class MainEngine : public utilities::MainEngine {
     void put_log_intent(const std::string& msg, int level = INFO) const;
     /** Emit LogIntent from payload. */
     void put_log_intent(const utilities::LogData& intent) const;
+    /** Pooled log: acquire, fill, put_log_intent(*p), release_log(p). */
+    utilities::LogData* acquire_log();
+    void release_log(utilities::LogData* p);
+    /** Pooled snapshot for Snapshot events; EventEngine releases on dispatch. */
+    utilities::PortfolioSnapshot* acquire_snapshot() override;
+    utilities::OrderData* acquire_order() override;
+    utilities::TradeData* acquire_trade() override;
     void close();
 
     /** append_* → send_order/cancel_order/put_log_intent. */
@@ -83,7 +93,6 @@ class MainEngine : public utilities::MainEngine {
 
     engines::PositionEngine* position_engine() { return position_engine_.get(); }
     const engines::PositionEngine* position_engine() const { return position_engine_.get(); }
-    engines::ComboBuilderEngine* combo_builder_engine();
     engines::HedgeEngine* hedge_engine();
     utilities::StrategyHolding* get_holding(const std::string& strategy_name);
     const utilities::StrategyHolding* get_holding(const std::string& strategy_name) const;
@@ -94,15 +103,13 @@ class MainEngine : public utilities::MainEngine {
 
   private:
     std::unique_ptr<EventEngine> event_engine_;
-    std::unordered_map<std::string, utilities::PortfolioData*> portfolios_;
-    std::unordered_map<std::string, utilities::ContractData> contracts_;
+    std::unique_ptr<engines::PortfolioStructure> portfolio_structure_;
     int order_counter_ = 0;
     OrderExecutor order_executor_;
     std::unique_ptr<core::ExecutionEngine> execution_engine_;
     std::unique_ptr<core::OptionStrategyEngine> option_strategy_engine_;
     std::unique_ptr<BacktestDataEngine> data_engine_;
     std::unique_ptr<engines::PositionEngine> position_engine_;
-    std::unique_ptr<engines::ComboBuilderEngine> combo_builder_engine_;
     std::unique_ptr<engines::HedgeEngine> hedge_engine_;
     std::unique_ptr<engines::LogEngine> log_engine_;
     std::unordered_set<std::string> dummy_active_ids_;

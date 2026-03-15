@@ -11,6 +11,7 @@
 #include <format>
 #include <iomanip>
 #include <sstream>
+#include <utility>
 
 namespace engines {
 
@@ -24,10 +25,11 @@ MainEngine::MainEngine() {
     execution_engine_->set_send_impl(
         [this](const utilities::OrderRequest& req) -> std::string { return append_order(req); });
     execution_engine_->set_cancel_impl(
-        [this](const utilities::CancelRequest& req) { ib_gateway_->cancel_order(req); });
+        [this](const utilities::CancelRequest& req) { gateway_client_->cancel_order(req); });
     db_engine_ = std::make_unique<DatabaseEngine>(this);
-    market_data_engine_ = std::make_unique<MarketDataEngine>(this);
-    ib_gateway_ = std::make_unique<IbGateway>(this);
+    portfolio_structure_ = std::make_unique<PortfolioStructure>();
+    market_data_client_ = std::make_unique<MarketDataClient>(this);
+    gateway_client_ = std::make_unique<GatewayClient>(this);
     core::RuntimeAPI api;
 
     // Execution
@@ -110,24 +112,21 @@ MainEngine::MainEngine() {
     api.system.put_strategy_event = [this](const utilities::StrategyUpdateData& u) -> void {
         on_strategy_event(u);
     };
-    api.system.get_combo_builder_engine = [this]() -> ComboBuilderEngine* {
-        return combo_builder_engine();
-    };
     api.system.get_hedge_engine = [this]() -> HedgeEngine* { return hedge_engine(); };
 
     option_strategy_engine_ = std::make_unique<core::OptionStrategyEngine>(this, std::move(api));
     option_strategy_engine_->load_strategy_config();
 
     // Create portfolio, load option→equity, finalize chains
-    market_data_engine_->ensure_portfolios_created();
+    portfolio_structure_->ensure_portfolios_created();
     db_engine_->load_contracts(
         [this](const utilities::ContractData& c) -> void {
-            market_data_engine_->process_option(c);
+            portfolio_structure_->process_option(c);
         },
         [this](const utilities::ContractData& c) -> void {
-            market_data_engine_->process_underlying(c);
+            portfolio_structure_->process_underlying(c);
         });
-    market_data_engine_->finalize_all_chains();
+    portfolio_structure_->finalize_all_chains();
 
     log_self_check();
     MainEngine::write_log("Main engine initialization successful", INFO);
@@ -152,43 +151,47 @@ void MainEngine::log_self_check() {
 }
 
 void MainEngine::start_market_data_update() {
-    if (market_data_engine_ == nullptr) {
-        throw std::runtime_error("market data engine is null");
+    if (market_data_client_ == nullptr) {
+        throw std::runtime_error("market data client is null");
     }
-    market_data_engine_->start_market_data_update();
+    market_data_client_->start();
     market_data_running_ = true;
 }
 
 void MainEngine::stop_market_data_update() {
     market_data_running_ = false;
-    if (market_data_engine_) {
-        market_data_engine_->stop_market_data_update();
+    if (market_data_client_) {
+        market_data_client_->stop();
     }
 }
 
 void MainEngine::subscribe_chains(const std::string& strategy_name,
                                   std::span<const std::string> chain_symbols) {
-    market_data_engine_->subscribe_chains(strategy_name, chain_symbols);
+    if (market_data_client_) {
+        market_data_client_->subscribe_chains(strategy_name, chain_symbols);
+    }
 }
 
 void MainEngine::unsubscribe_chains(const std::string& strategy_name) {
-    market_data_engine_->unsubscribe_chains(strategy_name);
+    if (market_data_client_) {
+        market_data_client_->unsubscribe_chains(strategy_name);
+    }
 }
 
 auto MainEngine::get_portfolio(const std::string& portfolio_name) -> utilities::PortfolioData* {
-    return market_data_engine_->get_portfolio(portfolio_name);
+    return portfolio_structure_->get_portfolio(portfolio_name);
 }
 
 auto MainEngine::get_all_portfolio_names() const -> std::vector<std::string> {
-    return market_data_engine_->get_all_portfolio_names();
+    return portfolio_structure_->get_all_portfolio_names();
 }
 
 auto MainEngine::get_contract(const std::string& symbol) const -> const utilities::ContractData* {
-    return market_data_engine_->get_contract(symbol);
+    return portfolio_structure_->get_contract(symbol);
 }
 
 auto MainEngine::get_all_contracts() const -> std::vector<utilities::ContractData> {
-    return market_data_engine_->get_all_contracts();
+    return portfolio_structure_->get_all_contracts();
 }
 
 void MainEngine::save_trade_data(const std::string& strategy_name,
@@ -201,9 +204,9 @@ void MainEngine::save_order_data(const std::string& strategy_name,
     db_engine_->save_order_data(strategy_name, order);
 }
 
-void MainEngine::connect() { ib_gateway_->connect(); }
+void MainEngine::connect() { gateway_client_->connect(); }
 
-void MainEngine::disconnect() { ib_gateway_->disconnect(); }
+void MainEngine::disconnect() { gateway_client_->disconnect(); }
 
 void MainEngine::cancel_order(const utilities::CancelRequest& req) {
     if (execution_engine_) {
@@ -212,12 +215,12 @@ void MainEngine::cancel_order(const utilities::CancelRequest& req) {
 }
 
 auto MainEngine::send_order(const utilities::OrderRequest& req) -> std::string {
-    return ib_gateway_->send_order(req);
+    return gateway_client_->send_order(req);
 }
 
-void MainEngine::query_account() { ib_gateway_->query_account(); }
+void MainEngine::query_account() { gateway_client_->query_account(); }
 
-void MainEngine::query_position() { ib_gateway_->query_position(); }
+void MainEngine::query_position() { gateway_client_->query_position(); }
 
 auto MainEngine::get_order(const std::string& orderid) -> utilities::OrderData* {
     return execution_engine_ ? execution_engine_->get_order(orderid) : nullptr;
@@ -228,32 +231,49 @@ auto MainEngine::get_trade(const std::string& tradeid) -> utilities::TradeData* 
 }
 
 void MainEngine::on_strategy_event(const utilities::StrategyUpdateData& update) {
-    {
-        std::scoped_lock lock(strategy_updates_mutex_);
-        strategy_updates_.push_back(update);
-        if (strategy_updates_.size() > 1000) {
-            strategy_updates_.pop_front();
+    utilities::StrategyUpdateData* p = strategy_updates_pool_.acquire();
+    if (p != nullptr) {
+        *p = update;
+        if (strategy_updates_ring_.try_push(p)) {
+            strategy_updates_cv_.notify_one();
+        } else {
+            strategy_updates_pool_.release(p);
         }
     }
-    strategy_updates_cv_.notify_one();
 }
 
 auto MainEngine::pop_strategy_update(utilities::StrategyUpdateData& out, int timeout_ms) -> bool {
     std::unique_lock<std::mutex> lock(strategy_updates_mutex_);
-    if (!strategy_updates_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
-                                       [this]() -> bool { return !strategy_updates_.empty(); })) {
+    if (!strategy_updates_cv_.wait_for(
+            lock, std::chrono::milliseconds(timeout_ms),
+            [this]() -> bool { return !strategy_updates_ring_.empty(); })) {
         return false;
     }
-    out = std::move(strategy_updates_.front());
-    strategy_updates_.pop_front();
+    utilities::StrategyUpdateData* p = nullptr;
+    if (!strategy_updates_ring_.try_pop(p) || p == nullptr) {
+        return false;
+    }
+    lock.unlock();
+    out = std::move(*p);
+    strategy_updates_pool_.release(p);
     return true;
 }
 
 void MainEngine::put_event(const utilities::Event& e) { event_engine_->put_event(e); }
 
+void MainEngine::put_event(utilities::Event&& e) {
+    event_engine_->put(std::forward<utilities::Event>(e));
+}
+
+void MainEngine::put_event(utilities::Event& e) { event_engine_->put(e); }
+
 void MainEngine::write_log(const std::string& msg, int level, const std::string& gateway) {
     if (log_engine_) {
-        log_engine_->write_log(msg, level, gateway);
+        utilities::LogData log;
+        log.msg = msg;
+        log.level = level;
+        log.gateway_name = gateway.empty() ? "Main" : gateway;
+        put_log_intent(log);
     }
 }
 
@@ -263,6 +283,28 @@ void MainEngine::put_log_intent(const utilities::LogData& log) {
     }
 }
 
+utilities::LogData* MainEngine::acquire_log() {
+    return log_engine_ ? log_engine_->acquire_log() : nullptr;
+}
+
+void MainEngine::release_log(utilities::LogData* p) {
+    if (log_engine_ && p) {
+        log_engine_->release_log(p);
+    }
+}
+
+utilities::PortfolioSnapshot* MainEngine::acquire_snapshot() {
+    return event_engine_ ? event_engine_->acquire_snapshot() : nullptr;
+}
+
+utilities::OrderData* MainEngine::acquire_order() {
+    return event_engine_ ? event_engine_->acquire_order() : nullptr;
+}
+
+utilities::TradeData* MainEngine::acquire_trade() {
+    return event_engine_ ? event_engine_->acquire_trade() : nullptr;
+}
+
 void MainEngine::close() {
     if (option_strategy_engine_) {
         option_strategy_engine_->close();
@@ -270,11 +312,14 @@ void MainEngine::close() {
     if (execution_engine_) {
         execution_engine_->close();
     }
+    if (market_data_client_) {
+        market_data_client_->close();
+    }
     if (db_engine_) {
         db_engine_->close();
     }
-    if (ib_gateway_) {
-        ib_gateway_->close();
+    if (gateway_client_) {
+        gateway_client_->close();
     }
     if (event_engine_) {
         event_engine_->close();
@@ -286,13 +331,6 @@ auto MainEngine::hedge_engine() -> HedgeEngine* {
         hedge_engine_ = std::make_unique<HedgeEngine>(this);
     }
     return hedge_engine_.get();
-}
-
-auto MainEngine::combo_builder_engine() -> ComboBuilderEngine* {
-    if (!combo_builder_engine_) {
-        combo_builder_engine_ = std::make_unique<ComboBuilderEngine>(this);
-    }
-    return combo_builder_engine_.get();
 }
 
 auto MainEngine::get_holding(const std::string& strategy_name) -> utilities::StrategyHolding* {

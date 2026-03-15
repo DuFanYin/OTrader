@@ -66,8 +66,8 @@ auto GrpcLiveEngineService::GetStatus(::grpc::ServerContext* /*context*/,
     const bool running = (main_engine_ != nullptr);
     response->set_running(running);
 
-    const bool ib_connected = running && (main_engine_->ib_gateway() != nullptr) &&
-                              main_engine_->ib_gateway()->is_connected();
+    const bool ib_connected = running && (main_engine_->gateway_client() != nullptr) &&
+                              main_engine_->gateway_client()->is_connected();
     response->set_connected(ib_connected);
 
     const bool md_running = running && main_engine_->market_data_running();

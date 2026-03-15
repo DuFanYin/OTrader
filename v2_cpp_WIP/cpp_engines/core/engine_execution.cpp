@@ -55,32 +55,49 @@ void ExecutionEngine::register_active_order(const std::string& strategy_name,
 
 void ExecutionEngine::store_order(const std::string& strategy_name,
                                   const utilities::OrderData& order) {
-    orders_[order.orderid] = order;
+    auto it = orders_.find(order.orderid);
+    if (it != orders_.end()) {
+        order_pool_.release(it->second);
+    }
+    utilities::OrderData* p = order_pool_.acquire();
+    *p = order;
+    orders_[order.orderid] = p;
     if (order.status == utilities::Status::CANCELLED ||
         order.status == utilities::Status::REJECTED ||
         order.status == utilities::Status::ALLTRADED) {
-        // Order no longer active; keep orderid→strategy_name for IB combo leg attribution
         strategy_active_orders_[strategy_name].erase(order.orderid);
         all_active_order_ids_.erase(order.orderid);
     }
 }
 
 void ExecutionEngine::add_order(const utilities::OrderData& order) {
-    orders_[order.orderid] = order;
+    auto it = orders_.find(order.orderid);
+    if (it != orders_.end()) {
+        order_pool_.release(it->second);
+    }
+    utilities::OrderData* p = order_pool_.acquire();
+    *p = order;
+    orders_[order.orderid] = p;
 }
 
 void ExecutionEngine::store_trade(const utilities::TradeData& trade) {
-    trades_[trade.tradeid] = trade;
+    auto it = trades_.find(trade.tradeid);
+    if (it != trades_.end()) {
+        trade_pool_.release(it->second);
+    }
+    utilities::TradeData* p = trade_pool_.acquire();
+    *p = trade;
+    trades_[trade.tradeid] = p;
 }
 
 auto ExecutionEngine::get_order(const std::string& orderid) -> utilities::OrderData* {
     auto it = orders_.find(orderid);
-    return (it != orders_.end()) ? &it->second : nullptr;
+    return (it != orders_.end()) ? it->second : nullptr;
 }
 
 auto ExecutionEngine::get_trade(const std::string& tradeid) -> utilities::TradeData* {
     auto it = trades_.find(tradeid);
-    return (it != trades_.end()) ? &it->second : nullptr;
+    return (it != trades_.end()) ? it->second : nullptr;
 }
 
 auto ExecutionEngine::get_strategy_name_for_order(const std::string& orderid) const -> std::string {
@@ -91,14 +108,22 @@ auto ExecutionEngine::get_strategy_name_for_order(const std::string& orderid) co
 auto ExecutionEngine::get_all_orders() const -> std::vector<utilities::OrderData> {
     std::vector<utilities::OrderData> out;
     out.reserve(orders_.size());
-    std::ranges::copy(orders_ | std::views::values, std::back_inserter(out));
+    for (const auto& [_, ptr] : orders_) {
+        if (ptr != nullptr) {
+            out.push_back(*ptr);
+        }
+    }
     return out;
 }
 
 auto ExecutionEngine::get_all_trades() const -> std::vector<utilities::TradeData> {
     std::vector<utilities::TradeData> out;
     out.reserve(trades_.size());
-    std::ranges::copy(trades_ | std::views::values, std::back_inserter(out));
+    for (const auto& [_, ptr] : trades_) {
+        if (ptr != nullptr) {
+            out.push_back(*ptr);
+        }
+    }
     return out;
 }
 
@@ -106,8 +131,8 @@ auto ExecutionEngine::get_all_active_orders() const -> std::vector<utilities::Or
     std::vector<utilities::OrderData> out;
     for (const std::string& oid : all_active_order_ids_) {
         auto it = orders_.find(oid);
-        if (it != orders_.end() && it->second.is_active()) {
-            out.push_back(it->second);
+        if (it != orders_.end() && it->second != nullptr && it->second->is_active()) {
+            out.push_back(*it->second);
         }
     }
     return out;
@@ -143,12 +168,18 @@ void ExecutionEngine::ensure_strategy_key(const std::string& strategy_name) {
 }
 
 void ExecutionEngine::clear() {
+    for (auto& [_, ptr] : orders_) {
+        order_pool_.release(ptr);
+    }
+    orders_.clear();
+    for (auto& [_, ptr] : trades_) {
+        trade_pool_.release(ptr);
+    }
+    trades_.clear();
     strategy_active_orders_.clear();
     orderid_strategy_name_.clear();
     all_active_order_ids_.clear();
     account_position_.clear();
-    orders_.clear();
-    trades_.clear();
 }
 
 } // namespace core

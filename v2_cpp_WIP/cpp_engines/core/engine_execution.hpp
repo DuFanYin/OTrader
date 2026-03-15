@@ -5,6 +5,7 @@
 #include "../utilities/base_engine.hpp"
 #include "../utilities/constant.hpp"
 #include "../utilities/object.hpp"
+#include "../utilities/object_pool.hpp"
 #include <functional>
 #include <set>
 #include <string>
@@ -88,9 +89,11 @@ class ExecutionEngine : public utilities::BaseEngine {
   private:
     SendOrderFn send_impl_;
     CancelImplFn cancel_impl_;
+    utilities::ObjectPool<utilities::OrderData> order_pool_;
+    utilities::ObjectPool<utilities::TradeData> trade_pool_;
     std::unordered_map<std::string, double> account_position_;
-    std::unordered_map<std::string, utilities::OrderData> orders_;
-    std::unordered_map<std::string, utilities::TradeData> trades_;
+    std::unordered_map<std::string, utilities::OrderData*> orders_;
+    std::unordered_map<std::string, utilities::TradeData*> trades_;
     std::unordered_map<std::string, std::string> orderid_strategy_name_;
     std::unordered_map<std::string, std::set<std::string>> strategy_active_orders_;
     std::unordered_set<std::string> all_active_order_ids_;

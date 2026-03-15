@@ -4,7 +4,7 @@
  * Runtime API: runtime capabilities split into three blocks for core/strategy.
  * - ExecutionAPI: send order, order/trade status, cancel tracking (ExecutionEngine/Main)
  * - PortfolioAPI: portfolio, contract, strategy holding (Main + PositionEngine)
- * - SystemAPI: events, logs, helper engines (Hedge/ComboBuilder)
+ * - SystemAPI: events, logs, helper engines (Hedge)
  * Structure defined here; populated in MainEngine constructors.
  */
 
@@ -21,7 +21,6 @@
 #include <vector>
 
 namespace engines {
-class ComboBuilderEngine;
 class HedgeEngine;
 } // namespace engines
 
@@ -69,7 +68,6 @@ struct SystemAPI {
     std::function<void(const utilities::StrategyUpdateData&)> put_strategy_event;
 
     // Helper engines
-    std::function<engines::ComboBuilderEngine*()> get_combo_builder_engine;
     std::function<engines::HedgeEngine*()> get_hedge_engine;
 };
 

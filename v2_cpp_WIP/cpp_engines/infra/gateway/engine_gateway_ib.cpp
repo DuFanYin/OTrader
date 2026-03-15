@@ -2,8 +2,7 @@
 
 #include "engine_gateway_ib.hpp"
 #include "../../utilities/constant.hpp"
-#include "engine_main.hpp"
-#include "ib_mapping.hpp"
+#include "../../utilities/ib_mapping.hpp"
 
 #include "CommonDefs.h"
 #include "Contract.h"
@@ -478,7 +477,11 @@ class IbApiTws : public IbApi, public DefaultEWrapper {
                     }
                     symbol = norm;
                 } catch (...) {
-                    // Ignore symbol normalization errors; use raw symbol
+                    if (gateway_ != nullptr) {
+                        gateway_->write_log(
+                            "Symbol normalization failed (strike/mult parse), using raw: " + symbol,
+                            WARNING);
+                    }
                 }
             }
         }
@@ -551,7 +554,8 @@ class IbApiTws : public IbApi, public DefaultEWrapper {
 
 // IbGateway
 
-IbGateway::IbGateway(MainEngine* main_engine) : utilities::BaseEngine(main_engine, "IBGateway") {
+IbGateway::IbGateway(utilities::MainEngine* main_engine)
+    : utilities::BaseEngine(main_engine, "IBGateway") {
     api_ = std::make_unique<IbApiTws>(this);
 }
 
@@ -563,8 +567,14 @@ void IbGateway::on_order(const utilities::OrderData& order) {
                           order.symbol, order.volume, order.traded,
                           utilities::to_string(order.status)),
               INFO);
-    if (main_engine != nullptr) {
-        main_engine->put_event(utilities::Event(utilities::EventType::Order, order));
+    if (order_callback_) {
+        order_callback_(order);
+    } else if (main_engine != nullptr) {
+        utilities::OrderData* p = main_engine->acquire_order();
+        if (p != nullptr) {
+            *p = order;
+            main_engine->put_event(utilities::Event(utilities::EventType::Order, p));
+        }
     }
 }
 
@@ -573,8 +583,14 @@ void IbGateway::on_trade(const utilities::TradeData& trade) {
     write_log(std::format("Trade {} symbol={} vol={} price={}", trade.tradeid, trade.symbol,
                           trade.volume, trade.price),
               INFO);
-    if (main_engine != nullptr) {
-        main_engine->put_event(utilities::Event(utilities::EventType::Trade, trade));
+    if (trade_callback_) {
+        trade_callback_(trade);
+    } else if (main_engine != nullptr) {
+        utilities::TradeData* p = main_engine->acquire_trade();
+        if (p != nullptr) {
+            *p = trade;
+            main_engine->put_event(utilities::Event(utilities::EventType::Trade, p));
+        }
     }
 }
 

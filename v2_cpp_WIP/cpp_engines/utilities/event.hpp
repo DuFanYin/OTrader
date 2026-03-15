@@ -18,7 +18,8 @@ enum class EventType : uint8_t {
     Snapshot,
 };
 
-using EventPayload = std::variant<std::monostate, OrderData, TradeData, PortfolioSnapshot>;
+/** All heavy payloads are pointers (pooled); consumer must release on dispatch/drain. */
+using EventPayload = std::variant<std::monostate, OrderData*, TradeData*, PortfolioSnapshot*>;
 
 struct Event {
     EventType type = EventType::Timer;
@@ -26,6 +27,12 @@ struct Event {
 
     Event() = default;
     Event(EventType t, EventPayload p = std::monostate{}) : type(t), data(std::move(p)) {}
+
+    /** Clear for reuse in object pool; do not use after reset until reassigned. */
+    void reset() {
+        type = EventType::Timer;
+        data = std::monostate{};
+    }
 };
 
 /**

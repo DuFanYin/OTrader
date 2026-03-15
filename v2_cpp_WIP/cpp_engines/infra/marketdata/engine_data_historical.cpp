@@ -15,6 +15,7 @@
 #include <iterator>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 namespace backtest {
 
@@ -50,8 +51,8 @@ void BacktestDataEngine::set_risk_free_rate(double rate) {
     if (std::isfinite(rate)) {
         risk_free_rate_ = rate;
     }
-    if (portfolio_data_) {
-        portfolio_data_->set_risk_free_rate(risk_free_rate_);
+    if (auto* port = portfolio_data()) {
+        port->set_risk_free_rate(risk_free_rate_);
     }
 }
 
@@ -62,8 +63,8 @@ void BacktestDataEngine::set_iv_price_mode(std::string mode) {
     if (mode == "mid" || mode == "bid" || mode == "ask") {
         iv_price_mode_ = std::move(mode);
     }
-    if (portfolio_data_) {
-        portfolio_data_->set_iv_price_mode(iv_price_mode_);
+    if (auto* port = portfolio_data()) {
+        port->set_iv_price_mode(iv_price_mode_);
     }
 }
 
@@ -71,7 +72,12 @@ void BacktestDataEngine::load_parquet(std::string const& rel_path, std::string c
                                       std::string const& underlying_symbol) {
     loaded_ = false;
     portfolio_ = std::nullopt;
-    portfolio_data_.reset();
+    if (main_engine != nullptr) {
+        auto* ps = static_cast<MainEngine*>(main_engine)->portfolio_structure();
+        if (ps) {
+            ps->clear();
+        }
+    }
     occ_to_standard_symbol_.clear();
     option_apply_index_.clear();
     occ_to_option_.clear();
@@ -134,11 +140,12 @@ void BacktestDataEngine::load_parquet(std::string const& rel_path, std::string c
 
     if (main_engine != nullptr) {
         create_portfolio_data(symbols, dte_ref);
-        portfolio_data_->finalize_chains();
         build_option_apply_index();
         build_occ_to_option(symbols_set);
-        portfolio_data_->set_risk_free_rate(risk_free_rate_);
-        portfolio_data_->set_iv_price_mode(iv_price_mode_);
+        if (auto* port = portfolio_data()) {
+            port->set_risk_free_rate(risk_free_rate_);
+            port->set_iv_price_mode(iv_price_mode_);
+        }
         precompute_snapshots();
     }
 }
@@ -152,10 +159,11 @@ auto BacktestDataEngine::get_meta() const -> DataMeta {
 
 void BacktestDataEngine::build_option_apply_index() {
     option_apply_index_.clear();
-    if (!portfolio_data_) {
+    utilities::PortfolioData* port = portfolio_data();
+    if (!port) {
         return;
     }
-    const auto& order = portfolio_data_->option_apply_order();
+    const auto& order = port->option_apply_order();
     size_t idx = 0;
     for (utilities::OptionData* opt : order) {
         option_apply_index_[opt] = idx++;
@@ -164,7 +172,8 @@ void BacktestDataEngine::build_option_apply_index() {
 
 void BacktestDataEngine::build_occ_to_option(std::unordered_set<std::string> const& occ_symbols) {
     occ_to_option_.clear();
-    if (!portfolio_data_) {
+    utilities::PortfolioData* port = portfolio_data();
+    if (!port) {
         return;
     }
     const std::string under = underlying_symbol_.empty() ? "UNKNOWN" : underlying_symbol_;
@@ -195,8 +204,8 @@ void BacktestDataEngine::build_occ_to_option(std::unordered_set<std::string> con
             std_sym += std::to_string(multiplier);
             occ_to_standard_symbol_[occ_sym] = std_sym;
         }
-        auto opt_it = portfolio_data_->options.find(std_sym);
-        if (opt_it == portfolio_data_->options.end()) {
+        auto opt_it = port->options.find(std_sym);
+        if (opt_it == port->options.end()) {
             continue;
         }
         occ_to_option_[occ_sym] = &opt_it->second;
@@ -207,11 +216,12 @@ auto BacktestDataEngine::build_snapshot_from_frame(TimestepFrameColumnar const& 
                                                    utilities::PortfolioSnapshot const* prev)
     -> utilities::PortfolioSnapshot {
     utilities::PortfolioSnapshot snapshot;
-    if (frame.num_rows <= 0 || !portfolio_data_) {
+    utilities::PortfolioData* port = portfolio_data();
+    if (frame.num_rows <= 0 || !port) {
         return snapshot;
     }
-    const size_t n_opt = portfolio_data_->option_apply_order().size();
-    snapshot.portfolio_name = portfolio_data_->name;
+    const size_t n_opt = port->option_apply_order().size();
+    snapshot.portfolio_name = port->name;
     snapshot.datetime = frame.timestamp;
     snapshot.bid.resize(n_opt, 0.0);
     snapshot.ask.resize(n_opt, 0.0);
@@ -271,21 +281,26 @@ auto BacktestDataEngine::build_snapshot_from_frame(TimestepFrameColumnar const& 
 }
 
 void BacktestDataEngine::precompute_snapshots() {
+    for (utilities::PortfolioSnapshot* p : snapshots_) {
+        snapshot_pool_.release(p);
+    }
     snapshots_.clear();
-    if (!loader_ || !loaded_ || !portfolio_data_) {
+    if (!loader_ || !loaded_ || !portfolio_data()) {
         return;
     }
     loader_->iter_timesteps([this](TimestepFrameColumnar const& frame) -> bool {
-        utilities::PortfolioSnapshot const* prev =
-            snapshots_.empty() ? nullptr : &snapshots_.back();
-        snapshots_.push_back(build_snapshot_from_frame(frame, prev));
+        utilities::PortfolioSnapshot const* prev = snapshots_.empty() ? nullptr : snapshots_.back();
+        utilities::PortfolioSnapshot snapshot = build_snapshot_from_frame(frame, prev);
+        utilities::PortfolioSnapshot* p = snapshot_pool_.acquire();
+        *p = std::move(snapshot);
+        snapshots_.push_back(p);
         return true;
     });
 }
 
 void BacktestDataEngine::apply_precomputed_snapshot(size_t i) {
-    if (portfolio_data_ && i < snapshots_.size()) {
-        portfolio_data_->apply_frame(snapshots_.at(i));
+    if (utilities::PortfolioData* port = portfolio_data(); port && i < snapshots_.size()) {
+        port->apply_frame(*snapshots_.at(i));
     }
 }
 
@@ -300,17 +315,34 @@ void BacktestDataEngine::build_portfolio_from_symbols(std::vector<std::string> c
     portfolio_ = std::move(p);
 }
 
+utilities::PortfolioData* BacktestDataEngine::portfolio_data() const {
+    if (main_engine == nullptr) {
+        return nullptr;
+    }
+    auto* ps = static_cast<MainEngine*>(main_engine)->portfolio_structure();
+    return ps ? ps->get_portfolio("backtest") : nullptr;
+}
+
 void BacktestDataEngine::create_portfolio_data(std::vector<std::string> const& symbols,
                                                std::optional<utilities::DateTime> dte_ref) {
-    std::string under = underlying_symbol_.empty() ? "UNKNOWN" : underlying_symbol_;
-    // Portfolio name "backtest", avoid filename/underlying inference
-    std::string name = "backtest";
-    portfolio_data_ = std::make_unique<utilities::PortfolioData>(name);
-    if (dte_ref.has_value()) {
-        portfolio_data_->set_dte_ref(*dte_ref);
+    if (main_engine == nullptr) {
+        return;
     }
-    if (main_engine != nullptr) {
-        static_cast<MainEngine*>(main_engine)->register_portfolio(portfolio_data_.get());
+    engines::PortfolioStructure* ps = static_cast<MainEngine*>(main_engine)->portfolio_structure();
+    if (ps == nullptr) {
+        return;
+    }
+
+    std::string under = underlying_symbol_.empty() ? "UNKNOWN" : underlying_symbol_;
+    const std::string name = "backtest";
+
+    ps->ensure_portfolio(name);
+    utilities::PortfolioData* port = ps->get_portfolio(name);
+    if (port == nullptr) {
+        return;
+    }
+    if (dte_ref.has_value()) {
+        port->set_dte_ref(*dte_ref);
     }
 
     utilities::ContractData underlying_contract;
@@ -321,12 +353,8 @@ void BacktestDataEngine::create_portfolio_data(std::vector<std::string> const& s
     underlying_contract.product = utilities::Product::INDEX;
     underlying_contract.size = 1.0;
     underlying_contract.pricetick = 0.01;
-    portfolio_data_->set_underlying(underlying_contract);
-    if (main_engine != nullptr) {
-        static_cast<MainEngine*>(main_engine)->register_contract(underlying_contract);
-    }
+    ps->process_underlying_for_portfolio(name, underlying_contract);
 
-    int option_count = 0;
     for (auto const& sym : symbols) {
         auto [expiry, strike, opt_type] = parse_occ_symbol(sym);
         if (!expiry || !strike || !opt_type) {
@@ -353,18 +381,15 @@ void BacktestDataEngine::create_portfolio_data(std::vector<std::string> const& s
         option_contract.product = utilities::Product::OPTION;
         option_contract.size = static_cast<double>(multiplier);
         option_contract.pricetick = 0.01;
-        option_contract.option_strike = strike.value();
-        option_contract.option_type = opt_type.value();
+        option_contract.option_strike = strike;
+        option_contract.option_type = opt_type;
         option_contract.option_expiry = *expiry;
         option_contract.option_underlying = under;
         option_contract.option_index = std::to_string(static_cast<int>(*strike));
-        portfolio_data_->add_option(option_contract);
-        if (main_engine != nullptr) {
-            static_cast<MainEngine*>(main_engine)->register_contract(option_contract);
-        }
+        ps->process_option_for_portfolio(name, option_contract);
         occ_to_standard_symbol_[sym] = standard_symbol;
-        option_count++;
     }
+    ps->finalize_all_chains();
 }
 
 } // namespace backtest

@@ -206,7 +206,11 @@ void BacktestEngine::execute_order_impl(const utilities::OrderRequest& req,
     }
 
     main_engine_->add_order(orderid, order);
-    main_engine_->put_event(utilities::Event(utilities::EventType::Order, order));
+    utilities::OrderData* order_slot = main_engine_->acquire_order();
+    if (order_slot != nullptr) {
+        *order_slot = order;
+        main_engine_->put_event(utilities::Event(utilities::EventType::Order, order_slot));
+    }
 
     if (filled) {
         trade_counter_++;
@@ -220,7 +224,11 @@ void BacktestEngine::execute_order_impl(const utilities::OrderRequest& req,
         trade.price = fill_price;
         trade.volume = req.volume;
         trade.datetime = std::chrono::system_clock::now();
-        main_engine_->put_event(utilities::Event(utilities::EventType::Trade, trade));
+        utilities::TradeData* trade_slot = main_engine_->acquire_trade();
+        if (trade_slot != nullptr) {
+            *trade_slot = trade;
+            main_engine_->put_event(utilities::Event(utilities::EventType::Trade, trade_slot));
+        }
 
         if (req.is_combo && req.legs) {
             int i = 0;
@@ -245,7 +253,12 @@ void BacktestEngine::execute_order_impl(const utilities::OrderRequest& req,
                 leg_trade.price = leg_price;
                 leg_trade.volume = req.volume * std::abs(static_cast<double>(leg.ratio));
                 leg_trade.datetime = std::chrono::system_clock::now();
-                main_engine_->put_event(utilities::Event(utilities::EventType::Trade, leg_trade));
+                utilities::TradeData* leg_slot = main_engine_->acquire_trade();
+                if (leg_slot != nullptr) {
+                    *leg_slot = leg_trade;
+                    main_engine_->put_event(
+                        utilities::Event(utilities::EventType::Trade, leg_slot));
+                }
             }
         }
         const double fee = calculate_order_fee(req, fill_price);
@@ -346,8 +359,11 @@ auto BacktestEngine::run() -> BacktestResult {
             }
             end_time = ts;
             // Snapshot(step_count) = end-of-bar for this minute; portfolio gets bar's BBO.
-            main_engine_->put_event(utilities::Event(
-                utilities::EventType::Snapshot, data_engine->get_precomputed_snapshot(step_count)));
+            utilities::PortfolioSnapshot* snap = main_engine_->acquire_snapshot();
+            if (snap != nullptr) {
+                *snap = data_engine->get_precomputed_snapshot(step_count);
+                main_engine_->put_event(utilities::Event(utilities::EventType::Snapshot, snap));
+            }
             current_timestep_ = step_count + 1;
             total_rows += frame.num_rows;
 

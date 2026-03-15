@@ -218,6 +218,75 @@ inline std::string to_string(Exchange e) {
     return "LOCAL";
 }
 
+// from_string for JSON deserialization
+inline Direction from_string_direction(const std::string& s) {
+    if (s == "SHORT")
+        return Direction::SHORT;
+    if (s == "NET")
+        return Direction::NET;
+    return Direction::LONG;
+}
+inline Status from_string_status(const std::string& s) {
+    if (s == "NOTTRADED")
+        return Status::NOTTRADED;
+    if (s == "PARTTRADED")
+        return Status::PARTTRADED;
+    if (s == "ALLTRADED")
+        return Status::ALLTRADED;
+    if (s == "CANCELLED")
+        return Status::CANCELLED;
+    if (s == "REJECTED")
+        return Status::REJECTED;
+    return Status::SUBMITTING;
+}
+inline OrderType from_string_ordertype(const std::string& s) {
+    if (s == "MARKET")
+        return OrderType::MARKET;
+    return OrderType::LIMIT;
+}
+inline Exchange from_string_exchange(const std::string& s) {
+    if (s == "SMART")
+        return Exchange::SMART;
+    if (s == "NYSE")
+        return Exchange::NYSE;
+    if (s == "NASDAQ")
+        return Exchange::NASDAQ;
+    if (s == "AMEX")
+        return Exchange::AMEX;
+    if (s == "CBOE")
+        return Exchange::CBOE;
+    if (s == "IBKRATS")
+        return Exchange::IBKRATS;
+    return Exchange::LOCAL;
+}
+inline ComboType from_string_combo(const std::string& s) {
+    if (s == "spread")
+        return ComboType::SPREAD;
+    if (s == "straddle")
+        return ComboType::STRADDLE;
+    if (s == "strangle")
+        return ComboType::STRANGLE;
+    if (s == "diagonal_spread")
+        return ComboType::DIAGONAL_SPREAD;
+    if (s == "ratio_spread")
+        return ComboType::RATIO_SPREAD;
+    if (s == "risk_reversal")
+        return ComboType::RISK_REVERSAL;
+    if (s == "butterfly")
+        return ComboType::BUTTERFLY;
+    if (s == "inverse_butterfly")
+        return ComboType::INVERSE_BUTTERFLY;
+    if (s == "iron_condor")
+        return ComboType::IRON_CONDOR;
+    if (s == "iron_butterfly")
+        return ComboType::IRON_BUTTERFLY;
+    if (s == "condor")
+        return ComboType::CONDOR;
+    if (s == "box_spread")
+        return ComboType::BOX_SPREAD;
+    return ComboType::CUSTOM;
+}
+
 // Active statuses (order still in progress)
 inline bool is_active_status(Status s) {
     return s == Status::SUBMITTING || s == Status::NOTTRADED || s == Status::PARTTRADED;

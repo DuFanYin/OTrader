@@ -1,7 +1,7 @@
 #include "template.hpp"
-#include "../core/engine_combo_builder.hpp"
 #include "../core/engine_hedge.hpp"
 #include "../core/engine_option_strategy.hpp"
+#include "../utilities/combo_builder.hpp"
 
 namespace strategy_cpp {
 
@@ -91,21 +91,22 @@ auto OptionStrategyTemplate::option_order(
     const std::unordered_map<std::string, utilities::OptionData*>& option_data,
     utilities::Direction direction, double price, double volume, utilities::OrderType order_type)
     -> std::vector<std::string> {
-    auto* cb = engine_->combo_builder_engine();
-    if (cb == nullptr) {
+    if (engine_ == nullptr) {
         return {};
     }
-    auto get_contract = [this](const std::string& s) -> const utilities::ContractData* {
+    utilities::combo::ComboBuildOptions opts;
+    opts.get_contract = [this](const std::string& s) -> const utilities::ContractData* {
         return engine_->get_contract(s);
     };
-    std::vector<utilities::LogData> combo_logs;
-    auto [legs, sig] = cb->combo_builder(option_data, combo_type, direction,
-                                         static_cast<int>(volume), get_contract, &combo_logs);
-    for (const auto& l : combo_logs) {
-        engine_->write_log(l.msg, l.level);
+    try {
+        auto [legs, sig] = utilities::combo::build_combo(option_data, combo_type, direction,
+                                                         static_cast<int>(volume), opts);
+        return engine_->send_combo_order(strategy_name_, combo_type, sig, direction, price, volume,
+                                         legs, order_type);
+    } catch (const std::exception& e) {
+        engine_->write_log(std::string("[Combo] ") + e.what(), 0);
+        return {};
     }
-    return engine_->send_combo_order(strategy_name_, combo_type, sig, direction, price, volume,
-                                     legs, order_type);
 }
 
 void OptionStrategyTemplate::register_hedging(int timer_trigger, int delta_target,

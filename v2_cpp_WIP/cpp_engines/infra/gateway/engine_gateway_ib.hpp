@@ -10,13 +10,13 @@
 #include "../../utilities/base_engine.hpp"
 #include "../../utilities/event.hpp"
 #include "../../utilities/object.hpp"
+#include <functional>
 #include <memory>
 #include <string>
 
 namespace engines {
 
-struct MainEngine;
-class IbApiTws; // TWS implementation in engine_gateway.cpp; needs to call gateway private callbacks
+class IbApiTws; // TWS implementation in engine_gateway.cpp
 
 /** Abstract API for IB connectivity (stub or real TWS). */
 class IbApi {
@@ -40,7 +40,7 @@ class IbGateway : public utilities::BaseEngine {
     friend class IbApiTws;
 
   public:
-    explicit IbGateway(MainEngine* main_engine);
+    explicit IbGateway(utilities::MainEngine* main_engine);
     ~IbGateway();
 
     void connect();
@@ -68,11 +68,22 @@ class IbGateway : public utilities::BaseEngine {
     Setting& default_setting() { return default_setting_; }
     const Setting& default_setting() const { return default_setting_; }
 
+    /** Optional callbacks for ZMQ Gateway process: when set, used instead of
+     * main_engine->put_event. */
+    void set_order_callback(std::function<void(const utilities::OrderData&)> cb) {
+        order_callback_ = std::move(cb);
+    }
+    void set_trade_callback(std::function<void(const utilities::TradeData&)> cb) {
+        trade_callback_ = std::move(cb);
+    }
+
   private:
     void on_order(const utilities::OrderData& order);
     void on_trade(const utilities::TradeData& trade);
 
     Setting default_setting_;
+    std::function<void(const utilities::OrderData&)> order_callback_;
+    std::function<void(const utilities::TradeData&)> trade_callback_;
     int count_ = 0;
     std::unique_ptr<IbApi> api_;
 };

@@ -51,46 +51,43 @@ LogEngine::LogEngine(utilities::MainEngine* main_engine) : BaseEngine(main_engin
     active_ = true;
 }
 
-void LogEngine::write_log(const std::string& msg, int level, const std::string& gateway) {
-    utilities::LogData log;
-    log.msg = msg;
-    log.level = level;
-    log.gateway_name = gateway.empty() ? "Main" : gateway;
-    log.time = format_time();
-    {
-        std::scoped_lock lk(stream_mutex_);
-        stream_buffer_.push_back(log);
-        if (stream_buffer_.size() > kMaxStreamBuffer) {
-            stream_buffer_.pop_front();
-        }
-    }
-    stream_cv_.notify_all();
-    process_log_intent(log);
-}
-
 void LogEngine::process_log_intent(const utilities::LogData& data) {
     if (!active_ || data.level < level_) {
         return;
     }
-    if (sink_) {
-        utilities::LogData copy = data;
-        if (copy.time.empty()) {
-            copy.time = format_time();
+    utilities::LogData data_copy = data;
+    if (data_copy.time.empty()) {
+        data_copy.time = format_time();
+    }
+    utilities::LogData* p = log_pool_.acquire();
+    if (p != nullptr) {
+        *p = data_copy;
+        if (!stream_ring_.try_push(p)) {
+            log_pool_.release(p);
+        } else {
+            stream_cv_.notify_one();
         }
-        sink_(copy);
+    }
+    if (sink_) {
+        sink_(data_copy);
     } else {
-        default_sink(data);
+        default_sink(data_copy);
     }
 }
 
 auto LogEngine::pop_log_for_stream(utilities::LogData& out, int timeout_ms) -> bool {
     std::unique_lock<std::mutex> lk(stream_mutex_);
     if (!stream_cv_.wait_for(lk, std::chrono::milliseconds(timeout_ms),
-                             [this]() -> bool { return !stream_buffer_.empty(); })) {
+                             [this]() -> bool { return !stream_ring_.empty(); })) {
         return false;
     }
-    out = stream_buffer_.front();
-    stream_buffer_.pop_front();
+    utilities::LogData* p = nullptr;
+    if (!stream_ring_.try_pop(p) || p == nullptr) {
+        return false;
+    }
+    lk.unlock();
+    out = *p;
+    log_pool_.release(p);
     return true;
 }
 

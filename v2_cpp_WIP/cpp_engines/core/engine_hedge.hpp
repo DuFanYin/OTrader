@@ -43,11 +43,15 @@ class HedgeEngine : public utilities::BaseEngine {
                            int delta_target = 0, int delta_range = 0);
     void unregister_strategy(const std::string& strategy_name);
 
-    /** Run hedging; append OrderRequest/CancelRequest/LogData to caller vectors. */
+    /** Run hedging; append OrderRequest/CancelRequest/LogData* to caller vectors.
+     * When out_logs != nullptr, acquire_log must be provided; caller releases each LogData* after
+     * put_log_intent. */
+    using AcquireLogFn = std::function<utilities::LogData*()>;
     void process_hedging(const std::string& strategy_name, const HedgeParams& params,
                          std::vector<utilities::OrderRequest>* out_orders,
                          std::vector<utilities::CancelRequest>* out_cancels,
-                         std::vector<utilities::LogData>* out_logs);
+                         std::vector<utilities::LogData*>* out_logs,
+                         const AcquireLogFn& acquire_log = nullptr);
 
     const std::unordered_map<std::string, HedgeConfig>& registered_strategies() const {
         return registered_strategies_;
@@ -58,7 +62,8 @@ class HedgeEngine : public utilities::BaseEngine {
                                                  HedgeConfig& config, const HedgeParams& params,
                                                  std::vector<utilities::OrderRequest>* out_orders,
                                                  std::vector<utilities::CancelRequest>* out_cancels,
-                                                 std::vector<utilities::LogData>* out_logs);
+                                                 std::vector<utilities::LogData*>* out_logs,
+                                                 const AcquireLogFn& acquire_log);
     static std::optional<std::tuple<std::string, utilities::Direction, double, double>>
     compute_hedge_plan(const std::string& strategy_name, HedgeConfig& config,
                        const HedgeParams& params);
@@ -66,12 +71,14 @@ class HedgeEngine : public utilities::BaseEngine {
                                      utilities::Direction direction, double available,
                                      double order_volume, const HedgeParams& params,
                                      std::vector<utilities::OrderRequest>* out_orders,
-                                     std::vector<utilities::LogData>* out_logs);
+                                     std::vector<utilities::LogData*>* out_logs,
+                                     const AcquireLogFn& acquire_log);
     static void submit_hedge_order(const std::string& strategy_name, const std::string& symbol,
                                    utilities::Direction direction, double volume,
                                    const HedgeParams& params,
                                    std::vector<utilities::OrderRequest>* out_orders,
-                                   std::vector<utilities::LogData>* out_logs);
+                                   std::vector<utilities::LogData*>* out_logs,
+                                   const AcquireLogFn& acquire_log);
     static bool check_strategy_orders_finished(const std::string& strategy_name,
                                                const HedgeParams& params);
     static void cancel_strategy_orders(const std::string& strategy_name, const HedgeParams& params,

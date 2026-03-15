@@ -34,10 +34,8 @@ class PositionEngine : public utilities::BaseEngine {
     PositionEngine() = default;
     explicit PositionEngine(utilities::MainEngine* main) : BaseEngine(main, "Position") {}
 
-    /** Caller invokes each tick; pass get_portfolio. Optional out_logs: append LogIntent (LogData)
-     * for caller to put_intent(IntentLog{...}). */
-    void process_timer_event(const GetPortfolioFn& get_portfolio,
-                             std::vector<utilities::LogData>* out_logs = nullptr);
+    /** Caller invokes each tick; pass get_portfolio. Errors logged via write_log (Main). */
+    void process_timer_event(const GetPortfolioFn& get_portfolio);
     void process_order(const std::string& strategy_name, const utilities::OrderData& order);
     void process_trade(const std::string& strategy_name, const utilities::TradeData& trade);
 

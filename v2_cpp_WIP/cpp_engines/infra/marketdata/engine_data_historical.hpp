@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../utilities/base_engine.hpp"
+#include "../../utilities/object_pool.hpp"
 #include "constant.hpp"
 #include "object.hpp"
 #include "parquet_loader.hpp"
@@ -47,12 +48,12 @@ class BacktestDataEngine : public utilities::BaseEngine {
 
     [[nodiscard]] std::optional<BacktestPortfolio> const& portfolio() const { return portfolio_; }
     [[nodiscard]] bool has_data() const { return loader_ != nullptr && loaded_; }
-    utilities::PortfolioData* portfolio_data() const { return portfolio_data_.get(); }
+    utilities::PortfolioData* portfolio_data() const;
 
     /** Precomputed snapshots (one per frame). */
     [[nodiscard]] size_t get_precomputed_snapshot_count() const { return snapshots_.size(); }
     [[nodiscard]] utilities::PortfolioSnapshot const& get_precomputed_snapshot(size_t i) const {
-        return snapshots_.at(i);
+        return *snapshots_.at(i);
     }
     /** Apply precomputed snapshot. */
     void apply_precomputed_snapshot(size_t i);
@@ -75,13 +76,13 @@ class BacktestDataEngine : public utilities::BaseEngine {
     std::string time_column_;
     std::string underlying_symbol_;
     std::optional<BacktestPortfolio> portfolio_;
-    std::unique_ptr<utilities::PortfolioData> portfolio_data_;
     std::unordered_map<std::string, std::string> occ_to_standard_symbol_;
     /** OCC -> OptionData* (load). */
     std::unordered_map<std::string, utilities::OptionData*> occ_to_option_;
     double risk_free_rate_ = 0.05;
     std::string iv_price_mode_ = "mid";
-    std::vector<utilities::PortfolioSnapshot> snapshots_;
+    utilities::ObjectPool<utilities::PortfolioSnapshot> snapshot_pool_;
+    std::vector<utilities::PortfolioSnapshot*> snapshots_;
     std::unordered_map<utilities::OptionData*, size_t> option_apply_index_;
 };
 

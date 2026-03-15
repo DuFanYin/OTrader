@@ -6,10 +6,12 @@
 #include "../../utilities/utility.hpp"
 #include "engine_data_historical.hpp"
 #include <stdexcept>
+#include <utility>
 
 namespace backtest {
 
 MainEngine::MainEngine() {
+    portfolio_structure_ = std::make_unique<engines::PortfolioStructure>();
     event_engine_ = std::make_unique<EventEngine>(this);
     event_engine_->start();
     position_engine_ = std::make_unique<engines::PositionEngine>(this);
@@ -21,7 +23,11 @@ MainEngine::MainEngine() {
         utilities::OrderData* o = execution_engine_->get_order(req.orderid);
         if (o != nullptr) {
             o->status = utilities::Status::CANCELLED;
-            put_event(utilities::Event(utilities::EventType::Order, *o));
+            utilities::OrderData* p = acquire_order();
+            if (p != nullptr) {
+                *p = *o;
+                put_event(utilities::Event(utilities::EventType::Order, p));
+            }
         }
     });
     log_engine_->set_level(
@@ -106,9 +112,6 @@ MainEngine::MainEngine() {
     api.system.write_log = [this](const utilities::LogData& log) -> void { put_log_intent(log); };
     // No strategy event push in backtest
     api.system.put_strategy_event = [](const utilities::StrategyUpdateData&) -> void {};
-    api.system.get_combo_builder_engine = [this]() -> engines::ComboBuilderEngine* {
-        return combo_builder_engine();
-    };
     api.system.get_hedge_engine = [this]() -> engines::HedgeEngine* { return hedge_engine(); };
 
     option_strategy_engine_ = std::make_unique<core::OptionStrategyEngine>(this, std::move(api));
@@ -118,25 +121,13 @@ MainEngine::MainEngine() {
 
 MainEngine::~MainEngine() = default;
 
-void MainEngine::register_portfolio(utilities::PortfolioData* portfolio) {
-    if (portfolio != nullptr) {
-        portfolios_[portfolio->name] = portfolio;
-    }
-}
-
 auto MainEngine::get_portfolio(const std::string& portfolio_name) const
     -> utilities::PortfolioData* {
-    auto it = portfolios_.find(portfolio_name);
-    return (it != portfolios_.end()) ? it->second : nullptr;
-}
-
-void MainEngine::register_contract(utilities::ContractData contract) {
-    contracts_[contract.symbol] = std::move(contract);
+    return portfolio_structure_ ? portfolio_structure_->get_portfolio(portfolio_name) : nullptr;
 }
 
 auto MainEngine::get_contract(const std::string& symbol) const -> const utilities::ContractData* {
-    auto it = contracts_.find(symbol);
-    return (it != contracts_.end()) ? &it->second : nullptr;
+    return portfolio_structure_ ? portfolio_structure_->get_contract(symbol) : nullptr;
 }
 
 auto MainEngine::load_backtest_data(const std::string& parquet_path,
@@ -150,6 +141,12 @@ auto MainEngine::load_backtest_data(const std::string& parquet_path,
 }
 
 void MainEngine::put_event(const utilities::Event& e) { event_engine_->put_event(e); }
+
+void MainEngine::put_event(utilities::Event&& e) {
+    event_engine_->put_event(std::forward<utilities::Event>(e));
+}
+
+void MainEngine::put_event(utilities::Event& e) { event_engine_->put_event(e); }
 
 auto MainEngine::send_order(const utilities::OrderRequest& req) -> std::string {
     if (!order_executor_) {
@@ -214,6 +211,28 @@ void MainEngine::put_log_intent(const utilities::LogData& intent) const {
     log_engine_->process_log_intent(intent);
 }
 
+utilities::LogData* MainEngine::acquire_log() {
+    return log_engine_ ? log_engine_->acquire_log() : nullptr;
+}
+
+void MainEngine::release_log(utilities::LogData* p) {
+    if (log_engine_ && p) {
+        log_engine_->release_log(p);
+    }
+}
+
+utilities::PortfolioSnapshot* MainEngine::acquire_snapshot() {
+    return event_engine_ ? event_engine_->acquire_snapshot() : nullptr;
+}
+
+utilities::OrderData* MainEngine::acquire_order() {
+    return event_engine_ ? event_engine_->acquire_order() : nullptr;
+}
+
+utilities::TradeData* MainEngine::acquire_trade() {
+    return event_engine_ ? event_engine_->acquire_trade() : nullptr;
+}
+
 void MainEngine::set_log_level(int level) {
     if (log_engine_) {
         log_engine_->set_level(level);
@@ -234,13 +253,6 @@ void MainEngine::close() {
     if (event_engine_) {
         event_engine_->close();
     }
-}
-
-auto MainEngine::combo_builder_engine() -> engines::ComboBuilderEngine* {
-    if (!combo_builder_engine_) {
-        combo_builder_engine_ = std::make_unique<engines::ComboBuilderEngine>();
-    }
-    return combo_builder_engine_.get();
 }
 
 auto MainEngine::hedge_engine() -> engines::HedgeEngine* {

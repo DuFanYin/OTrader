@@ -26,8 +26,9 @@ void EventEngine::start() {
     if (active_.exchange(true)) {
         return;
     }
-    thread_ = std::jthread([this](std::stop_token st) { run(std::move(st)); });
-    timer_thread_ = std::jthread([this](std::stop_token st) { run_timer(std::move(st)); });
+    thread_ = std::jthread([this](const std::stop_token& st) { run(st); });
+    timer_thread_ = std::jthread([this](const std::stop_token& st) { run_timer(st); });
+    strategy_thread_ = std::jthread([this](const std::stop_token& st) { run_strategy(st); });
 }
 
 void EventEngine::stop() {
@@ -35,11 +36,27 @@ void EventEngine::stop() {
         return;
     }
     queue_cv_.notify_all();
+    strategy_cv_.notify_all();
+    if (strategy_thread_.joinable()) {
+        strategy_thread_.join();
+    }
     if (timer_thread_.joinable()) {
         timer_thread_.join();
     }
     if (thread_.joinable()) {
         thread_.join();
+    }
+    // Drain queues: release any pooled pointer in payload, then return Event* to pool
+    auto release_event = [this](utilities::Event* e) {
+        release_event_payload(e);
+        event_pool_.release(e);
+    };
+    utilities::Event* e = nullptr;
+    while (queue_ring_.try_pop(e)) {
+        release_event(e);
+    }
+    while (strategy_ring_.try_pop(e)) {
+        release_event(e);
     }
 }
 
@@ -102,31 +119,59 @@ auto EventEngine::put_intent(const utilities::Intent& intent) -> std::optional<s
 
 void EventEngine::put_event(const utilities::Event& event) { put(event); }
 
+void EventEngine::put_event(utilities::Event&& event) {
+    put(std::forward<utilities::Event>(event));
+}
+
 void EventEngine::put(const utilities::Event& event) {
-    {
-        std::scoped_lock lock(queue_mutex_);
-        queue_.push(event);
+    utilities::Event* p = event_pool_.acquire();
+    if (p == nullptr) {
+        return;
     }
-    queue_cv_.notify_one();
+    *p = event;
+    if (queue_ring_.try_push(p)) {
+        queue_cv_.notify_one();
+        return;
+    }
+    for (int spin = 0; spin < 300 && !queue_ring_.try_push(p); ++spin) {
+        std::this_thread::yield();
+    }
+    if (!queue_ring_.try_push(p)) {
+        event_pool_.release(p);
+    } else {
+        queue_cv_.notify_one();
+    }
 }
 
 void EventEngine::put(utilities::Event&& event) {
-    {
-        std::scoped_lock lock(queue_mutex_);
-        queue_.push(std::move(event));
-    }
-    queue_cv_.notify_one();
-}
-
-void EventEngine::process(const utilities::Event& event) {
-    auto* main = static_cast<MainEngine*>(main_engine);
-    if (main == nullptr) {
+    utilities::Event* p = event_pool_.acquire();
+    if (p == nullptr) {
         return;
     }
-    switch (event.type) {
+    *p = event;
+    if (queue_ring_.try_push(p)) {
+        queue_cv_.notify_one();
+        return;
+    }
+    for (int spin = 0; spin < 300 && !queue_ring_.try_push(p); ++spin) {
+        std::this_thread::yield();
+    }
+    if (!queue_ring_.try_push(p)) {
+        event_pool_.release(p);
+    } else {
+        queue_cv_.notify_one();
+    }
+}
+
+void EventEngine::process(utilities::Event* event) {
+    auto* main = static_cast<MainEngine*>(main_engine);
+    if (main == nullptr || event == nullptr) {
+        return;
+    }
+    switch (event->type) {
         using enum utilities::EventType;
     case Snapshot:
-        dispatch_snapshot(event);
+        dispatch_snapshot(*event);
         break;
     case Timer:
         dispatch_timer();
@@ -147,20 +192,11 @@ void EventEngine::dispatch_timer() {
     if (main == nullptr) {
         return;
     }
-    if (main->ib_gateway() != nullptr) {
-        main->ib_gateway()->process_timer_event(utilities::Event(utilities::EventType::Timer));
-    }
     engines::PositionEngine* pos = main->position_engine();
     if (pos != nullptr) {
-        std::vector<utilities::LogData> pos_logs;
-        pos->process_timer_event(
-            [main](const std::string& name) -> utilities::PortfolioData* {
-                return main->get_portfolio(name);
-            },
-            &pos_logs);
-        for (const auto& l : pos_logs) {
-            main->put_log_intent(l);
-        }
+        pos->process_timer_event([main](const std::string& name) -> utilities::PortfolioData* {
+            return main->get_portfolio(name);
+        });
     }
     engines::HedgeEngine* hedge = main->hedge_engine();
     core::OptionStrategyEngine* se = main->option_strategy_engine();
@@ -186,70 +222,173 @@ void EventEngine::dispatch_timer() {
             };
             std::vector<utilities::OrderRequest> orders;
             std::vector<utilities::CancelRequest> cancels;
-            std::vector<utilities::LogData> logs;
-            hedge->process_hedging(strategy_name, params, &orders, &cancels, &logs);
+            std::vector<utilities::LogData*> logs;
+            hedge->process_hedging(strategy_name, params, &orders, &cancels, &logs,
+                                   [main]() { return main->acquire_log(); });
             for (const auto& o : orders) {
                 put_intent(utilities::IntentSendOrder{strategy_name, o});
             }
             for (const auto& c : cancels) {
                 put_intent(utilities::IntentCancelOrder{c});
             }
-            for (const auto& l : logs) {
-                put_intent(utilities::IntentLog{l});
+            for (utilities::LogData* p : logs) {
+                put_intent(utilities::IntentLog{*p});
+                main->release_log(p);
             }
         }
     }
-    if (se != nullptr) {
+    utilities::Event* p = event_pool_.acquire();
+    if (p != nullptr) {
+        p->type = utilities::EventType::Timer;
+        p->data = std::monostate{};
+        if (!strategy_ring_.try_push(p)) {
+            event_pool_.release(p);
+        } else {
+            strategy_cv_.notify_one();
+        }
+    }
+}
+
+void EventEngine::dispatch_order(utilities::Event* event) {
+    auto* main = static_cast<MainEngine*>(main_engine);
+    if (main == nullptr || event == nullptr) {
+        return;
+    }
+    if (const auto* slot = std::get_if<utilities::OrderData*>(&event->data)) {
+        utilities::OrderData* ord = *slot;
+        if (ord == nullptr) {
+            return;
+        }
+        core::ExecutionEngine* ex = main->execution_engine();
+        std::string strategy_name;
+        if (ex != nullptr) {
+            strategy_name = ex->get_strategy_name_for_order(ord->orderid);
+            ex->store_order(strategy_name, *ord);
+            if (!strategy_name.empty()) {
+                main->save_order_data(strategy_name, *ord);
+            }
+        }
+        if (main->position_engine() != nullptr) {
+            main->position_engine()->process_order(strategy_name, *ord);
+        }
+        utilities::Event* p = event_pool_.acquire();
+        if (p != nullptr) {
+            p->type = utilities::EventType::Order;
+            p->data = ord;
+            if (strategy_ring_.try_push(p)) {
+                strategy_cv_.notify_one();
+            } else {
+                for (int spin = 0; spin < 200 && !strategy_ring_.try_push(p); ++spin) {
+                    std::this_thread::yield();
+                }
+                if (!strategy_ring_.try_push(p)) {
+                    event_pool_.release(p);
+                } else {
+                    strategy_cv_.notify_one();
+                }
+            }
+        }
+        event->data = std::monostate{};
+    }
+}
+
+void EventEngine::dispatch_trade(utilities::Event* event) {
+    auto* main = static_cast<MainEngine*>(main_engine);
+    if (main == nullptr || event == nullptr) {
+        return;
+    }
+    if (const auto* slot = std::get_if<utilities::TradeData*>(&event->data)) {
+        utilities::TradeData* tr = *slot;
+        if (tr == nullptr) {
+            return;
+        }
+        core::ExecutionEngine* ex = main->execution_engine();
+        std::string strategy_name;
+        if (ex != nullptr) {
+            ex->store_trade(*tr);
+            strategy_name = ex->get_strategy_name_for_order(tr->orderid);
+            if (!strategy_name.empty()) {
+                main->save_trade_data(strategy_name, *tr);
+            }
+        }
+        if (main->position_engine() != nullptr) {
+            main->position_engine()->process_trade(strategy_name, *tr);
+        }
+        utilities::Event* p = event_pool_.acquire();
+        if (p != nullptr) {
+            p->type = utilities::EventType::Trade;
+            p->data = tr;
+            if (strategy_ring_.try_push(p)) {
+                strategy_cv_.notify_one();
+            } else {
+                for (int spin = 0; spin < 200 && !strategy_ring_.try_push(p); ++spin) {
+                    std::this_thread::yield();
+                }
+                if (!strategy_ring_.try_push(p)) {
+                    event_pool_.release(p);
+                } else {
+                    strategy_cv_.notify_one();
+                }
+            }
+        }
+        event->data = std::monostate{};
+    }
+}
+
+void EventEngine::process_strategy(const utilities::Event& event) {
+    auto* main = static_cast<MainEngine*>(main_engine);
+    if (main == nullptr) {
+        return;
+    }
+    core::OptionStrategyEngine* se = main->option_strategy_engine();
+    if (se == nullptr) {
+        return;
+    }
+    switch (event.type) {
+        using enum utilities::EventType;
+    case Timer:
         se->on_timer();
+        break;
+    case Order:
+        if (const auto* slot = std::get_if<utilities::OrderData*>(&event.data)) {
+            if (*slot != nullptr) {
+                se->process_order(**slot);
+            }
+        }
+        break;
+    case Trade:
+        if (const auto* slot = std::get_if<utilities::TradeData*>(&event.data)) {
+            if (*slot != nullptr) {
+                se->process_trade(**slot);
+            }
+        }
+        break;
+    default:
+        break;
     }
 }
 
-void EventEngine::dispatch_order(const utilities::Event& event) {
-    auto* main = static_cast<MainEngine*>(main_engine);
-    if (main == nullptr) {
+void EventEngine::release_event_payload(utilities::Event* e) {
+    if (e == nullptr) {
         return;
     }
-    if (const auto* pd = std::get_if<utilities::OrderData>(&event.data)) {
-        utilities::OrderData order = *pd;
-        core::ExecutionEngine* ex = main->execution_engine();
-        std::string strategy_name;
-        if (ex != nullptr) {
-            strategy_name = ex->get_strategy_name_for_order(order.orderid);
-            ex->store_order(strategy_name, order);
-            if (!strategy_name.empty()) {
-                main->save_order_data(strategy_name, order);
+    if (e->type == utilities::EventType::Snapshot) {
+        if (const auto* slot = std::get_if<utilities::PortfolioSnapshot*>(&e->data)) {
+            if (*slot != nullptr) {
+                release_snapshot(*slot);
             }
         }
-        if (main->position_engine() != nullptr) {
-            main->position_engine()->process_order(strategy_name, order);
-        }
-        if (main->option_strategy_engine() != nullptr) {
-            main->option_strategy_engine()->process_order(order);
-        }
-    }
-}
-
-void EventEngine::dispatch_trade(const utilities::Event& event) {
-    auto* main = static_cast<MainEngine*>(main_engine);
-    if (main == nullptr) {
-        return;
-}
-    if (const auto* pd = std::get_if<utilities::TradeData>(&event.data)) {
-        utilities::TradeData trade = *pd;
-        core::ExecutionEngine* ex = main->execution_engine();
-        std::string strategy_name;
-        if (ex != nullptr) {
-            ex->store_trade(trade);
-            strategy_name = ex->get_strategy_name_for_order(trade.orderid);
-            if (!strategy_name.empty()) {
-                main->save_trade_data(strategy_name, trade);
+    } else if (e->type == utilities::EventType::Order) {
+        if (const auto* slot = std::get_if<utilities::OrderData*>(&e->data)) {
+            if (*slot != nullptr) {
+                release_order(*slot);
             }
         }
-        if (main->position_engine() != nullptr) {
-            main->position_engine()->process_trade(strategy_name, trade);
-        }
-        if (main->option_strategy_engine() != nullptr) {
-            main->option_strategy_engine()->process_trade(trade);
+    } else if (e->type == utilities::EventType::Trade) {
+        if (const auto* slot = std::get_if<utilities::TradeData*>(&e->data)) {
+            if (*slot != nullptr) {
+                release_trade(*slot);
+            }
         }
     }
 }
@@ -259,10 +398,14 @@ void EventEngine::dispatch_snapshot(const utilities::Event& event) {
     if (main == nullptr) {
         return;
     }
-    if (const auto* snap = std::get_if<utilities::PortfolioSnapshot>(&event.data)) {
-        utilities::PortfolioData* portfolio = main->get_portfolio(snap->portfolio_name);
-        if (portfolio != nullptr) {
-            portfolio->apply_frame(*snap);
+    if (const auto* slot = std::get_if<utilities::PortfolioSnapshot*>(&event.data)) {
+        utilities::PortfolioSnapshot* snap = *slot;
+        if (snap != nullptr) {
+            utilities::PortfolioData* portfolio = main->get_portfolio(snap->portfolio_name);
+            if (portfolio != nullptr) {
+                portfolio->apply_frame(*snap);
+            }
+            // Do not release here; release_event_payload() releases after process().
         }
     }
 }
@@ -276,27 +419,39 @@ void EventEngine::run_timer(const std::stop_token& st) {
     }
 }
 
+void EventEngine::run_strategy(const std::stop_token& st) {
+    while (!st.stop_requested() && active_) {
+        utilities::Event* event_ptr = nullptr;
+        {
+            std::unique_lock lock(strategy_mutex_);
+            strategy_cv_.wait(lock, st,
+                              [this]() -> bool { return !active_ || !strategy_ring_.empty(); });
+        }
+        if (!active_) {
+            break;
+        }
+        if (strategy_ring_.try_pop(event_ptr) && event_ptr != nullptr) {
+            process_strategy(*event_ptr);
+            release_event_payload(event_ptr);
+            event_pool_.release(event_ptr);
+        }
+    }
+}
+
 void EventEngine::run(const std::stop_token& st) {
     while (!st.stop_requested() && active_) {
-        utilities::Event event;
-        bool got = false;
+        utilities::Event* event_ptr = nullptr;
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
-            queue_cv_.wait(lock, st, [this, &got, &event]() -> bool {
-                if (!active_) {
-                    return true;
-                }
-                if (queue_.empty()) {
-                    return false;
-                }
-                event = std::move(queue_.front());
-                queue_.pop();
-                got = true;
-                return true;
-            });
+            queue_cv_.wait(lock, st, [this]() -> bool { return !active_ || !queue_ring_.empty(); });
         }
-        if (got && active_) {
-            process(event);
+        if (!active_) {
+            break;
+        }
+        if (queue_ring_.try_pop(event_ptr) && event_ptr != nullptr) {
+            process(event_ptr);
+            release_event_payload(event_ptr);
+            event_pool_.release(event_ptr);
         }
     }
 }

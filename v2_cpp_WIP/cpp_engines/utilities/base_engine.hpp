@@ -4,6 +4,7 @@
 
 #include "event.hpp"
 #include <string>
+#include <utility>
 
 namespace utilities {
 
@@ -18,6 +19,15 @@ struct MainEngine {
     }
     /** Push event to runtime queue. */
     virtual void put_event(const Event& e) { (void)e; }
+    /** Rvalue overload: override to move into queue/pool instead of copy. */
+    virtual void put_event(Event&& e) { put_event(e); }
+    /** Snapshot pool (live): override to return pooled slot; fill and put_event(Snapshot, p). */
+    virtual PortfolioSnapshot* acquire_snapshot() { return nullptr; }
+    /** Order/Trade pools: override to return pooled slot; fill and put_event(Order/Trade, p). */
+    virtual OrderData* acquire_order() { return nullptr; }
+    virtual TradeData* acquire_trade() { return nullptr; }
+    /** Lvalue overload: move into queue to avoid copy. */
+    virtual void put_event(Event& e) { put_event(std::move(e)); }
 };
 
 struct BaseEngine {

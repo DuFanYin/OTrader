@@ -3,10 +3,11 @@
 /** LogEngine: process_log_intent, format, stdout sink. */
 
 #include "../utilities/base_engine.hpp"
+#include "../utilities/mpsc_ring.hpp"
 #include "../utilities/object.hpp"
+#include "../utilities/object_pool.hpp"
 #include <condition_variable>
 #include <cstdint>
-#include <deque>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -38,22 +39,24 @@ class LogEngine : public utilities::BaseEngine {
     void set_level(int level) { level_ = level; }
     int level() const { return level_; }
 
-    /** Format, buffer, process_log_intent. */
-    void write_log(const std::string& msg, int level = INFO, const std::string& gateway = "");
-
-    /** Consume LogIntent. */
     void process_log_intent(const utilities::LogData& data);
 
     /** Pop log for gRPC stream. */
     bool pop_log_for_stream(utilities::LogData& out, int timeout_ms);
 
-  private:
-    static constexpr size_t kMaxStreamBuffer = 1000;
+    /** Object pool for LogData: callers may acquire, fill, pass to process_log_intent(*p), then
+     * release. */
+    utilities::LogData* acquire_log() { return log_pool_.acquire(); }
+    void release_log(utilities::LogData* p) { log_pool_.release(p); }
 
+  private:
+    static constexpr size_t kStreamRingCap = 1024;
+
+    utilities::ObjectPool<utilities::LogData> log_pool_;
     bool active_ = true;
     int level_ = INFO;
     LogSink sink_;
-    std::deque<utilities::LogData> stream_buffer_;
+    utilities::MpscRing<utilities::LogData*, kStreamRingCap> stream_ring_;
     std::mutex stream_mutex_;
     std::condition_variable stream_cv_;
 };

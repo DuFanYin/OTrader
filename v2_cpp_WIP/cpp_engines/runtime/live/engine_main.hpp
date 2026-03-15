@@ -2,20 +2,22 @@
 
 /** MainEngine: holds engines, EventEngine dispatch, accessors. */
 
-#include "../../core/engine_combo_builder.hpp"
 #include "../../core/engine_execution.hpp"
 #include "../../core/engine_hedge.hpp"
 #include "../../core/engine_log.hpp"
 #include "../../core/engine_option_strategy.hpp"
 #include "../../core/engine_position.hpp"
+#include "../../core/portfolio_structure.hpp"
 #include "../../utilities/base_engine.hpp"
 #include "../../utilities/event.hpp"
+#include "../../utilities/mpsc_ring.hpp"
 #include "../../utilities/object.hpp"
+#include "../../utilities/object_pool.hpp"
 #include "../../utilities/portfolio.hpp"
-#include "engine_data_tradier.hpp"
 #include "engine_db_pg.hpp"
 #include "engine_event.hpp"
-#include "engine_gateway_ib.hpp"
+#include "gateway_client.hpp"
+#include "market_data_client.hpp"
 #include <condition_variable>
 #include <deque>
 #include <memory>
@@ -33,13 +35,13 @@ class MainEngine : public utilities::MainEngine {
     EventEngine* event_engine() { return event_engine_.get(); }
     LogEngine* log_engine() { return log_engine_.get(); }
     DatabaseEngine* db_engine() { return db_engine_.get(); }
-    MarketDataEngine* market_data_engine() { return market_data_engine_.get(); }
-    IbGateway* ib_gateway() { return ib_gateway_.get(); }
+    PortfolioStructure* portfolio_structure() { return portfolio_structure_.get(); }
+    GatewayClient* gateway_client() { return gateway_client_.get(); }
+    MarketDataClient* market_data_client() { return market_data_client_.get(); }
     core::ExecutionEngine* execution_engine() { return execution_engine_.get(); }
     core::OptionStrategyEngine* option_strategy_engine() { return option_strategy_engine_.get(); }
     PositionEngine* position_engine() { return position_engine_.get(); }
     HedgeEngine* hedge_engine();
-    ComboBuilderEngine* combo_builder_engine();
     utilities::StrategyHolding* get_holding(const std::string& strategy_name);
     const utilities::StrategyHolding* get_holding(const std::string& strategy_name) const;
     void get_or_create_holding(const std::string& strategy_name);
@@ -68,10 +70,20 @@ class MainEngine : public utilities::MainEngine {
     utilities::TradeData* get_trade(const std::string& tradeid);
 
     void put_event(const utilities::Event& e) override;
+    void put_event(utilities::Event&& e) override;
+    void put_event(utilities::Event& e) override;
     void write_log(const std::string& msg, int level = engines::INFO,
                    const std::string& gateway = "") override;
     /** Execute log intent. */
     void put_log_intent(const utilities::LogData& log);
+    /** Pooled log: acquire, fill, put_log_intent(*p), release_log(p). */
+    utilities::LogData* acquire_log();
+    void release_log(utilities::LogData* p);
+    /** Pooled snapshot: acquire, fill, put_event(Event(Snapshot, p)); EventEngine releases on
+     * dispatch/drain. */
+    utilities::PortfolioSnapshot* acquire_snapshot() override;
+    utilities::OrderData* acquire_order() override;
+    utilities::TradeData* acquire_trade() override;
     void close();
 
     bool market_data_running() const { return market_data_running_; }
@@ -99,15 +111,18 @@ class MainEngine : public utilities::MainEngine {
     std::unique_ptr<EventEngine> event_engine_;
     std::unique_ptr<LogEngine> log_engine_;
     std::unique_ptr<DatabaseEngine> db_engine_;
-    std::unique_ptr<MarketDataEngine> market_data_engine_;
-    std::unique_ptr<IbGateway> ib_gateway_;
+    std::unique_ptr<PortfolioStructure> portfolio_structure_;
+    std::unique_ptr<MarketDataClient> market_data_client_;
+    std::unique_ptr<GatewayClient> gateway_client_;
     std::unique_ptr<core::ExecutionEngine> execution_engine_;
     std::unique_ptr<core::OptionStrategyEngine> option_strategy_engine_;
     std::unique_ptr<PositionEngine> position_engine_;
     std::unique_ptr<HedgeEngine> hedge_engine_;
-    std::unique_ptr<ComboBuilderEngine> combo_builder_engine_;
 
-    std::deque<utilities::StrategyUpdateData> strategy_updates_;
+    static constexpr size_t kStrategyUpdatesRingCap = 256;
+    utilities::ObjectPool<utilities::StrategyUpdateData> strategy_updates_pool_;
+    utilities::MpscRing<utilities::StrategyUpdateData*, kStrategyUpdatesRingCap>
+        strategy_updates_ring_;
     std::mutex strategy_updates_mutex_;
     std::condition_variable strategy_updates_cv_;
 

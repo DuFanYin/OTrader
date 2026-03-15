@@ -29,9 +29,11 @@ Strategy-oriented options trading and research: backtest, live via IB, web UI fo
 **Stack:** C++20, FastAPI, Next.js, PostgreSQL, gRPC  
 **Linters:** clang-tidy, clang-format
 
-### Core Engine Architecture
+### Core Engine Architecture & Low_latency specific design
 
 👉 **[v2_cpp_WIP/cpp_engines/ARCHITECTURE_EN.md](v2_cpp_WIP/cpp_engines/ARCHITECTURE_EN.md)**
+👉 **[v2_cpp_WIP/cpp_engines/low_latency_efforts.md](v2_cpp_WIP/cpp_engines/low_latency_efforts.md)**
+
 
 ---
 
