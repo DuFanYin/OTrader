@@ -1,12 +1,19 @@
 # OTrader
 
-> **Note:** For showcase/demo only. Some components are intentionally omitted. No commit history. 
+> **Note:** For showcase/demo only. Some components are intentionally omitted.
 
 Strategy-oriented options trading and research: backtest, live via IB, web UI for control and inspection.
 
+> **🤖 Agent-assisted C++ rewrite.**
+> This is the C++ implementation, developed with AI agent assistance. The original, hand-written Python version lives on the [`python-mvp`](../../tree/python-mvp) branch (hand-authored, no agent).
+
 ---
 
-**Engine:** C++20, backtest + live dual mode. Event-driven: Events (Timer, Snapshot, Order, Trade) in → Intents (order, cancel, log) out.
+**Stack:** C++20, FastAPI, Next.js, PostgreSQL, gRPC, ZeroMQ
+**Toolchain:** LLVM/clang, CMake; `clang-tidy`, `clang-format`
+**Backend Python:** managed with `uv`
+
+**Engine:** backtest + live dual mode. Event-driven: Events (Timer, Snapshot, Order, Trade) in → Intents (order, cancel, log) out.
 
 **Layers**
 
@@ -16,53 +23,37 @@ Strategy-oriented options trading and research: backtest, live via IB, web UI fo
 
 **Modes**
 
-- **Backtest:** Load historical data into precomputed snapshots; Single-process sync loop (snapshot → match → timer) with no network or database.
-- **Live:** Market data normalised into portfolio snapshots; orders and cancels go through IbGateway; gRPC exposes the engine for external control.
+- **Backtest:** Load historical Parquet data into precomputed snapshots; single-process sync loop (snapshot → match → timer) with no network or database.
+- **Live:** Market data normalised into portfolio snapshots; orders and cancels go through IbGateway; gRPC exposes the engine for external control. Market-data and gateway run as independent processes over ZeroMQ IPC.
 
 **Strategies:** Implemented in C++ from the provided templates and built-in helpers. The same strategy code runs in both backtest and live; only the runtime and infra wiring differ.
 
 ---
 
-## v2 — C++ (upgrade / work in progress)
+## Documentation
 
-**Status:** next-gen / WIP  
-**Stack:** C++20, FastAPI, Next.js, PostgreSQL, gRPC  
-**Linters:** clang-tidy, clang-format
+- **Core engine architecture:** [doc/en/architecture.md](doc/en/architecture.md) ([中文](doc/cn/architecture.md))
+- **Low-latency design notes:** [doc/en/engine/lowLatencyEfforts.md](doc/en/engine/lowLatencyEfforts.md)
+- **All design docs:** [doc/](doc/)
+- **Engine overview:** [Otrader/README.md](Otrader/README.md)
+- **Backend (FastAPI) overview:** [backend/README.md](backend/README.md)
+- **Frontend (Next.js) overview:** [frontend/README.md](frontend/README.md)
 
-### Core Engine Architecture & Low_latency specific design
+## Build & Run
 
-👉 **[v2_cpp_WIP/cpp_engines/ARCHITECTURE_EN.md](v2_cpp_WIP/cpp_engines/ARCHITECTURE_EN.md)**
-👉 **[v2_cpp_WIP/cpp_engines/low_latency_efforts.md](v2_cpp_WIP/cpp_engines/low_latency_efforts.md)**
+```bash
+# Build the C++ engine (Release). Produces Otrader/build/entry_backtest and entry_system.
+./build.sh r
 
+# Run a backtest (parquet day + registered strategy name)
+./Otrader/build/entry_backtest data/SPXW/SPXW-2025-08/20250804.parquet StraddleTestStrategy
 
----
+# Backend deps (uv) + full dev stack (engine + FastAPI + Next.js)
+uv sync
+./system_up.sh dev
+```
 
-- **System overview:** [v2_cpp_WIP/README.md](v2_cpp_WIP/README.md)  
-- **Backend (FastAPI) overview:** [v2_cpp_WIP/backend/README.md](v2_cpp_WIP/backend/README.md)  
-- **Frontend (Next.js) overview:** [v2_cpp_WIP/frontend/README.md](v2_cpp_WIP/frontend/README.md)
-
-### Codebase Statistics
-
-| Language      | Files | Blank | Comment | Code  |
-|---------------|-------|-------|---------|-------|
-| C++           | 27    | 716   | 174     | 7119  |
-| Python        | 28    | 570   | 362     | 2979  |
-| TypeScript    | 13    | 153   | 17      | 2185  |
-| C/C++ Header  | 32    | 479   | 244     | 2120  |
-| **Total**     | 100   | 1918  | 797     | 14403 |
-
----
-
-## v1 — Python (legacy implementation)
-
-**Status:** Original Python implementation, kept for reference.  
-**Stack:** Python, FastAPI, SQLite, Tradier, IB TWS  
-**Linters:** mypy, ruff.
-
-
-
-- **Start here:** **[v1_python/README.md](v1_python/README.md)**
-- **More docs:** **[v1_python/doc](v1_python/doc)** (engine design, strategy guide, diagrams)
+Prerequisites: Homebrew LLVM, CMake, protobuf, gRPC, ZeroMQ; Node.js for the frontend; `uv` for the Python backend. Live mode additionally needs PostgreSQL and IB TWS/Gateway + a Tradier token. See the linked docs for full setup.
 
 ---
 
