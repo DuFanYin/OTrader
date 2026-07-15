@@ -126,3 +126,16 @@ venv.bak/
 # Type checkers
 .dmypy.json
 dmypy.json
+
+v2_cpp/data
+
+# Build directories (any depth)
+**/build/
+
+# Third-party / vendored dependencies (any depth)
+**/node_modules/
+**/thirdparty/
+**/third_party/
+**/vendor/
+**/vcpkg_installed/
+**/_deps/

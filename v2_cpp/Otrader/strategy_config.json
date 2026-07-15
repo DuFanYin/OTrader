@@ -1,0 +1,36 @@
+{
+  "StraddleTestStrategy": {
+    "timer_trigger": 1,
+    "position_size": 1
+  },
+  "IronCondorTestStrategy": {
+    "timer_trigger": 1,
+    "position_size": 1
+  },
+  "IvMeanRevertStrategy": {
+    "timer_trigger": 1,
+    "iv_threshold_up": 2.0,
+    "iv_threshold_down": -2.0,
+    "lookback_minutes": 60,
+    "position_size": 1,
+    "min_dte": 0,
+    "max_dte": 3,
+    "exit_z": 0.5,
+    "warmup_bars": 20
+  },
+  "StraddleInventoryScalperStrategy": {
+    "timer_trigger": 1,
+    "trade_start_minute": 15,
+    "trade_end_minute": 300,
+    "move_atr_ratio": 0.6,
+    "max_straddle_spread": 2.0,
+    "profit_target_pct": 10.0,
+    "profit_target_short_pct": 6.0,
+    "profit_target_short_min": 3,
+    "profit_target_short_max": 8,
+    "time_stop_minutes": 10,
+    "loss_stop_pct": 10.0,
+    "cooldown_minutes": 3,
+    "max_daily_trades": 100
+  }
+}

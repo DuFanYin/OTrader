@@ -1,0 +1,211 @@
+syntax = "proto3";
+
+package otrader;
+
+// Empty message for simple RPC.
+message Empty {}
+
+// Engine status (live only).
+message EngineStatus {
+  bool running   = 1;
+  bool connected = 2;  // Connected to IB/TWS
+  string detail  = 3;  // Text description, e.g. "live main engine"
+}
+
+// Strategy summary.
+message StrategySummary {
+  string strategy_name = 1;
+  string class_name    = 2;
+  string portfolio     = 3;
+  string status        = 4;  // "running" / "stopped" / ...
+}
+
+// Log line.
+message LogLine {
+  string line = 1;
+}
+
+// Strategy update event (JSON payload).
+message StrategyUpdate {
+  string strategy_name = 1;
+  string class_name    = 2;
+  string portfolio     = 3;
+  string json_payload  = 4;
+}
+
+// Strategy name request.
+message StrategyNameRequest {
+  string strategy_name = 1;
+}
+
+// Add strategy request.
+message AddStrategyRequest {
+  string strategy_class = 1;
+  string portfolio_name = 2;
+  string setting_json = 3;  // JSON string for strategy params
+}
+
+// Order record (DB orders table).
+message OrderRecord {
+  string timestamp = 1;
+  string strategy_name = 2;
+  string orderid = 3;
+  string symbol = 4;
+  string exchange = 5;
+  string trading_class = 6;
+  string type = 7;
+  string direction = 8;
+  double price = 9;
+  double volume = 10;
+  double traded = 11;
+  string status = 12;
+  string datetime = 13;
+  string reference = 14;
+  bool is_combo = 15;
+  string legs_info = 16;
+}
+
+// Trade record (DB trades table).
+message TradeRecord {
+  string timestamp = 1;
+  string strategy_name = 2;
+  string tradeid = 3;
+  string symbol = 4;
+  string exchange = 5;
+  string orderid = 6;
+  string direction = 7;
+  double price = 8;
+  double volume = 9;
+  string datetime = 10;
+}
+
+message OrdersAndTradesResponse {
+  repeated OrderRecord orders = 1;
+  repeated TradeRecord trades = 2;
+}
+
+message ListPortfoliosResponse {
+  repeated string portfolios = 1;
+}
+
+message ListStrategyClassesResponse {
+  repeated string classes = 1;
+}
+
+message GetStrategyClassDefaultsRequest {
+  string strategy_class = 1;
+}
+
+message GetStrategyClassDefaultsResponse {
+  map<string, double> settings = 1;
+}
+
+message AddStrategyResponse {
+  string strategy_name = 1;
+}
+
+message RemoveStrategyResponse {
+  bool removed = 1;
+}
+
+message DeleteStrategyResponse {
+  bool deleted = 1;
+}
+
+message GetRemovedStrategiesResponse {
+  repeated string removed_strategies = 1;
+}
+
+message StrategyHoldingsResponse {
+  map<string, string> holdings = 1;  // strategy_name -> serialized StrategyHoldingMsg (binary proto)
+}
+
+// -------- Strategy holding serialization (binary proto, schema for external deserialization) --------
+message BasePositionMsg {
+  string symbol = 1;
+  int32 quantity = 2;
+  double avg_cost = 3;
+  double cost_value = 4;
+  double realized_pnl = 5;
+  double mid_price = 6;
+  double delta = 7;
+  double gamma = 8;
+  double theta = 9;
+  double vega = 10;
+}
+
+// Unified option position: single-leg (legs empty) or multi-leg (combo_type + legs set).
+message OptionPositionMsg {
+  string symbol = 1;
+  int32 quantity = 2;
+  double avg_cost = 3;
+  double cost_value = 4;
+  double realized_pnl = 5;
+  double mid_price = 6;
+  double delta = 7;
+  double gamma = 8;
+  double theta = 9;
+  double vega = 10;
+  string combo_type = 11;  // set for multi-leg; empty for single-leg
+  repeated BasePositionMsg legs = 12;
+}
+
+message PortfolioSummaryMsg {
+  double total_cost = 1;
+  double current_value = 2;
+  double unrealized_pnl = 3;
+  double realized_pnl = 4;
+  double pnl = 5;
+  double delta = 6;
+  double gamma = 7;
+  double theta = 8;
+  double vega = 9;
+}
+
+message StrategyHoldingMsg {
+  BasePositionMsg underlying = 1;
+  map<string, OptionPositionMsg> options = 2;  // key=symbol (single) or combo_sig (multi)
+  PortfolioSummaryMsg summary = 4;
+}
+
+// Live engine control / query service.
+service EngineService {
+  // General status
+  rpc GetStatus(Empty) returns (EngineStatus);
+  rpc ListStrategies(Empty) returns (stream StrategySummary);
+
+  // Live control
+  rpc ConnectGateway(Empty) returns (Empty);
+  rpc DisconnectGateway(Empty) returns (Empty);
+  rpc StartMarketData(Empty) returns (Empty);
+  rpc StopMarketData(Empty) returns (Empty);
+
+  // Strategy control
+  rpc StartStrategy(StrategyNameRequest) returns (Empty);
+  rpc StopStrategy(StrategyNameRequest) returns (Empty);
+
+  // Event streams (logs / strategy updates)
+  rpc StreamLogs(Empty) returns (stream LogLine);
+  rpc StreamStrategyUpdates(Empty) returns (stream StrategyUpdate);
+
+  // Main: orders/trades, portfolio list
+  rpc GetOrdersAndTrades(Empty) returns (OrdersAndTradesResponse);
+  rpc ListPortfolios(Empty) returns (ListPortfoliosResponse);
+
+  // Strategy: class list, portfolio meta, removed strategies, defaults
+  rpc ListStrategyClasses(Empty) returns (ListStrategyClassesResponse);
+  rpc GetStrategyClassDefaults(GetStrategyClassDefaultsRequest) returns (GetStrategyClassDefaultsResponse);
+  rpc GetPortfoliosMeta(Empty) returns (ListPortfoliosResponse);
+  rpc GetRemovedStrategies(Empty) returns (GetRemovedStrategiesResponse);
+
+  // Strategy lifecycle
+  rpc AddStrategy(AddStrategyRequest) returns (AddStrategyResponse);
+  rpc RestoreStrategy(StrategyNameRequest) returns (Empty);
+  rpc InitStrategy(StrategyNameRequest) returns (Empty);
+  rpc RemoveStrategy(StrategyNameRequest) returns (RemoveStrategyResponse);
+  rpc DeleteStrategy(StrategyNameRequest) returns (DeleteStrategyResponse);  // C++: same as RemoveStrategy
+
+  // Strategy holdings
+  rpc GetStrategyHoldings(Empty) returns (StrategyHoldingsResponse);
+}
+

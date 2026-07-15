@@ -1,0 +1,30 @@
+# Tests: non-framwork 脚本测试 + GTest unit
+if(TARGET backtest_engines)
+  add_subdirectory(non-framwork/backtest)
+endif()
+if(TARGET engines_cpp)
+  add_subdirectory(non-framwork/live)
+endif()
+
+# 聚合 target（test_otrader.sh 只编一个，避免重复进度）
+set(_bt_tests test_backtest_data test_backtest test_backtest_pos test_backtest_order)
+set(_live_tests test_live_components test_live_market test_live_strategy_straddle)
+if(TARGET test_backtest_data)
+  add_custom_target(otrader_script_tests_bt DEPENDS ${_bt_tests})
+endif()
+if(TARGET test_live_components)
+  add_custom_target(otrader_script_tests_live DEPENDS ${_live_tests})
+endif()
+if(TARGET test_backtest_data AND TARGET test_live_components)
+  add_custom_target(otrader_script_tests DEPENDS ${_bt_tests} ${_live_tests})
+endif()
+
+# GTest（需 BUILD_TESTS=ON）
+if(BUILD_TESTS)
+  find_package(GTest QUIET)
+  if(GTest_FOUND)
+    add_subdirectory(unit)
+  else()
+    message(STATUS "GTest not found; skip tests/unit (brew install googletest)")
+  endif()
+endif()
