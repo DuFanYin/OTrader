@@ -127,8 +127,9 @@ venv.bak/
 .dmypy.json
 dmypy.json
 
-# Market data (large parquet/dbn files — never commit)
-data/
+# Market data (large parquet/dbn files — never commit), but keep the data guide
+data/*
+!data/README.md
 
 # Build directories (any depth)
 **/build/
@@ -142,3 +143,6 @@ data/
 **/_deps/
 
 local/
+
+# Claude Code local guidance (AGENT.md is the tracked source)
+CLAUDE.md
