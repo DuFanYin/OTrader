@@ -93,7 +93,7 @@ _include_routes(app)
 def run() -> None:
     import uvicorn
 
-    uvicorn.run("backend.server_fastapi:app", host="0.0.0.0", port=8080, reload=True)
+    uvicorn.run("server_fastapi:app", host="0.0.0.0", port=8080, reload=True)
 
 
 if __name__ == "__main__":

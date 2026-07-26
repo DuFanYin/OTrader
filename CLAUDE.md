@@ -11,33 +11,36 @@ OTrader — a C++20, event-driven options trading & research engine with backtes
 ## Layout
 
 ```
-Otrader/           The C++ engine — the ONLY buildable engine (has CMakeLists)
+Otrader/           The C++ engine — the ONLY buildable engine
   core/            Strategy, position, hedge, combo — pure logic, no I/O
   runtime/         backtest/ (sync loop) and live/ (queue + gRPC + ZMQ clients)
   infra/           db/ (PostgreSQL via libpqxx), gateway/ (IB TWS), marketdata/ (Tradier)
-  proto/           otrader_engine.proto, zmq_messages.proto + generated .pb.* (checked in)
+  proto/           .proto sources only — .pb.* generated at build time (see proto/CMakeLists)
   strategy/        template + strategy_registry (REGISTER_STRATEGY)
   utilities/       base_engine, portfolio, black_scholes, parquet_loader, ring buffers, ...
+  entry/           run_live / run_market / run_gateway (per-mode TUs) + entry_modes.hpp
   tests/           gtest unit tests
   thirdparty/      IBJts (IB TWS API), IntelRDFPMathLib, lets_be_rational — GITIGNORED
   build/           CMake build dir — gitignored
+  CMakePresets.json    the pinned toolchain (macos / macos-gateway / linux)
   entry_backtest.cpp   entry_system.cpp   (unified live entry: --mode=gateway|market|live|all)
-backend/           FastAPI server (src/) bridging the engine over gRPC
-frontend/          Next.js 16 + Tailwind v4 control UI
+app/
+  backend/         FastAPI server (src/) bridging the engine over gRPC; self-contained
+                   Python project (pyproject.toml + uv.lock here); run_backtest.py driver
+  frontend/        Next.js 16 + Tailwind v4 control UI
 doc/               Design docs, language-partitioned: doc/cn/ and doc/en/
-build.sh           C++ build (Release: ./build.sh r). Uses Otrader/build + Homebrew LLVM.
-system_up.sh       Dev launcher (engine + backend + frontend)
-run_backtest.py    Python backtest driver (imports backend.src.*)
-pyproject.toml / uv.lock   Project Python deps (backend + backtest driver), managed with uv at repo root
+scripts/           system_up.sh (dev launcher), clang.sh, test_gtest.sh, test_otrader.sh,
+                   gen_proto.sh, tools/ (DB helpers)
+build.sh           C++ build wrapper over CMake presets (Release: ./build.sh r)
 ```
 
 ## Build & run
 
 ```bash
-./build.sh r           # Release → Otrader/build/entry_backtest, entry_system
-./build.sh r 0 g       # clean rebuild + IB gateway (needs thirdparty/IBJts)
-uv sync                # backend Python venv
-./system_up.sh dev     # full dev stack
+./build.sh r                 # Release → Otrader/build/entry_backtest, entry_system
+./build.sh r 0 g             # clean rebuild + IB gateway (needs thirdparty/IBJts)
+(cd app/backend && uv sync)  # backend Python venv
+./scripts/system_up.sh dev   # full dev stack
 
 # backtest: <parquet> <registered-strategy>
 ./Otrader/build/entry_backtest data/SPXW/SPXW-2025-08/20250804.parquet StraddleTestStrategy

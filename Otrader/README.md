@@ -28,4 +28,4 @@ Build from the repo root (see the top-level [README](../README.md)):
 
 - **Architecture:** [../doc/en/architecture.md](../doc/en/architecture.md) ([中文](../doc/cn/architecture.md))
 - **Engine deep-dives** (thread model, zero-copy, low-latency, build units, testing): [../doc/](../doc/)
-- **Backend / Frontend:** [../backend/README.md](../backend/README.md) · [../frontend/README.md](../frontend/README.md)
+- **Backend / Frontend:** [../app/backend/README.md](../app/backend/README.md) · [../app/frontend/README.md](../app/frontend/README.md)

@@ -11,7 +11,7 @@
 # Usage: ./system_up.sh [build|run|dev|clean]
 
 set -e
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 [[ -f .env ]] && set -a && source .env && set +a
 MODE=${1:-dev}
@@ -42,19 +42,19 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 build() {
-  if [ ! -d "$ROOT/frontend/node_modules" ]; then
+  if [ ! -d "$ROOT/app/frontend/node_modules" ]; then
     echo "Frontend dependencies not found. Installing..."
-    cd "$ROOT/frontend"
+    cd "$ROOT/app/frontend"
     npm install
     cd "$ROOT"
   fi
-  echo "Build complete! Run ./build.sh to build C++ targets (entry_gateway, entry_market_data, entry_live_grpc)."
+  echo "Build complete! Run ./build.sh to build C++ targets (entry_backtest, entry_system)."
 }
 
 run() {
   echo "Starting Python backend server only..."
-  cd "$ROOT"
-  exec python3 -m backend.server_fastapi
+  cd "$ROOT/app/backend"
+  exec python3 -m server_fastapi
 }
 
 wait_for_backend() {
@@ -122,20 +122,20 @@ dev() {
   echo "  Runtime started (PID: $LIVE_PID)"
 
   # 4) Frontend deps
-  if [ ! -d "$ROOT/frontend/node_modules" ]; then
+  if [ ! -d "$ROOT/app/frontend/node_modules" ]; then
     echo "Installing frontend dependencies..."
-    (cd "$ROOT/frontend" && npm install)
+    (cd "$ROOT/app/frontend" && npm install)
   fi
 
   # 5) Backend
   echo "Starting backend..."
-  (cd "$ROOT" && python -m backend.server_fastapi > /tmp/backend.log 2>&1) &
+  (cd "$ROOT/app/backend" && python -m server_fastapi > /tmp/backend.log 2>&1) &
   BACKEND_PID=$!
   wait_for_backend
 
   # 6) Frontend
   echo "Starting frontend..."
-  (cd "$ROOT/frontend" && npm run dev > /tmp/frontend.log 2>&1) &
+  (cd "$ROOT/app/frontend" && npm run dev > /tmp/frontend.log 2>&1) &
   FRONTEND_PID=$!
 
   echo ""
@@ -156,6 +156,6 @@ case "$MODE" in
   build) build ;;
   run)   run "$2" "$3" ;;
   dev)   dev ;;
-  clean) rm -rf frontend/node_modules frontend/.next ;;
+  clean) rm -rf app/frontend/node_modules app/frontend/.next ;;
   *)     echo "Usage: $0 [build|run|dev|clean]"; exit 1 ;;
 esac

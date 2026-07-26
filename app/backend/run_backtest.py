@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Run backtest from repo root: call C++ engine via backend logic, print metrics, save chart.
-Run from repo root: python run_backtest.py
+Run a backtest via the backend logic: call the C++ engine, print metrics, save a chart.
+Run from anywhere: `python backend/run_backtest.py` (paths are resolved to the repo root).
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from datetime import datetime, timezone
@@ -13,15 +14,16 @@ try:
 except ImportError:  # pragma: no cover - Python<3.9 fallback
     ZoneInfo = None
 
-# Ensure repo root and backend are on path (backend code uses "from src.xxx")
-_REPO_ROOT = Path(__file__).resolve().parent
-_BACKEND = _REPO_ROOT / "backend"
-for p in (_REPO_ROOT, _BACKEND):
-    if str(p) not in sys.path:
-        sys.path.insert(0, str(p))
+# This file lives in backend/; backend code imports as "from src.xxx", so put backend/ on
+# the path. backtest_runner anchors data/ and Otrader/build/ at cwd → run from the repo root.
+_BACKEND = Path(__file__).resolve().parent
+_REPO_ROOT = _BACKEND.parent
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
+os.chdir(_REPO_ROOT)
 
-from backend.src.infra.backtest_runner import run_backtest_cpp
-from backend.src.utils.chart import render_backtest_chart_svg
+from src.infra.backtest_runner import run_backtest_cpp
+from src.utils.chart import render_backtest_chart_svg
 
 # --- Hardcoded parameters (edit here) ---
 SYMBOL = "SPXW"

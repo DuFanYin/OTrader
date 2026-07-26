@@ -36,8 +36,8 @@ Strategy-oriented options trading and research: backtest, live via IB, web UI fo
 - **Low-latency design notes:** [doc/en/engine/lowLatencyEfforts.md](doc/en/engine/lowLatencyEfforts.md)
 - **All design docs:** [doc/](doc/)
 - **Engine overview:** [Otrader/README.md](Otrader/README.md)
-- **Backend (FastAPI) overview:** [backend/README.md](backend/README.md)
-- **Frontend (Next.js) overview:** [frontend/README.md](frontend/README.md)
+- **Backend (FastAPI) overview:** [app/backend/README.md](app/backend/README.md)
+- **Frontend (Next.js) overview:** [app/frontend/README.md](app/frontend/README.md)
 
 ## Build & Run
 
@@ -49,8 +49,8 @@ Strategy-oriented options trading and research: backtest, live via IB, web UI fo
 ./Otrader/build/entry_backtest data/SPXW/SPXW-2025-08/20250804.parquet StraddleTestStrategy
 
 # Backend deps (uv) + full dev stack (engine + FastAPI + Next.js)
-uv sync
-./system_up.sh dev
+(cd app/backend && uv sync)
+./scripts/system_up.sh dev
 ```
 
 Prerequisites (macOS): Clang (Apple clang is fine), CMake ≥ 3.21, and Homebrew protobuf, gRPC, ZeroMQ, apache-arrow, libpqxx; Node.js for the frontend; `uv` for the Python backend. The toolchain is pinned by `Otrader/CMakePresets.json`. Live mode additionally needs PostgreSQL and IB TWS/Gateway + a Tradier token. See the linked docs for full setup.
