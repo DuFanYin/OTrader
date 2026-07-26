@@ -10,9 +10,12 @@
 #include "../../utilities/object.hpp"
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
+
+#include <zmq.hpp>
 
 namespace engines {
 
@@ -48,6 +51,14 @@ class GatewayClient {
     std::atomic<bool> running_{false};
     std::atomic<bool> connected_{false};
     std::jthread sub_thread_;
+
+    // Persistent REQ command channel. ZMQ sockets are not thread-safe and REQ/REP is strict
+    // lock-step, so req_rep() serializes each roundtrip under req_mutex_ instead of building a
+    // fresh context+socket per call (the old approach cost ~ms/order; see latencyFindings F-3).
+    // Lazily created on first use so tests that never call gateway ops pay nothing.
+    std::mutex req_mutex_;
+    std::unique_ptr<zmq::context_t> req_ctx_;
+    std::unique_ptr<zmq::socket_t> req_sock_;
 };
 
 } // namespace engines

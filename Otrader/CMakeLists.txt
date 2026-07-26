@@ -124,3 +124,10 @@ if(BUILD_TESTS)
 endif()
 # BUILD_LIVE 或 BUILD_BACKTEST 但未显式开启 BUILD_TESTS 时，如果仍然希望构建
 # non-framwork 脚本测试，可按需在命令行同时加 -DBUILD_TESTS=ON。
+
+# Latency micro-benchmarks (L1) — measurement executables, independent of BUILD_TESTS and not
+# in CTest. Only need utilities_cpp (ring/pool are header-only). See local/benchmarkPlan.md.
+option(BUILD_BENCH "Build latency micro-benchmarks (tests/bench)" OFF)
+if(BUILD_BENCH)
+  add_subdirectory(tests/bench)
+endif()

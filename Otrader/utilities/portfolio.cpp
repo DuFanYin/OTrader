@@ -1,6 +1,7 @@
 #include "portfolio.hpp"
 
 #include "black_scholes.hpp"
+#include "thread_pool.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iterator>
@@ -268,49 +269,36 @@ void PortfolioData::apply_frame(const PortfolioSnapshot& snapshot) {
     std::vector<double> theta_vec(n, 0.0);
     std::vector<double> vega_vec(n, 0.0);
 
-    const unsigned int n_workers = std::max(1U, std::thread::hardware_concurrency());
-    const size_t chunk = (n + n_workers - 1) / n_workers;
-    {
-        std::vector<std::jthread> threads;
-        threads.reserve(n_workers);
-        for (unsigned int w = 0; w < n_workers; ++w) {
-            const size_t start = w * chunk;
-            const size_t end = std::min(start + chunk, n);
-            if (start >= end) {
-                break;
-            }
-            threads.emplace_back([this, &snapshot, spot, start, end, &iv_vec, &delta_vec,
-                                  &gamma_vec, &theta_vec, &vega_vec]() -> void {
-                for (size_t i = start; i < end; ++i) {
-                    OptionData* opt = option_apply_order_[i];
-                    if (opt == nullptr) {
-                        continue;
-                    }
-                    const double bid = snapshot.bid[i];
-                    const double ask = snapshot.ask[i];
-                    const double k = opt->strike_price.value_or(0.0);
-                    const double t = years_to_expiry(snapshot.datetime, opt->option_expiry);
-                    const bool is_call = opt->option_type > 0;
-
-                    if (spot <= 0.0 || k <= 0.0 || t <= 0.0) {
-                        continue;
-                    }
-                    const double px = pick_iv_input_price(bid, ask, iv_price_mode_);
-                    if (px <= 0.0) {
-                        continue;
-                    }
-                    const double iv = implied_volatility_from_price(px, spot, k, t, is_call);
-                    const BsGreeks g = bs_greeks(is_call, spot, k, t, risk_free_rate_, iv);
-                    iv_vec[i] = iv;
-                    delta_vec[i] = g.delta;
-                    gamma_vec[i] = g.gamma;
-                    theta_vec[i] = g.theta;
-                    vega_vec[i] = g.vega;
-                }
-            });
+    // Per-option IV/Greeks are data-parallel and independent. Submit the range to the shared
+    // persistent thread pool (blocks until done) instead of spawning threads per call — see
+    // utilities/thread_pool.hpp and local/latencyFindings.md F-1. Small chains run inline on the
+    // caller (pool's inline_threshold), so tiny snapshots pay no wakeup cost.
+    shared_pool().parallel_for(0, n, [&](size_t i) {
+        OptionData* opt = option_apply_order_[i];
+        if (opt == nullptr) {
+            return;
         }
-        // jthreads join when threads vector is destroyed at end of this block
-    }
+        const double bid = snapshot.bid[i];
+        const double ask = snapshot.ask[i];
+        const double k = opt->strike_price.value_or(0.0);
+        const double t = years_to_expiry(snapshot.datetime, opt->option_expiry);
+        const bool is_call = opt->option_type > 0;
+
+        if (spot <= 0.0 || k <= 0.0 || t <= 0.0) {
+            return;
+        }
+        const double px = pick_iv_input_price(bid, ask, iv_price_mode_);
+        if (px <= 0.0) {
+            return;
+        }
+        const double iv = implied_volatility_from_price(px, spot, k, t, is_call);
+        const BsGreeks g = bs_greeks(is_call, spot, k, t, risk_free_rate_, iv);
+        iv_vec[i] = iv;
+        delta_vec[i] = g.delta;
+        gamma_vec[i] = g.gamma;
+        theta_vec[i] = g.theta;
+        vega_vec[i] = g.vega;
+    });
 
     for (size_t i = 0; i < n; ++i) {
         OptionData* opt = option_apply_order_[i];

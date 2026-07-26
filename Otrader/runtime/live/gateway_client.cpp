@@ -73,18 +73,43 @@ void GatewayClient::run_sub_thread() {
 std::optional<ZmqResponse> GatewayClient::req_rep(const std::string& cmd,
                                                   const std::string& payload) {
     std::string req_bytes = request_serialize(cmd, payload);
-    zmq::context_t ctx(1);
-    zmq::socket_t req(ctx, ZMQ_REQ);
-    req.connect(rep_addr_);
-    req.set(zmq::sockopt::rcvtimeo, 5000);
-    req.set(zmq::sockopt::sndtimeo, 5000);
-    req.send(zmq::buffer(req_bytes), zmq::send_flags::none);
-    zmq::message_t reply;
-    auto rc = req.recv(reply, zmq::recv_flags::none);
-    if (!rc) {
+
+    // Serialize the whole roundtrip: one persistent REQ socket, strict send→recv lock-step,
+    // shared by strategy/main/gRPC threads. Building the context+socket once (not per call)
+    // removes the per-order ZMQ IO-thread + connect cost (latencyFindings F-3).
+    std::lock_guard<std::mutex> lock(req_mutex_);
+
+    auto make_socket = [this]() {
+        if (!req_ctx_) {
+            req_ctx_ = std::make_unique<zmq::context_t>(1);
+        }
+        req_sock_ = std::make_unique<zmq::socket_t>(*req_ctx_, ZMQ_REQ);
+        req_sock_->connect(rep_addr_);
+        req_sock_->set(zmq::sockopt::rcvtimeo, 5000);
+        req_sock_->set(zmq::sockopt::sndtimeo, 5000);
+        // Drop pending messages immediately on close so a dead socket can't wedge shutdown.
+        req_sock_->set(zmq::sockopt::linger, 0);
+    };
+
+    if (!req_sock_) {
+        make_socket();
+    }
+
+    try {
+        req_sock_->send(zmq::buffer(req_bytes), zmq::send_flags::none);
+        zmq::message_t reply;
+        auto rc = req_sock_->recv(reply, zmq::recv_flags::none);
+        if (!rc) {
+            // Timeout: a REQ socket is now stuck in the recv state and unusable for the next
+            // send. Recreate it so subsequent calls aren't permanently wedged.
+            req_sock_.reset();
+            return std::nullopt;
+        }
+        return response_deserialize(std::string(reply.data<char>(), reply.size()));
+    } catch (const zmq::error_t&) {
+        req_sock_.reset(); // reset the REQ state machine on any ZMQ error
         return std::nullopt;
     }
-    return response_deserialize(std::string(reply.data<char>(), reply.size()));
 }
 
 void GatewayClient::start() {
@@ -147,6 +172,10 @@ void GatewayClient::close() {
         sub_thread_.join();
     }
     connected_ = false;
+    // Tear down the persistent REQ channel (linger=0 → no wedged shutdown).
+    std::lock_guard<std::mutex> lock(req_mutex_);
+    req_sock_.reset();
+    req_ctx_.reset();
 }
 
 } // namespace engines
