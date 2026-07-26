@@ -1,7 +1,7 @@
 /** ZMQ Market Data schema: Protobuf serialization. */
 
 #include "zmq_marketdata_schema.hpp"
-#include "../../proto/zmq_messages.pb.h"
+#include "zmq_messages.pb.h"
 #include "../../utilities/datetime_serialize.hpp"
 
 namespace engines {

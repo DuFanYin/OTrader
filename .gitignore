@@ -139,3 +139,5 @@ v2_cpp/data
 **/vendor/
 **/vcpkg_installed/
 **/_deps/
+
+local/

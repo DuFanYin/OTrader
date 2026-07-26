@@ -35,6 +35,9 @@ add_compile_options(
 # 必须用 CONFIG 模式，与 gRPC 的 find_dependency(Protobuf) 一致，避免 target 重复定义
 find_package(Protobuf CONFIG REQUIRED)
 find_package(absl REQUIRED)
+# gRPC is needed by otrader_proto (generated gRPC service stubs), which every configuration
+# builds. find_dependency(Protobuf) inside gRPC's config is why Protobuf must be CONFIG mode too.
+find_package(gRPC CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 # cppzmq required for live engines (GatewayClient/MarketDataClient), Gateway, MarketData
 if(BUILD_GATEWAY OR BUILD_MARKETDATA OR BUILD_LIVE_GRPC)

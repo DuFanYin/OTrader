@@ -4,7 +4,7 @@
 
 #include <grpcpp/grpcpp.h>
 
-#include "../../proto/otrader_engine.grpc.pb.h"
+#include "otrader_engine.grpc.pb.h"
 
 namespace engines {
 

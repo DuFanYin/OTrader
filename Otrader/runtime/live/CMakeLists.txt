@@ -38,7 +38,6 @@ add_library(engines_cpp
   ../../infra/marketdata/zmq_marketdata_schema.cpp
   engine_main.cpp
   engine_grpc.cpp
-  ../../proto/otrader_engine.grpc.pb.cc
 )
 target_include_directories(engines_cpp PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}

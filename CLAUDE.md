@@ -47,10 +47,11 @@ Registered strategies (see `Otrader/strategy/strategy_registry.cpp`): StraddleTe
 ## Toolchain gotchas (learned the hard way)
 
 - **Build uses Homebrew LLVM/clang**, not Apple clang: `/opt/homebrew/opt/llvm/bin`. Needs cmake, protobuf, grpc, zlib from Homebrew.
-- **Generated proto (`.pb.*`) are checked in.** They are ABI-tied to the installed protobuf version. After a protobuf/grpc upgrade, regenerate with the current `protoc` (`protoc -I. --cpp_out=. *.proto` in `Otrader/proto/`, plus `--grpc_out` for services) or the build fails with `PROTOBUF_CONSTEXPR` / version-mismatch errors.
-- **IBJts (twsapi) must be rebuilt against the current protobuf too.** `build.sh` builds it into `Otrader/thirdparty/IBJts/build-apple/` only if the dylib is missing — delete it to force a rebuild. Its vendored CMake needs C++17, links `libbid.a` + absl-log, and needs `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` on CMake 4.x.
+- **Proto is generated at build time**, not checked in. `Otrader/proto/` holds only the `.proto` sources; `proto/CMakeLists.txt` runs `protoc` (+ grpc plugin) into the build dir, so a `brew upgrade protobuf grpc` self-heals on the next configure — no manual regeneration, no version-mismatch errors. Needs `protoc` + `grpc_cpp_plugin` on PATH (override via `-DPROTOC=` / `-DGRPC_CPP_PLUGIN=`). Consumers include the generated headers by bare name (e.g. `#include "zmq_messages.pb.h"`), resolved through `otrader_proto`'s PUBLIC include dir — never by a `../../proto/...` path.
+- **IBJts (twsapi) is currently required to build `entry_system`** — `entry_system.cpp` includes the IB gateway unconditionally. It must be rebuilt against the current protobuf too; `build.sh` builds it into `Otrader/thirdparty/IBJts/build-apple/` only if the dylib is missing (delete to force). Its vendored CMake needs C++17, links `libbid.a` + absl-log, and needs `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` on CMake 4.x. (Planned but not yet implemented: make IB compile-time optional — guard the gateway include/mode behind a `BUILD_GATEWAY`-driven define — so live/market/backtest build without IBJts present.)
 - **Runtime needs `DYLD_LIBRARY_PATH`** to include `Otrader/thirdparty/IBJts/build-apple/lib`.
 - **Live/market modes require PostgreSQL** (default `dbname=trading`, or `DATABASE_URL`) and a Tradier token (`.env`). Backtest needs neither.
+- **thirdparty/ is gitignored** (`lets_be_rational`, `IntelRDFPMathLib`, `IBJts`) — a fresh clone has none of it, and utilities won't even configure without `lets_be_rational`. Restore from a sibling checkout or the setup flow before building.
 
 ## Conventions
 
