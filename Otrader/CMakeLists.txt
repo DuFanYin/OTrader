@@ -1,21 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
 
-# gRPC/protobuf headers use __has_feature (Clang-only). GCC triggers "missing '(' after '__has_feature'".
-# Prefer Clang when user hasn't explicitly set compiler.
-if(NOT DEFINED CMAKE_CXX_COMPILER OR CMAKE_CXX_COMPILER STREQUAL "")
-  find_program(CLANGXX NAMES clang++ HINTS /opt/homebrew/opt/llvm/bin)
-  if(CLANGXX)
-    set(CMAKE_CXX_COMPILER "${CLANGXX}" CACHE STRING "C++ compiler" FORCE)
-  endif()
-endif()
-
 project(Otrader LANGUAGES CXX)
 
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-  message(FATAL_ERROR
-    "Otrader requires Clang (gRPC/protobuf use __has_feature).\n"
-    "  Use: cmake -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++ ...\n"
-    "  Or:  ./build.sh")
+# gRPC/protobuf headers use __has_feature (Clang builtin); GCC errors on them.
+if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  message(FATAL_ERROR "Otrader requires Clang; got '${CMAKE_CXX_COMPILER_ID}'.")
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
@@ -31,8 +20,7 @@ add_compile_options(
   $<$<CONFIG:RelWithDebInfo>:-O3>
 )
 
-# 依赖统一用 Homebrew（build.sh 已设 CMAKE_PREFIX_PATH=/opt/homebrew）
-# 必须用 CONFIG 模式，与 gRPC 的 find_dependency(Protobuf) 一致，避免 target 重复定义
+# Protobuf must be CONFIG mode to match gRPC's find_dependency(Protobuf).
 find_package(Protobuf CONFIG REQUIRED)
 find_package(absl REQUIRED)
 # gRPC is needed by otrader_proto (generated gRPC service stubs), which every configuration

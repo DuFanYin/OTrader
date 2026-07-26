@@ -6,8 +6,8 @@ cmake_minimum_required(VERSION 3.16)
 # after a `brew upgrade protobuf grpc`). Requires `protoc` and `grpc_cpp_plugin` on PATH
 # (override with -DPROTOC=... / -DGRPC_CPP_PLUGIN=...).
 
-find_program(PROTOC NAMES protoc HINTS /opt/homebrew/bin REQUIRED)
-find_program(GRPC_CPP_PLUGIN NAMES grpc_cpp_plugin HINTS /opt/homebrew/opt/grpc/bin /opt/homebrew/bin REQUIRED)
+find_program(PROTOC NAMES protoc REQUIRED)
+find_program(GRPC_CPP_PLUGIN NAMES grpc_cpp_plugin REQUIRED)
 
 set(PROTO_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 set(PROTO_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}")

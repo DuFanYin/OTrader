@@ -53,7 +53,7 @@ uv sync
 ./system_up.sh dev
 ```
 
-Prerequisites: Homebrew LLVM, CMake, protobuf, gRPC, ZeroMQ; Node.js for the frontend; `uv` for the Python backend. Live mode additionally needs PostgreSQL and IB TWS/Gateway + a Tradier token. See the linked docs for full setup.
+Prerequisites (macOS): Clang (Apple clang is fine), CMake ≥ 3.21, and Homebrew protobuf, gRPC, ZeroMQ, apache-arrow, libpqxx; Node.js for the frontend; `uv` for the Python backend. The toolchain is pinned by `Otrader/CMakePresets.json`. Live mode additionally needs PostgreSQL and IB TWS/Gateway + a Tradier token. See the linked docs for full setup.
 
 ---
 

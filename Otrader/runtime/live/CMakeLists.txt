@@ -5,19 +5,10 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# gRPC / Protobuf（用于 live gRPC EngineService）
-list(APPEND CMAKE_IGNORE_PATH "/opt/anaconda3" "/opt/anaconda3/envs/Dev-env")
-list(PREPEND CMAKE_PREFIX_PATH "/opt/homebrew")
 find_package(gRPC REQUIRED)
-
-# Tradier API: 固定使用 Homebrew（brew install curl nlohmann-json）
-set(CURL_HOMEBREW "/opt/homebrew/opt/curl")
-add_library(CURL::libcurl SHARED IMPORTED)
-set_target_properties(CURL::libcurl PROPERTIES
-  IMPORTED_LOCATION "${CURL_HOMEBREW}/lib/libcurl.dylib"
-  INTERFACE_INCLUDE_DIRECTORIES "${CURL_HOMEBREW}/include"
-)
+find_package(CURL REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(Threads REQUIRED)
 
 # Depend on utilities and core (Otrader layout)
 if(NOT TARGET utilities_cpp)
@@ -51,14 +42,14 @@ target_include_directories(engines_cpp PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/../../infra/marketdata
 )
 
-target_link_libraries(engines_cpp PRIVATE pthread CURL::libcurl nlohmann_json::nlohmann_json cppzmq)
+target_link_libraries(engines_cpp PRIVATE Threads::Threads CURL::libcurl nlohmann_json::nlohmann_json cppzmq)
 
-# PostgreSQL (libpqxx) for DatabaseEngine
-set(PQXX_PREFIX "/opt/homebrew")
-set(LIBPQ_PREFIX "/opt/homebrew/opt/libpq")
-target_include_directories(engines_cpp PRIVATE ${PQXX_PREFIX}/include)
-target_link_directories(engines_cpp PUBLIC ${PQXX_PREFIX}/lib ${LIBPQ_PREFIX}/lib)
-target_link_libraries(engines_cpp PUBLIC pqxx pq)
+# PostgreSQL (libpq) + libpqxx (no standard find module → locate directly).
+find_package(PostgreSQL REQUIRED)
+find_path(PQXX_INCLUDE_DIR pqxx/pqxx REQUIRED)
+find_library(PQXX_LIBRARY NAMES pqxx REQUIRED)
+target_include_directories(engines_cpp PRIVATE ${PQXX_INCLUDE_DIR})
+target_link_libraries(engines_cpp PUBLIC ${PQXX_LIBRARY} PostgreSQL::PostgreSQL)
 
 target_link_libraries(engines_cpp PUBLIC
   utilities_cpp

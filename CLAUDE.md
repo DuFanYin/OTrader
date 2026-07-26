@@ -34,7 +34,8 @@ pyproject.toml / uv.lock   Project Python deps (backend + backtest driver), mana
 ## Build & run
 
 ```bash
-./build.sh r           # Release build → Otrader/build/entry_backtest, entry_system
+./build.sh r           # Release → Otrader/build/entry_backtest, entry_system
+./build.sh r 0 g       # clean rebuild + IB gateway (needs thirdparty/IBJts)
 uv sync                # backend Python venv
 ./system_up.sh dev     # full dev stack
 
@@ -42,14 +43,16 @@ uv sync                # backend Python venv
 ./Otrader/build/entry_backtest data/SPXW/SPXW-2025-08/20250804.parquet StraddleTestStrategy
 ```
 
+The toolchain is fixed by `Otrader/CMakePresets.json` (compiler, prefixes, build flags); `build.sh` is a thin wrapper picking the host preset (`macos` / `macos-gateway` / `linux`). You can also configure directly: `cmake --preset macos && cmake --build --preset macos`.
+
 Registered strategies (see `Otrader/strategy/strategy_registry.cpp`): StraddleTestStrategy, IvMeanRevertStrategy, IronCondorTestStrategy, StraddleInventoryScalperStrategy.
 
 ## Toolchain gotchas (learned the hard way)
 
-- **Build uses Homebrew LLVM/clang**, not Apple clang: `/opt/homebrew/opt/llvm/bin`. Needs cmake, protobuf, grpc, zlib from Homebrew.
+- **Toolchain is Clang + a single libc++** (any Clang: Apple clang on macOS, clang on Linux). The build must not mix libc++ runtimes — every Homebrew dep links Apple's `/usr/lib/libc++`, so the project uses it too (do NOT force Homebrew LLVM's libc++; a mismatch makes cross-library `catch(std::exception&)` silently miss and `std::terminate`). CMakeLists hardcode no compiler/prefix; deps resolve via `find_package`/`find_library` against `CMAKE_PREFIX_PATH` from the preset. macOS needs cmake ≥ 3.21, protobuf, grpc, zeromq/cppzmq, apache-arrow, libpqxx, libpq, curl, googletest, abseil, nlohmann-json from Homebrew.
 - **Proto is generated at build time**, not checked in. `Otrader/proto/` holds only the `.proto` sources; `proto/CMakeLists.txt` runs `protoc` (+ grpc plugin) into the build dir, so a `brew upgrade protobuf grpc` self-heals on the next configure — no manual regeneration, no version-mismatch errors. Needs `protoc` + `grpc_cpp_plugin` on PATH (override via `-DPROTOC=` / `-DGRPC_CPP_PLUGIN=`). Consumers include the generated headers by bare name (e.g. `#include "zmq_messages.pb.h"`), resolved through `otrader_proto`'s PUBLIC include dir — never by a `../../proto/...` path.
 - **IB is compile-time optional.** `entry_system` is a thin `main()` dispatcher; each mode lives in its own TU under `Otrader/entry/` (`run_live.cpp`, `run_market.cpp`, `run_gateway.cpp`). Only `run_gateway.cpp` touches IBJts, and it's compiled + `OTRADER_WITH_IB` defined only when `BUILD_GATEWAY=ON`. So live/market/backtest build with **no IBJts present** (`entry_system` then links no twsapi and rejects `--mode=gateway`/`--mode=all` at runtime with exit 1). When adding a mode source, wire it into `entry/entry_modes.hpp` + the `ENTRY_SOURCES` list in the root CMakeLists.
-- **When you do build IB** (`BUILD_GATEWAY=ON`): IBJts must be rebuilt against the current protobuf; `build.sh` builds it into `Otrader/thirdparty/IBJts/build-apple/` only if the dylib is missing (delete to force). Its vendored CMake needs C++17, links `libbid.a` + absl-log, and needs `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` on CMake 4.x. Note: `build.sh` still hard-requires `Otrader/thirdparty/IBJts` to exist — to build without IB, configure cmake directly with `-DBUILD_GATEWAY=OFF`.
+- **When you do build IB** (`./build.sh g` / preset `macos-gateway`): IBJts must be rebuilt against the current protobuf; `build.sh g` regenerates its protobufUnix and builds the dylib into `Otrader/thirdparty/IBJts/build-apple/` if missing (delete to force). Its vendored CMake needs C++17, links `libbid.a` + absl-log, and needs `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` on CMake 4.x. The default build (`./build.sh`) sets `BUILD_GATEWAY=OFF` and needs no IBJts at all.
 - **Runtime needs `DYLD_LIBRARY_PATH`** to include `Otrader/thirdparty/IBJts/build-apple/lib` (only when IB is built).
 - **Live/market modes require PostgreSQL** (default `dbname=trading`, or `DATABASE_URL`) and a Tradier token (`.env`). Backtest needs neither.
 - **thirdparty/ is gitignored** (`lets_be_rational`, `IntelRDFPMathLib`, `IBJts`) — a fresh clone has none of it, and utilities won't even configure without `lets_be_rational`. Restore from a sibling checkout or the setup flow before building.

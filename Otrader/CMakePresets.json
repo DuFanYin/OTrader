@@ -1,0 +1,59 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "BUILD_BACKTEST": "ON",
+        "BUILD_TESTS": "ON",
+        "BUILD_LIVE_GRPC": "ON",
+        "BUILD_MARKETDATA": "ON",
+        "BUILD_GATEWAY": "OFF"
+      }
+    },
+    {
+      "name": "macos",
+      "displayName": "macOS (Apple clang + Homebrew deps)",
+      "inherits": "base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_PREFIX_PATH": "/opt/homebrew;/opt/homebrew/opt/libpq;/opt/homebrew/opt/libpqxx;/opt/homebrew/opt/curl;/opt/homebrew/opt/zlib",
+        "CMAKE_IGNORE_PREFIX_PATH": "/opt/anaconda3"
+      }
+    },
+    {
+      "name": "macos-gateway",
+      "displayName": "macOS with IB gateway",
+      "inherits": "macos",
+      "cacheVariables": { "BUILD_GATEWAY": "ON" }
+    },
+    {
+      "name": "macos-debug",
+      "displayName": "macOS Debug",
+      "inherits": "macos",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "linux",
+      "displayName": "Linux (clang + system deps)",
+      "inherits": "base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "macos", "configurePreset": "macos", "targets": ["otrader_main"] },
+    { "name": "macos-gateway", "configurePreset": "macos-gateway", "targets": ["otrader_main"] },
+    { "name": "macos-debug", "configurePreset": "macos-debug", "targets": ["otrader_main"] },
+    { "name": "linux", "configurePreset": "linux", "targets": ["otrader_main"] }
+  ]
+}

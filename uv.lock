@@ -183,7 +183,7 @@ wheels = [
 ]
 
 [[package]]
-name = "otrader-backend"
+name = "otrader"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
