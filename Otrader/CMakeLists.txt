@@ -85,11 +85,21 @@ if(BUILD_LIVE_GRPC)
   endif()
 endif()
 
-# 统一入口：entry_system（根据 --mode=gateway|market|live|all 分发）
+# 统一入口：entry_system（--mode=gateway|market|live|all 分发到 entry/ 下各独立 TU）。
+# entry_system.cpp + run_live/run_market 不依赖任何 gateway 后端；只有 run_gateway.cpp 链 IB，
+# 且仅在 BUILD_GATEWAY=ON 时编入。因此 live/market/backtest 可在没有 IBJts 的环境下构建。
 if(BUILD_GATEWAY OR BUILD_MARKETDATA OR BUILD_LIVE_GRPC)
-  add_executable(entry_system entry_system.cpp)
+  set(ENTRY_SOURCES
+    entry_system.cpp
+    entry/run_live.cpp
+    entry/run_market.cpp)
+  if(BUILD_GATEWAY)
+    list(APPEND ENTRY_SOURCES entry/run_gateway.cpp)
+  endif()
+  add_executable(entry_system ${ENTRY_SOURCES})
   target_include_directories(entry_system PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/entry
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/live
     ${CMAKE_CURRENT_SOURCE_DIR}/utilities
     ${CMAKE_CURRENT_SOURCE_DIR}/core
@@ -102,6 +112,8 @@ if(BUILD_GATEWAY OR BUILD_MARKETDATA OR BUILD_LIVE_GRPC)
   endif()
   if(TARGET gateway_core)
     target_link_libraries(entry_system PRIVATE gateway_core)
+    # run_gateway.cpp is the only entry TU that touches IB; gate it (and the gateway/all modes).
+    target_compile_definitions(entry_system PRIVATE OTRADER_WITH_IB)
   endif()
   if(TARGET cppzmq)
     target_link_libraries(entry_system PRIVATE cppzmq)
