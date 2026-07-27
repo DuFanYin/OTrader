@@ -22,13 +22,13 @@ int main() {
 
     engines::MainEngine main_engine;
 
-    // Connect to Gateway process (must run entry_gateway first)
-    std::cout << "  Connecting to Gateway (ZMQ)...\n";
+    // Connect the in-process gateway (needs a BUILD_GATEWAY=ON build with IB configured).
+    std::cout << "  Connecting gateway...\n";
     main_engine.connect();
     std::this_thread::sleep_for(3s);
-    if (!main_engine.gateway_client() || !main_engine.gateway_client()->is_connected()) {
-        std::cerr
-            << "  FAIL: Gateway not connected (run entry_gateway first; check GATEWAY_REP_ADDR).\n";
+    if (!main_engine.gateway() || !main_engine.gateway()->is_connected()) {
+        std::cerr << "  FAIL: gateway not connected (build with BUILD_GATEWAY=ON and configure "
+                     "IB; NullGateway never connects).\n";
         main_engine.close();
         return 1;
     }

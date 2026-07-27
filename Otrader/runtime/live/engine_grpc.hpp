@@ -103,7 +103,7 @@ class GrpcLiveEngineService final : public ::otrader::EngineService::Service {
                                        ::otrader::StrategyHoldingsResponse* response) override;
 
   private:
-    MainEngine* main_engine_; // Non-owning; lifecycle by entry_live_grpc
+    MainEngine* main_engine_; // Non-owning; lifecycle by entry_system (run_live)
 };
 
 } // namespace engines

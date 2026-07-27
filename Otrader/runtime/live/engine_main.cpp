@@ -15,8 +15,33 @@ MainEngine::MainEngine() {
     event_engine_ = std::make_unique<EventEngine>(this, 1);
     event_engine_->start();
     db_engine_ = std::make_unique<DatabaseEngine>(this);
-    market_data_client_ = std::make_unique<MarketDataClient>(this);
-    gateway_client_ = std::make_unique<GatewayClient>(this);
+    market_data_ = std::make_unique<MarketDataEngine>(this);
+    gateway_ = std::make_unique<LiveGateway>(this);
+
+    // In-process data plane: market-data snapshots and gateway order/trade events feed the
+    // event engine directly (acquire a pooled slot, copy in, put_event) — the same work the old
+    // ZMQ SUB threads did after deserialization, minus the serialization + IPC hops.
+    market_data_->set_snapshot_callback([this](const utilities::PortfolioSnapshot& s) {
+        utilities::PortfolioSnapshot* p = acquire_snapshot();
+        if (p != nullptr) {
+            *p = s;
+            put_event(utilities::Event(utilities::EventType::Snapshot, p));
+        }
+    });
+    gateway_->set_order_callback([this](const utilities::OrderData& o) {
+        utilities::OrderData* p = acquire_order();
+        if (p != nullptr) {
+            *p = o;
+            put_event(utilities::Event(utilities::EventType::Order, p));
+        }
+    });
+    gateway_->set_trade_callback([this](const utilities::TradeData& t) {
+        utilities::TradeData* p = acquire_trade();
+        if (p != nullptr) {
+            *p = t;
+            put_event(utilities::Event(utilities::EventType::Trade, p));
+        }
+    });
 
     init_core(event_engine_.get(),
               CoreInitParams{
@@ -30,14 +55,32 @@ MainEngine::MainEngine() {
                   .log_level = engines::INFO,
               });
 
+    // Engine's own portfolio view (snapshot consumer / apply_frame).
     portfolio_structure_->ensure_portfolios_created();
     db_engine_->load_contracts(
         [this](const utilities::ContractData& c) { portfolio_structure_->process_option(c); },
         [this](const utilities::ContractData& c) { portfolio_structure_->process_underlying(c); });
     portfolio_structure_->finalize_all_chains();
 
+    // Market-data engine is itself a PortfolioStructure (snapshot producer); load its chains too.
+    market_data_->ensure_portfolios_created();
+    db_engine_->load_contracts(
+        [this](const utilities::ContractData& c) { market_data_->process_option(c); },
+        [this](const utilities::ContractData& c) { market_data_->process_underlying(c); });
+    market_data_->finalize_all_chains();
+
     log_self_check();
     write_log("Main engine initialization successful", INFO);
+}
+
+// Drives the gateway's periodic housekeeping (IB TWS message-queue drain; no-op for NullGateway).
+// Replaces the old gateway process's 200ms timer thread now that the gateway is in-process.
+void MainEngine::run_gateway_pump(const std::stop_token& st) {
+    using namespace std::chrono_literals;
+    while (!st.stop_requested()) {
+        gateway_->process_timer_event(utilities::Event(utilities::EventType::Timer));
+        std::this_thread::sleep_for(200ms);
+    }
 }
 
 MainEngine::~MainEngine() { close(); }
@@ -60,7 +103,7 @@ void MainEngine::log_self_check() {
 // ---- Infra hooks ----
 
 std::string MainEngine::send_order_to_gateway(const utilities::OrderRequest& req) {
-    return gateway_client_->send_order(req);
+    return gateway_->send_order(req);
 }
 
 void MainEngine::save_order_data(const std::string& strategy_name,
@@ -74,11 +117,15 @@ void MainEngine::save_trade_data(const std::string& strategy_name,
 }
 
 void MainEngine::close_infra() {
-    if (market_data_client_) {
-        market_data_client_->close();
+    gateway_pump_thread_.request_stop();
+    if (gateway_pump_thread_.joinable()) {
+        gateway_pump_thread_.join();
     }
-    if (gateway_client_) {
-        gateway_client_->close();
+    if (market_data_) {
+        market_data_->stop_market_data_update();
+    }
+    if (gateway_) {
+        gateway_->close();
     }
     if (event_engine_) {
         event_engine_->close();
@@ -91,30 +138,30 @@ void MainEngine::close_infra() {
 // ---- Live-specific methods ----
 
 void MainEngine::start_market_data_update() {
-    if (market_data_client_ == nullptr) {
-        throw std::runtime_error("market data client is null");
+    if (market_data_ == nullptr) {
+        throw std::runtime_error("market data engine is null");
     }
-    market_data_client_->start();
+    market_data_->start_market_data_update();
     market_data_running_ = true;
 }
 
 void MainEngine::stop_market_data_update() {
     market_data_running_ = false;
-    if (market_data_client_) {
-        market_data_client_->stop();
+    if (market_data_) {
+        market_data_->stop_market_data_update();
     }
 }
 
 void MainEngine::subscribe_chains(const std::string& strategy_name,
                                   std::span<const std::string> chain_symbols) {
-    if (market_data_client_) {
-        market_data_client_->subscribe_chains(strategy_name, chain_symbols);
+    if (market_data_) {
+        market_data_->subscribe_chains(strategy_name, chain_symbols);
     }
 }
 
 void MainEngine::unsubscribe_chains(const std::string& strategy_name) {
-    if (market_data_client_) {
-        market_data_client_->unsubscribe_chains(strategy_name);
+    if (market_data_) {
+        market_data_->unsubscribe_chains(strategy_name);
     }
 }
 
@@ -131,9 +178,21 @@ auto MainEngine::get_strategy_errors() const -> std::vector<std::pair<std::strin
                                    : std::vector<std::pair<std::string, std::string>>{};
 }
 
-void MainEngine::connect() { gateway_client_->connect(); }
+void MainEngine::connect() {
+    gateway_->connect();
+    if (!gateway_pump_thread_.joinable()) {
+        gateway_pump_thread_ =
+            std::jthread([this](const std::stop_token& st) { run_gateway_pump(st); });
+    }
+}
 
-void MainEngine::disconnect() { gateway_client_->disconnect(); }
+void MainEngine::disconnect() {
+    gateway_pump_thread_.request_stop();
+    if (gateway_pump_thread_.joinable()) {
+        gateway_pump_thread_.join();
+    }
+    gateway_->disconnect();
+}
 
 void MainEngine::cancel_order(const utilities::CancelRequest& req) {
     if (execution_engine_) {
@@ -142,7 +201,7 @@ void MainEngine::cancel_order(const utilities::CancelRequest& req) {
 }
 
 auto MainEngine::send_order(const utilities::OrderRequest& req) -> std::string {
-    return gateway_client_->send_order(req);
+    return gateway_->send_order(req);
 }
 
 auto MainEngine::send_order(const std::string& strategy_name, const utilities::OrderRequest& req)
@@ -153,9 +212,9 @@ auto MainEngine::send_order(const std::string& strategy_name, const utilities::O
     return o.value_or("");
 }
 
-void MainEngine::query_account() { gateway_client_->query_account(); }
+void MainEngine::query_account() { gateway_->query_account(); }
 
-void MainEngine::query_position() { gateway_client_->query_position(); }
+void MainEngine::query_position() { gateway_->query_position(); }
 
 auto MainEngine::get_trade(const std::string& tradeid) -> utilities::TradeData* {
     return execution_engine_ ? execution_engine_->get_trade(tradeid) : nullptr;

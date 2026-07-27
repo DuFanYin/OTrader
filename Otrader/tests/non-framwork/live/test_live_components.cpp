@@ -1,9 +1,8 @@
 /**
- * Live component load test: Runtime (MainEngine + EventEngine) with ZMQ clients.
- * Validates that all components are created: event/log/db, portfolio_structure,
- * gateway_client, market_data_client, option_strategy_engine, position_engine.
- * CI or local live stack check.
- * With arg "connect" or "1": attempt Gateway connection (requires entry_gateway running).
+ * Live component load test: single-process Runtime (MainEngine + EventEngine, in-process
+ * market-data + gateway). Validates that all components are created: event/log/db,
+ * portfolio_structure, gateway, option_strategy_engine, position_engine. CI or local check.
+ * With arg "connect" or "1": attempt gateway connection (NullGateway is a no-op without IB).
  */
 
 #include "engine_main.hpp"
@@ -20,14 +19,13 @@ int main(int argc, char** argv) {
     }
 
     std::cout
-        << "[test_live_components] Runtime (MainEngine + EventEngine, ZMQ Gateway/MarketData)\n"
-        << (do_connect ? "  With Gateway connect (entry_gateway must be running)\n"
-                       : "  No connect\n");
+        << "[test_live_components] Runtime (MainEngine + EventEngine, in-process gateway/market)\n"
+        << (do_connect ? "  With gateway connect\n" : "  No connect\n");
 
     engines::MainEngine main_engine;
 
     if (do_connect) {
-        std::cout << "  Connecting to Gateway (ZMQ REP)...\n";
+        std::cout << "  Connecting gateway...\n";
         main_engine.connect();
     }
 
@@ -48,12 +46,8 @@ int main(int argc, char** argv) {
         std::cerr << "  FAIL: portfolio_structure is null\n";
         ok = false;
     }
-    if (!main_engine.gateway_client()) {
-        std::cerr << "  FAIL: gateway_client is null\n";
-        ok = false;
-    }
-    if (!main_engine.market_data_client()) {
-        std::cerr << "  FAIL: market_data_client is null\n";
+    if (!main_engine.gateway()) {
+        std::cerr << "  FAIL: gateway is null\n";
         ok = false;
     }
     if (!main_engine.option_strategy_engine()) {
@@ -74,8 +68,7 @@ int main(int argc, char** argv) {
     std::cout << "  log_engine OK\n";
     std::cout << "  db_engine OK\n";
     std::cout << "  portfolio_structure OK\n";
-    std::cout << "  gateway_client OK\n";
-    std::cout << "  market_data_client OK\n";
+    std::cout << "  gateway OK\n";
     std::cout << "  option_strategy_engine OK\n";
     std::cout << "  position_engine OK\n";
 

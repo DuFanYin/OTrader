@@ -57,8 +57,8 @@ class MarketDataEngine : public utilities::BaseEngine, public PortfolioStructure
     void start_market_data_update();
     void stop_market_data_update();
 
-    /** Set callback for snapshot emission. entry_market_data uses this to PUB over ZMQ. Required
-     * before start. */
+    /** Set callback for snapshot emission. In the live process MainEngine points this at
+     * put_event(Snapshot) (in-process; see engine_main.cpp). Required before start. */
     void set_snapshot_callback(std::function<void(const utilities::PortfolioSnapshot&)> cb) {
         snapshot_callback_ = std::move(cb);
     }

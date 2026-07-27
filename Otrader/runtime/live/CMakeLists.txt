@@ -17,16 +17,15 @@ endif()
 if(NOT TARGET portfolio_structure_shared)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../core ${CMAKE_BINARY_DIR}/core)
 endif()
+if(NOT TARGET gateway_core)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../infra/gateway ${CMAKE_BINARY_DIR}/infra/gateway)
+endif()
 
 add_library(engines_cpp
   engine_event.cpp
-  gateway_client.cpp
-  market_data_client.cpp
   ../main_engine_base.cpp
   ../../infra/db/engine_db_pg.cpp
-  ../../infra/gateway/zmq_gateway_schema.cpp
   ../../infra/marketdata/engine_data_tradier.cpp
-  ../../infra/marketdata/zmq_marketdata_schema.cpp
   engine_main.cpp
   engine_grpc.cpp
 )
@@ -42,7 +41,7 @@ target_include_directories(engines_cpp PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/../../infra/marketdata
 )
 
-target_link_libraries(engines_cpp PRIVATE Threads::Threads CURL::libcurl nlohmann_json::nlohmann_json cppzmq)
+target_link_libraries(engines_cpp PRIVATE Threads::Threads CURL::libcurl nlohmann_json::nlohmann_json)
 
 # PostgreSQL (libpq) + libpqxx (no standard find module → locate directly).
 find_package(PostgreSQL REQUIRED)
@@ -60,6 +59,7 @@ target_link_libraries(engines_cpp PUBLIC
   log_engine_shared
   strategies
   option_strategy_engine_shared
+  gateway_core
   otrader_proto
   gRPC::grpc++
   protobuf::libprotobuf

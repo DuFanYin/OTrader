@@ -1,17 +1,18 @@
 #pragma once
 
 #include "../../infra/db/engine_db_pg.hpp"
+#include "../../infra/gateway/live_gateway.hpp"
+#include "../../infra/marketdata/engine_data_tradier.hpp"
 #include "../../utilities/mpsc_ring.hpp"
 #include "../../utilities/object_pool.hpp"
 #include "../main_engine_base.hpp"
 #include "engine_event.hpp"
-#include "gateway_client.hpp"
-#include "market_data_client.hpp"
 #include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <span>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -24,8 +25,7 @@ class MainEngine : public runtime_common::MainEngineBase {
 
     EventEngine* event_engine() { return event_engine_.get(); }
     DatabaseEngine* db_engine() { return db_engine_.get(); }
-    GatewayClient* gateway_client() { return gateway_client_.get(); }
-    MarketDataClient* market_data_client() { return market_data_client_.get(); }
+    LiveGateway* gateway() { return gateway_.get(); }
 
     void start_market_data_update();
     void stop_market_data_update();
@@ -71,11 +71,13 @@ class MainEngine : public runtime_common::MainEngineBase {
 
   private:
     void log_self_check();
+    void run_gateway_pump(const std::stop_token& st);
 
     std::unique_ptr<EventEngine> event_engine_;
     std::unique_ptr<DatabaseEngine> db_engine_;
-    std::unique_ptr<MarketDataClient> market_data_client_;
-    std::unique_ptr<GatewayClient> gateway_client_;
+    std::unique_ptr<MarketDataEngine> market_data_;
+    std::unique_ptr<LiveGateway> gateway_;
+    std::jthread gateway_pump_thread_;
 
     static constexpr size_t kStrategyUpdatesRingCap = 256;
     utilities::ObjectPool<utilities::StrategyUpdateData> strategy_updates_pool_;

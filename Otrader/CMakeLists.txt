@@ -27,10 +27,6 @@ find_package(absl REQUIRED)
 # builds. find_dependency(Protobuf) inside gRPC's config is why Protobuf must be CONFIG mode too.
 find_package(gRPC CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
-# cppzmq required for live engines (GatewayClient/MarketDataClient), Gateway, MarketData
-if(BUILD_GATEWAY OR BUILD_MARKETDATA OR BUILD_LIVE_GRPC)
-  find_package(cppzmq CONFIG REQUIRED)
-endif()
 
 # 公共依赖：utilities、proto、core（backtest 与 live 共用）
 add_subdirectory(utilities)
@@ -53,38 +49,21 @@ if(BUILD_BACKTEST)
   target_link_libraries(entry_backtest PRIVATE backtest_engines)
 endif()
 
-# Gateway/MarketData/Live runtime libraries
-option(BUILD_GATEWAY "Build Gateway components (used by entry_system)" OFF)
-if(BUILD_GATEWAY)
-  add_subdirectory(infra/gateway)
-endif()
+# Live runtime. The engine is a single process (market-data + gateway are in-process inside
+# MainEngine), so BUILD_MARKETDATA/BUILD_LIVE_GRPC now select the same build; kept as separate
+# options for compatibility. gateway_core is always built for a live build; BUILD_GATEWAY only
+# chooses IbGateway (IB) vs NullGateway (no-IB) inside infra/gateway (see live_gateway.hpp).
+option(BUILD_GATEWAY "Use the real Interactive Brokers gateway (IbGateway); off = NullGateway" OFF)
+option(BUILD_MARKETDATA "Build the live runtime (engines_cpp)" OFF)
+option(BUILD_LIVE_GRPC "Build the live runtime (engines_cpp) and entry_system" OFF)
 
-option(BUILD_MARKETDATA "Build Market Data components (used by entry_system)" OFF)
-if(BUILD_MARKETDATA)
-  if(NOT TARGET engines_cpp)
-    add_subdirectory(runtime/live)
-  endif()
-endif()
-
-option(BUILD_LIVE_GRPC "Build live runtime (engines_cpp) and entry_system" OFF)
-if(BUILD_LIVE_GRPC)
-  if(NOT TARGET engines_cpp)
-    add_subdirectory(runtime/live)
-  endif()
-endif()
-
-# 统一入口：entry_system（--mode=gateway|market|live|all 分发到 entry/ 下各独立 TU）。
-# entry_system.cpp + run_live/run_market 不依赖任何 gateway 后端；只有 run_gateway.cpp 链 IB，
-# 且仅在 BUILD_GATEWAY=ON 时编入。因此 live/market/backtest 可在没有 IBJts 的环境下构建。
 if(BUILD_GATEWAY OR BUILD_MARKETDATA OR BUILD_LIVE_GRPC)
-  set(ENTRY_SOURCES
+  add_subdirectory(infra/gateway)     # defines gateway_core (IbGateway or NullGateway)
+  add_subdirectory(runtime/live)      # defines engines_cpp (links gateway_core)
+
+  add_executable(entry_system
     entry_system.cpp
-    entry/run_live.cpp
-    entry/run_market.cpp)
-  if(BUILD_GATEWAY)
-    list(APPEND ENTRY_SOURCES entry/run_gateway.cpp)
-  endif()
-  add_executable(entry_system ${ENTRY_SOURCES})
+    entry/run_live.cpp)
   target_include_directories(entry_system PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/entry
@@ -95,17 +74,7 @@ if(BUILD_GATEWAY OR BUILD_MARKETDATA OR BUILD_LIVE_GRPC)
     ${CMAKE_CURRENT_SOURCE_DIR}/infra/marketdata
     ${CMAKE_CURRENT_SOURCE_DIR}/infra/db
   )
-  if(TARGET engines_cpp)
-    target_link_libraries(entry_system PRIVATE engines_cpp)
-  endif()
-  if(TARGET gateway_core)
-    target_link_libraries(entry_system PRIVATE gateway_core)
-    # run_gateway.cpp is the only entry TU that touches IB; gate it (and the gateway/all modes).
-    target_compile_definitions(entry_system PRIVATE OTRADER_WITH_IB)
-  endif()
-  if(TARGET cppzmq)
-    target_link_libraries(entry_system PRIVATE cppzmq)
-  endif()
+  target_link_libraries(entry_system PRIVATE engines_cpp gateway_core)
 endif()
 
 # 聚合 target：build.sh 只编此 target，一次构建所有主程序，避免多 target 顺序编时的重复进度输出

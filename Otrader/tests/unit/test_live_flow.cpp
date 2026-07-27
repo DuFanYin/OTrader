@@ -1,11 +1,10 @@
 /**
  * Live dataflow test — §8.1
- * EventEngine + main queue: put_event(Timer), no Gateway/MarketData.
+ * EventEngine + main queue: put_event(Timer), no market-data polling or broker connection.
  *
- * Why close() can take >15s: MainEngine::close() calls market_data_client_->close()
- * → MarketDataClient::stop() does req_rep(ZMQ_CMD_STOP) with rcvtimeo 5000ms; when
- * no Market Data process is running this blocks ~5s. GatewayClient join and
- * EventEngine stop add more. Use a timeout that allows teardown to finish.
+ * MainEngine now hosts market-data + gateway in-process; construction loads contracts from the
+ * DB and close() tears down the event engine, gateway pump, and DB. The timeout guards against
+ * a hang in DB/engine teardown.
  */
 #include "runtime/live/engine_main.hpp"
 #include "utilities/event.hpp"
@@ -44,7 +43,7 @@ template <typename Fn> void run_with_timeout(Fn&& fn) {
     }
     if (!done) {
         t.detach();
-        GTEST_FAIL() << "LiveFlow timed out (close() may block on ZMQ/DB teardown); test aborted.";
+        GTEST_FAIL() << "LiveFlow timed out (close() may block on DB/engine teardown); test aborted.";
     } else if (t.joinable()) {
         t.join();
     }

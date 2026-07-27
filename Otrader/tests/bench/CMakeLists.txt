@@ -37,22 +37,7 @@ else()
   message(STATUS "bench_replay skipped (needs BUILD_BACKTEST=ON for backtest_engines)")
 endif()
 
-# L3: IPC latency — compiles zmq_gateway_schema.cpp directly (light: proto + utilities + cppzmq,
-# no IB/grpc/curl), so it builds regardless of gateway/live options as long as cppzmq is present.
-find_package(cppzmq CONFIG QUIET)
-if(cppzmq_FOUND AND TARGET otrader_proto)
-  add_executable(bench_ipc
-    bench_ipc.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../infra/gateway/zmq_gateway_schema.cpp)
-  target_include_directories(bench_ipc PRIVATE
-    ${BENCH_INCLUDES}
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../infra/gateway
-  )
-  target_compile_options(bench_ipc PRIVATE -O3 -DNDEBUG)
-  target_link_libraries(bench_ipc PRIVATE utilities_cpp otrader_proto cppzmq)
-  list(APPEND BENCH_TARGETS bench_ipc)
-else()
-  message(STATUS "bench_ipc skipped (needs cppzmq + otrader_proto)")
-endif()
+# L3 (IPC latency / bench_ipc) removed: the ZMQ data plane it measured no longer exists — the
+# live stack is a single process (market-data + gateway in-process; see runtime/live/engine_main).
 
 add_custom_target(otrader_bench DEPENDS ${BENCH_TARGETS})

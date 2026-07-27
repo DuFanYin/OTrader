@@ -111,14 +111,6 @@ directory.
 - **LiveShutdownE2E.StopAfterQueuedPayloadsDrainsNoLeak**: Stop after large enqueue drains and releases payloads (no leak).
 - **LiveShutdownE2E.StopWhileProducersRunningReturnsAndRejects**: Stop during concurrent producers returns and rejects safely.
 
-## `test_live_close_fast.cpp`
-
-- **LiveClose.EventEngine_Start_Returns**: Event engine start returns (no deadlock).
-- **LiveClose.EventEngine_Stop_Returns**: Event engine stop returns (no deadlock).
-- **LiveClose.MarketDataClient_Start_Returns_NoExternal**: MarketData client start is non-blocking without external processes.
-- **LiveClose.MarketDataClient_Stop_Returns_NoExternal**: MarketData client stop is non-blocking without external processes.
-- **LiveClose.MarketDataClient_Close_Returns_NoExternal**: MarketData client close returns without external processes.
-
 ## `test_live_event_engine_concurrency_mixed.cpp`
 
 - **LiveEventEngineConcurrency.MultiProducerMixedPayloadsStopReturnsAndNoAcquireStarvation**: Concurrent producers enqueue mixed payloads; stop returns; pools remain usable (no starvation/leak).
@@ -128,23 +120,6 @@ directory.
 - **LiveEventEngineBackpressure.QueueFullDropsPayloadsButEngineRemainsStoppable**: Under ring backpressure/drop, payloads are released and engine remains stoppable.
 
 ---
-
-## ZMQ schema / message flow (requires `engines_cpp`)
-
-## `test_zmq_schema_negative.cpp`
-
-- **ZmqSchemaNegative.GatewayOrderDeserializeRejectsGarbage**: Rejects invalid gateway order payload.
-- **ZmqSchemaNegative.GatewayTradeDeserializeRejectsGarbage**: Rejects invalid gateway trade payload.
-- **ZmqSchemaNegative.GatewayRequestResponseRejectsGarbage**: Rejects invalid request/response payload.
-- **ZmqSchemaNegative.GatewayConnectPayloadRejectsGarbage**: Rejects invalid connect payload.
-- **ZmqSchemaNegative.MarketSnapshotRejectsGarbage**: Rejects invalid market snapshot payload.
-- **ZmqSchemaNegative.MarketSubscribeUnsubscribeRejectsGarbage**: Rejects invalid subscribe/unsubscribe payload.
-
-## `test_zmq_message_flow.cpp`
-
-- **ZmqMessageFlow.GatewayOrderAndTradeRoundTrip**: Round-trip serialization for gateway order/trade messages.
-- **ZmqMessageFlow.GatewayRequestResponseRoundTrip**: Round-trip serialization for gateway request/response messages.
-- **ZmqMessageFlow.MarketSnapshotAndSubscribeRoundTrip**: Round-trip serialization for market snapshot + subscribe messages.
 
 ## `test_intent_routing.cpp`
 

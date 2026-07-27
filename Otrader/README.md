@@ -6,13 +6,13 @@ The C++20 options engine at the heart of the project: an event-driven core (Time
 
 ```
 core/         Domain logic: strategy, position, hedge, execution, log (no direct I/O)
-runtime/      backtest/ (sync loop) · live/ (queue + gRPC + ZMQ clients) · main_engine_base
-infra/        db/ (PostgreSQL) · gateway/ (IB TWS) · marketdata/ (Tradier)
+runtime/      backtest/ (sync loop) · live/ (queue + gRPC + in-process market-data/gateway) · main_engine_base
+infra/        db/ (PostgreSQL) · gateway/ (IbGateway | NullGateway) · marketdata/ (Tradier)
 strategy/     template + strategy_registry (REGISTER_STRATEGY) + factory/
 utilities/    base_engine, portfolio, combo_builder, black_scholes, parquet_loader, ring buffers
-proto/        .proto + generated protobuf/gRPC and ZMQ message code
+proto/        .proto + generated protobuf/gRPC message code
 tests/        GTest unit tests + non-framework backtest/live tests
-entry_backtest.cpp   entry_system.cpp   (unified live entry: --mode=gateway|market|live|all)
+entry_backtest.cpp   entry_system.cpp   (single-process live runtime: gRPC + in-process market-data + gateway)
 ```
 
 ## Build & run

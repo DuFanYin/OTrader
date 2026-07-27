@@ -30,12 +30,9 @@ otrader_add_gtest(test_position_serialize_roundtrip_gtest test_position_serializ
 
 # Live-only
 if(TARGET engines_cpp)
-  otrader_add_gtest(test_zmq_message_flow_gtest test_zmq_message_flow.cpp engines_cpp)
-  otrader_add_gtest(test_zmq_schema_negative_gtest test_zmq_schema_negative.cpp engines_cpp)
   otrader_add_gtest(test_intent_routing_gtest test_intent_routing.cpp engines_cpp)
   otrader_add_gtest(test_live_event_engine_safety_gtest test_live_event_engine_safety.cpp engines_cpp)
   otrader_add_gtest(test_live_shutdown_e2e_gtest test_live_shutdown_e2e.cpp engines_cpp)
-  otrader_add_gtest(test_live_close_fast_gtest test_live_close_fast.cpp engines_cpp)
   # §8.1 Live dataflow（仅当 engines_cpp 存在时，即 BUILD_LIVE=ON）
   otrader_add_gtest(test_live_flow_gtest test_live_flow.cpp engines_cpp)
   otrader_add_gtest(test_live_event_engine_concurrency_mixed_gtest

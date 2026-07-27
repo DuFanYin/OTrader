@@ -1,7 +1,7 @@
 /**
- * Live mode: gRPC EngineService over the live MainEngine. Talks to the gateway/market
- * processes only via ZMQ clients (GatewayClient/MarketDataClient) — no gateway/IB dependency,
- * so this builds without IBJts.
+ * Live runtime: gRPC EngineService over the live MainEngine. MainEngine hosts the market-data
+ * and gateway engines in-process; the gateway is IbGateway or NullGateway depending on
+ * BUILD_GATEWAY (see infra/gateway/live_gateway.hpp), so this builds with or without IBJts.
  */
 
 #include "entry_modes.hpp"
