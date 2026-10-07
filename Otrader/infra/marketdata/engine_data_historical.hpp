@@ -48,6 +48,8 @@ class BacktestDataEngine : public utilities::BaseEngine {
 
     [[nodiscard]] std::optional<BacktestPortfolio> const& portfolio() const { return portfolio_; }
     [[nodiscard]] bool has_data() const { return loader_ != nullptr && loaded_; }
+    /** Why the last load_parquet failed (empty after a successful load). */
+    [[nodiscard]] std::string const& load_error() const { return loader_->last_error(); }
     utilities::PortfolioData* portfolio_data() const;
 
     /** Precomputed snapshots (one per frame). */

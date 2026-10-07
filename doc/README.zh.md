@@ -74,7 +74,7 @@
 
 这是一个引擎，不是开箱即用的成品。有三样东西刻意不包含在仓库里：
 
-- **回测数据。** 仓库不含任何数据。回测读取固定 schema 的按天 Parquet 文件（样本从 [Databento](https://databento.com/) DBN 清洗而来，但任何数据源都可以）。清洗这一步需要你自己写 —— schema 与目录约定见 **[data/README.md](../data/README.md)**。
+- **回测数据。** 仓库不含任何数据。回测读取固定 schema 的按天 Parquet 文件（样本从 [Databento](https://databento.com/) DBN 清洗而来，但任何数据源都可以）。Databento → Parquet 的清洗流程在 **[scripts/data_prep](../scripts/data_prep/README.md)**；其他数据源的 schema 与目录约定见 **[data/README.md](../data/README.md)**。
 - **实盘行情源。** 内置的 provider 轮询 **Tradier** API，需要*你自己的付费 Tradier production token*（`TRADIER_TOKEN`；sandbox 不行）。想用别的数据商？实现一个能向引擎产出 `PortfolioSnapshot` 的 provider 即可——接口很小、可替换。
 - **实盘执行网关。** 内置的那个封装了 Interactive Brokers TWS API（**IBJts**）——一个私有 SDK，不在本仓库再分发，需你自行获取并编译；或者按 ZeroMQ 消息契约**自己实现一个网关**（它作为独立进程运行，引擎只通过 ZMQ 与它通信）。实盘还需 PostgreSQL。
 

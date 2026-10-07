@@ -1,0 +1,4 @@
+databento>=0.48.0
+polars>=1.0
+pyarrow>=14.0
+zstandard>=0.22

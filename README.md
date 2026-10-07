@@ -74,7 +74,7 @@ Everything the core needs is **injected** via `RuntimeAPI` (data views, order su
 
 This is an engine, not a turnkey product. Three pieces are deliberately not bundled:
 
-- **Backtest data.** No data ships with the repo. The backtester reads per-day Parquet files with a fixed schema (the samples were cleaned from [Databento](https://databento.com/) DBN, but any source works). You write the cleaning step — see **[data/README.md](data/README.md)** for the schema and layout.
+- **Backtest data.** No data ships with the repo. The backtester reads per-day Parquet files with a fixed schema (the samples were cleaned from [Databento](https://databento.com/) DBN, but any source works). The Databento → Parquet pipeline is in **[scripts/data_prep](scripts/data_prep/README.md)**; **[data/README.md](data/README.md)** has the schema and layout for any other source.
 - **A live market-data source.** The built-in provider polls the **Tradier** API and needs *your own paid Tradier production token* (`TRADIER_TOKEN`; the sandbox won't do). Prefer another vendor? Write a provider that emits `PortfolioSnapshot`s into the engine — the interface is small and swappable.
 - **A live execution gateway.** The built-in one wraps Interactive Brokers' TWS API (**IBJts**), a private SDK not redistributed here — you obtain and compile it yourself. Or implement your own gateway against the ZeroMQ message contract (it runs as a separate process; the engine only speaks ZMQ to it). Live also needs PostgreSQL.
 

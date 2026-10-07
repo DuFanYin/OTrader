@@ -271,11 +271,12 @@ int main(int argc, char* argv[]) {
         double duration_seconds = summary.duration_seconds;
         auto duration_ms = summary.duration_ms;
 
-        // Filter out empty daily_results (no file_path)
+        // Filter out empty daily_results (no file_path) and days whose file failed to load
+        // (their reason is already in result.errors).
         std::vector<backtest::DailyResult> sorted_daily_results;
         sorted_daily_results.reserve(daily_results.size());
         for (const auto& daily : daily_results) {
-            if (!daily.file_path.empty()) {
+            if (!daily.file_path.empty() && !daily.load_failed) {
                 sorted_daily_results.push_back(daily);
             }
         }
@@ -326,6 +327,7 @@ int main(int argc, char* argv[]) {
 
         // Daily Sharpe from daily_returns (net PnL per file, already in file_index order)
         double daily_sharpe = 0.0;
+        std::erase_if(daily_returns, [](double r) { return !std::isfinite(r); });   // failed loads
         if (daily_returns.size() > 1) {
             double mean = 0.0;
             for (double ret : daily_returns)

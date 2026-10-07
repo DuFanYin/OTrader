@@ -32,6 +32,7 @@ struct DailyResult {
     double daily_fees = 0.0;
     size_t file_index = 0;
     std::vector<Metric> file_metrics;
+    bool load_failed = false;  ///< Parquet could not be loaded; reason in result.errors
 };
 
 struct BacktestRunSummary {

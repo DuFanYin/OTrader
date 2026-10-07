@@ -66,9 +66,26 @@ inline auto ArrowTsToChrono(int64_t value, arrow::TimeUnit::type unit) -> Timest
     return Timestamp{d};
 }
 
+/// The column's array. load() combines chunks, so chunk 0 is the whole column.
 inline auto ColumnChunk0(const arrow::Table* table, int col) -> const arrow::Array* {
     auto c = table->column(col);
     return c->num_chunks() > 0 ? c->chunk(0).get() : nullptr;
+}
+
+/// Row i of a string or large_string column (writers differ: pyarrow emits string, polars
+/// large_string); empty for null, out-of-range, or any other type.
+inline auto StringAt(const arrow::Array* arr, int64_t i) -> std::string_view {
+    if ((arr == nullptr) || i < 0 || i >= arr->length() || arr->IsNull(i)) {
+        return {};
+    }
+    switch (arr->type_id()) {
+    case arrow::Type::STRING:
+        return static_cast<const arrow::StringArray*>(arr)->GetView(i);
+    case arrow::Type::LARGE_STRING:
+        return static_cast<const arrow::LargeStringArray*>(arr)->GetView(i);
+    default:
+        return {};
+    }
 }
 
 } // namespace detail
@@ -92,7 +109,10 @@ concept TimestepFramePredicate =
  * zero-erasure callbacks. */
 class ArrowParquetLoader {
   public:
+    /** Read the whole file. Fails (see last_error()) if the file cannot be read or a schema
+     * column has a type the frame readers cannot handle. */
     [[nodiscard]] bool load(std::string const& path, std::string const& time_column = "ts_recv");
+    [[nodiscard]] std::string const& last_error() const { return error_; }
     [[nodiscard]] DataMeta get_meta() const;
     void collect_symbols(std::unordered_set<std::string>& out) const;
 
@@ -195,6 +215,7 @@ class ArrowParquetLoader {
     DataMeta meta_;
     std::shared_ptr<arrow::Table> table_;
     int time_col_index_ = -1;
+    std::string error_;
 };
 
 std::unique_ptr<ArrowParquetLoader> make_parquet_loader();

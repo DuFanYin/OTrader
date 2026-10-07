@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <iomanip>
+#include <limits>
 #include <iostream>
 #include <mutex>
 #include <queue>
@@ -127,7 +128,10 @@ auto BacktestEngine::run() -> BacktestResult {
 
     BacktestDataEngine* data_engine = main_engine_ ? main_engine_->get_data_engine() : nullptr;
     if ((data_engine == nullptr) || !data_engine->has_data()) {
-        result.errors.emplace_back("No data loaded. Call main_engine.load_backtest_data() first.");
+        const std::string why = data_engine != nullptr ? data_engine->load_error() : std::string{};
+        result.errors.emplace_back(
+            why.empty() ? "No data loaded. Call main_engine.load_backtest_data() first."
+                        : "No data loaded: " + why);
         return result;
     }
     core::OptionStrategyEngine* strategy_engine =
@@ -260,6 +264,22 @@ void BacktestEngine::close() {
     }
 }
 
+namespace {
+
+/** A day whose Parquet file could not be loaded: no PnL, the load error in result.errors. */
+auto failed_day(std::string const& path, size_t file_idx, BacktestDataEngine* de) -> DailyResult {
+    DailyResult daily;
+    daily.file_path = path;
+    daily.file_index = file_idx;
+    daily.load_failed = true;
+    const std::string why = de != nullptr ? de->load_error() : std::string{"no data engine"};
+    daily.result.errors.push_back("Cannot load " + path +
+                                  (why.empty() ? std::string{} : ": " + why));
+    return daily;
+}
+
+} // namespace
+
 BacktestRunSummary
 run_backtest_multi(const std::vector<std::string>& parquet_files, const std::string& strategy_name,
                    double fee_rate, double slippage_bps, double risk_free_rate,
@@ -305,6 +325,11 @@ run_backtest_multi(const std::vector<std::string>& parquet_files, const std::str
             file_metrics.push_back(m);
         });
         file_engine.load_backtest_data(parquet_files[file_idx]);
+        if (auto* de = file_engine.data_engine(); (de == nullptr) || !de->has_data()) {
+            daily_results[file_idx] = failed_day(parquet_files[file_idx], file_idx, de);
+            daily_returns[file_idx] = std::numeric_limits<double>::quiet_NaN();   // not a 0-PnL day
+            return;
+        }
         file_engine.add_strategy(strategy_name, strategy_setting);
         if (auto* me = file_engine.main_engine()) {
             if (auto* de = me->get_data_engine()) {
@@ -391,6 +416,14 @@ run_backtest_multi(const std::vector<std::string>& parquet_files, const std::str
                     file_metrics.push_back(m);
                 });
                 file_engine.load_backtest_data(parquet_files[file_idx]);
+                if (auto* de = file_engine.data_engine(); (de == nullptr) || !de->has_data()) {
+                    // An exception escaping this jthread would std::terminate the process.
+                    std::lock_guard<std::mutex> lock(results_mutex);
+                    daily_results[file_idx] = failed_day(parquet_files[file_idx], file_idx, de);
+                    daily_returns[file_idx] = std::numeric_limits<double>::quiet_NaN();
+                    completed_count.fetch_add(1);
+                    continue;
+                }
                 file_engine.add_strategy(strategy_name, strategy_setting);
                 if (auto* me = file_engine.main_engine()) {
                     if (auto* de = me->get_data_engine()) {

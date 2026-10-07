@@ -41,7 +41,8 @@ Otrader/           the engine — the only buildable C++ target
   entry/           entry_system.cpp + run_live.cpp (single live runtime) + entry_modes.hpp
   proto/           .proto sources (the .pb.* are generated at build time)
 app/               backend/ (FastAPI + gRPC bridge, self-contained uv project) · frontend/ (Next.js)
-doc/               design docs (cn/, en/)   scripts/  dev/test/lint helpers   data/  user data (see data/README.md)
+doc/               design docs (cn/, en/)   data/  user data (see data/README.md)
+scripts/           dev/test/lint helpers · data_prep/ (Databento DBN -> backtest Parquet)
 ```
 
 ## How the engine fits together

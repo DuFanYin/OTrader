@@ -63,6 +63,7 @@ if(TARGET backtest_engines)
   otrader_add_gtest(test_backtest_dispatch_order_contract_gtest
                     test_backtest_dispatch_order_contract.cpp
                     backtest_engines)
+  otrader_add_gtest(test_parquet_loader_gtest test_parquet_loader.cpp backtest_engines)
 endif()
 
 # 聚合 target：test_gtest.sh 一次构建所有 GTest 可执行文件

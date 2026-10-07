@@ -33,11 +33,47 @@ auto TsToIso(Timestamp ts) -> std::string {
 
 } // namespace
 
+// Column types the frame readers cast to (engine_data_historical.cpp). A column in the wrong
+// type would be static_cast to the wrong Arrow array class, so it is rejected at load.
+auto CheckSchema(Schema const& schema, std::string const& time_column) -> std::string {
+    const auto require = [&](std::string const& name, std::initializer_list<Type::type> ok,
+                             bool required) -> std::string {
+        const auto field = schema.GetFieldByName(name);
+        if (!field) {
+            return required ? "missing column '" + name + "'" : std::string{};
+        }
+        const Type::type id = field->type()->id();
+        if (std::ranges::find(ok, id) == ok.end()) {
+            return "column '" + name + "' has type " + field->type()->ToString();
+        }
+        return {};
+    };
+    for (auto const& problem : {
+             require(time_column, {Type::TIMESTAMP}, true),
+             require("symbol", {Type::STRING, Type::LARGE_STRING}, true),
+             require("bid_px", {Type::DOUBLE}, false),
+             require("ask_px", {Type::DOUBLE}, false),
+             require("bid_sz", {Type::INT64}, false),
+             require("ask_sz", {Type::INT64}, false),
+             require("underlying_bid_px", {Type::DOUBLE}, false),
+             require("underlying_ask_px", {Type::DOUBLE}, false),
+             require("underlying_bid_sz", {Type::INT64}, false),
+             require("underlying_ask_sz", {Type::INT64}, false),
+         }) {
+        if (!problem.empty()) {
+            return problem;
+        }
+    }
+    return {};
+}
+
 bool ArrowParquetLoader::load(std::string const& path, std::string const& time_column) {
+    meta_ = DataMeta{};
     meta_.path = path;
     meta_.time_column = time_column;
     table_.reset();
     time_col_index_ = -1;
+    error_.clear();
 
     std::string resolved = path;
     if (!std::filesystem::path(path).is_absolute()) {
@@ -52,6 +88,7 @@ bool ArrowParquetLoader::load(std::string const& path, std::string const& time_c
     std::shared_ptr<io::MemoryMappedFile> infile;
     auto status = io::MemoryMappedFile::Open(resolved, io::FileMode::READ);
     if (!status.ok()) {
+        error_ = "cannot open " + resolved + ": " + status.status().ToString();
         return false;
     }
     infile = *status;
@@ -59,6 +96,7 @@ bool ArrowParquetLoader::load(std::string const& path, std::string const& time_c
     // Parquet reader
     auto reader_result = OpenFile(infile, default_memory_pool());
     if (!reader_result.ok()) {
+        error_ = "not a Parquet file: " + reader_result.status().ToString();
         return false;
     }
     std::unique_ptr<FileReader> reader = std::move(reader_result).ValueOrDie();
@@ -67,16 +105,22 @@ bool ArrowParquetLoader::load(std::string const& path, std::string const& time_c
     std::shared_ptr<Table> table;
     PARQUET_THROW_NOT_OK(reader->ReadTable(&table));
     if (!table) {
+        error_ = "empty table";
         return false;
     }
-    table_ = table;
+    if (error_ = CheckSchema(*table->schema(), time_column); !error_.empty()) {
+        return false;
+    }
+    // Readers index rows 0..num_rows-1 on chunk 0 of every column; make that the whole column.
+    auto combined = table->CombineChunks(default_memory_pool());
+    if (!combined.ok()) {
+        error_ = "cannot combine chunks: " + combined.status().ToString();
+        return false;
+    }
+    table_ = *combined;
 
     meta_.row_count = table_->num_rows();
-    auto* schema = table_->schema().get();
-    time_col_index_ = schema->GetFieldIndex(time_column);
-    if (time_col_index_ < 0) {
-        return false;
-    }
+    time_col_index_ = table_->schema()->GetFieldIndex(time_column);
 
     if (meta_.row_count > 0) {
         const Array* ts_arr = detail::ColumnChunk0(table_.get(), time_col_index_);
@@ -102,18 +146,14 @@ void ArrowParquetLoader::collect_symbols(std::unordered_set<std::string>& out) c
         return;
     }
     const Array* arr = detail::ColumnChunk0(table_.get(), col_sym);
-    if ((arr == nullptr) || arr->type_id() != Type::STRING || arr->null_count() == arr->length()) {
+    if ((arr == nullptr) || arr->null_count() == arr->length()) {
         return;
     }
-    const auto* str_arr = static_cast<const StringArray*>(arr);
     const int64_t n = arr->length();
     for (int64_t i = 0; i < n; ++i) {
-        if (arr->IsNull(i)) {
-            continue;
-        }
-        std::string s = str_arr->GetString(i);
+        const std::string_view s = detail::StringAt(arr, i);
         if (!s.empty()) {
-            out.insert(std::move(s));
+            out.emplace(s);
         }
     }
 }

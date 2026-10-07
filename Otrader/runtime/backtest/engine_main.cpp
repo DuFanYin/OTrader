@@ -64,7 +64,13 @@ auto MainEngine::load_backtest_data(const std::string& parquet_path,
         data_engine_ = std::make_unique<BacktestDataEngine>(this);
     }
     data_engine_->load_parquet(parquet_path, "ts_recv", underlying_symbol);
-    put_log_intent("Backtest data loaded from: " + parquet_path, INFO);
+    if (data_engine_->has_data()) {
+        put_log_intent("Backtest data loaded from: " + parquet_path, INFO);
+    } else {
+        put_log_intent("Backtest data NOT loaded from " + parquet_path + ": " +
+                           data_engine_->load_error(),
+                       ERROR);
+    }
     return data_engine_.get();
 }
 

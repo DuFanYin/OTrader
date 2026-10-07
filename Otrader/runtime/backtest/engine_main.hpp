@@ -19,6 +19,7 @@ class BacktestDataEngine;
 class MainEngine : public runtime_common::MainEngineBase {
   public:
     static constexpr int INFO = 20;
+    static constexpr int ERROR = 40;
 
     MainEngine();
     ~MainEngine() override;

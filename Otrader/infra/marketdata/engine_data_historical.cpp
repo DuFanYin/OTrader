@@ -36,10 +36,7 @@ template <std::integral T> auto get_int64(const Array* arr, int64_t i) -> T {
     return static_cast<T>(static_cast<const Int64Array*>(arr)->Value(i));
 }
 auto get_symbol(const Array* arr_sym, int64_t i) -> std::string {
-    if ((arr_sym == nullptr) || arr_sym->type_id() != Type::STRING || arr_sym->IsNull(i)) {
-        return {};
-    }
-    return static_cast<const StringArray*>(arr_sym)->GetString(i);
+    return std::string(backtest::detail::StringAt(arr_sym, i));
 }
 
 } // namespace
@@ -88,6 +85,7 @@ void BacktestDataEngine::load_parquet(std::string const& rel_path, std::string c
     }
 
     if (!loader_->load(rel_path, time_column)) {
+        write_log("Failed to load " + rel_path + ": " + loader_->last_error(), 40);
         return;
     }
 
