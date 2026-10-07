@@ -99,8 +99,8 @@ auto OptionStrategyTemplate::option_order(
         return engine_->get_contract(s);
     };
     try {
-        auto [legs, sig] = utilities::combo::build_combo(option_data, combo_type, direction,
-                                                         static_cast<int>(volume), opts);
+        auto [legs, sig] =
+            utilities::combo::build_combo(option_data, combo_type, direction, opts);
         return engine_->send_combo_order(strategy_name_, combo_type, sig, direction, price, volume,
                                          legs, order_type);
     } catch (const std::exception& e) {
@@ -154,12 +154,29 @@ void OptionStrategyTemplate::close_all_strategy_positions() {
                 option_data[pos.symbol] = &it->second;
             }
         }
-        if (!option_data.empty()) {
-            utilities::Direction dir =
-                pos.quantity > 0 ? utilities::Direction::SHORT : utilities::Direction::LONG;
-            utilities::ComboType ct = pos.combo_type.value_or(utilities::ComboType::SINGLE_LEG);
-            option_order(ct, option_data, dir, 0.0, std::abs(static_cast<double>(pos.quantity)),
+        if (option_data.empty()) {
+            continue;
+        }
+        utilities::Direction dir =
+            pos.quantity > 0 ? utilities::Direction::SHORT : utilities::Direction::LONG;
+        const double volume = std::abs(static_cast<double>(pos.quantity));
+        if (pos.legs.empty()) {
+            option_order(utilities::ComboType::SINGLE_LEG, option_data, dir, 0.0, volume,
                          utilities::OrderType::MARKET);
+            continue;
+        }
+        // Multi-leg: close every leg against its own side (typed builders would need role keys
+        // and set leg sides from `dir`). The position engine matches the CUSTOM close by legs.
+        utilities::combo::ComboBuildOptions opts;
+        opts.get_contract = [this](const std::string& s) -> const utilities::ContractData* {
+            return engine_->get_contract(s);
+        };
+        try {
+            auto [legs, sig] = utilities::combo::build_closing_combo(pos, option_data, opts);
+            engine_->send_combo_order(strategy_name_, utilities::ComboType::CUSTOM, sig, dir, 0.0,
+                                      volume, legs, utilities::OrderType::MARKET);
+        } catch (const std::exception& e) {
+            engine_->write_log(std::string("[Combo] ") + e.what(), 0);
         }
     }
     if (holding_->underlyingPosition.quantity != 0 && (underlying_ != nullptr)) {

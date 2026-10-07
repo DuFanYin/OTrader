@@ -195,6 +195,8 @@ struct BasePosition {
     std::string symbol;
     int quantity = 0;
     double avg_cost = 0.0;
+    /// avg_cost * quantity * multiplier, signed like current_value(): negative for a short
+    /// (premium received), so unrealized PnL = current_value() - cost_value for both sides.
     double cost_value = 0.0;
     double realized_pnl = 0.0;
     double mid_price = 0.0;

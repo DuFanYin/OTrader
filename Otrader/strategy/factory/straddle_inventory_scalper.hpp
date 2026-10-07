@@ -36,6 +36,7 @@ class StraddleInventoryScalperStrategy final : public OptionStrategyTemplate {
     void try_enter_atm_straddle();
     void enter_straddle(utilities::OptionData* call, utilities::OptionData* put);
     void check_exit();
+    void exit_straddle(const std::string& reason);
 
     std::vector<std::string> chain_symbols_;
     std::deque<double> underlying_mid_history_;
@@ -45,6 +46,8 @@ class StraddleInventoryScalperStrategy final : public OptionStrategyTemplate {
     int minutes_elapsed_ = 0;
     int entry_minute_ = -1;
     double entry_straddle_cost_ = 0.0;
+    utilities::OptionData* entry_call_ = nullptr; // legs actually held; ATM moves after entry
+    utilities::OptionData* entry_put_ = nullptr;
     int last_exit_minute_ = -999;
     int trade_count_ = 0;
 

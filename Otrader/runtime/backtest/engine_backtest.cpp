@@ -33,6 +33,22 @@ std::string ts_to_iso(Timestamp ts) {
     return os.str();
 }
 
+/** A day that produced no backtest (file not loadable / never run): reason in result.errors.
+ * Excluded from num_days and the return series by the entry point. */
+auto failed_day(std::string const& path, size_t file_idx, std::string reason) -> DailyResult {
+    DailyResult daily;
+    daily.file_path = path;
+    daily.file_index = file_idx;
+    daily.load_failed = true;
+    daily.result.errors.push_back(std::move(reason));
+    return daily;
+}
+
+auto load_failure(std::string const& path, BacktestDataEngine const* de) -> std::string {
+    const std::string why = de != nullptr ? de->load_error() : std::string{"no data engine"};
+    return "Cannot load " + path + (why.empty() ? std::string{} : ": " + why);
+}
+
 } // namespace
 
 BacktestEngine::BacktestEngine()
@@ -264,22 +280,6 @@ void BacktestEngine::close() {
     }
 }
 
-namespace {
-
-/** A day whose Parquet file could not be loaded: no PnL, the load error in result.errors. */
-auto failed_day(std::string const& path, size_t file_idx, BacktestDataEngine* de) -> DailyResult {
-    DailyResult daily;
-    daily.file_path = path;
-    daily.file_index = file_idx;
-    daily.load_failed = true;
-    const std::string why = de != nullptr ? de->load_error() : std::string{"no data engine"};
-    daily.result.errors.push_back("Cannot load " + path +
-                                  (why.empty() ? std::string{} : ": " + why));
-    return daily;
-}
-
-} // namespace
-
 BacktestRunSummary
 run_backtest_multi(const std::vector<std::string>& parquet_files, const std::string& strategy_name,
                    double fee_rate, double slippage_bps, double risk_free_rate,
@@ -326,8 +326,9 @@ run_backtest_multi(const std::vector<std::string>& parquet_files, const std::str
         });
         file_engine.load_backtest_data(parquet_files[file_idx]);
         if (auto* de = file_engine.data_engine(); (de == nullptr) || !de->has_data()) {
-            daily_results[file_idx] = failed_day(parquet_files[file_idx], file_idx, de);
-            daily_returns[file_idx] = std::numeric_limits<double>::quiet_NaN();   // not a 0-PnL day
+            daily_results[file_idx] = failed_day(parquet_files[file_idx], file_idx,
+                                                 load_failure(parquet_files[file_idx], de));
+            daily_returns[file_idx] = std::numeric_limits<double>::quiet_NaN(); // not a 0-PnL day
             return;
         }
         file_engine.add_strategy(strategy_name, strategy_setting);
@@ -419,7 +420,8 @@ run_backtest_multi(const std::vector<std::string>& parquet_files, const std::str
                 if (auto* de = file_engine.data_engine(); (de == nullptr) || !de->has_data()) {
                     // An exception escaping this jthread would std::terminate the process.
                     std::lock_guard<std::mutex> lock(results_mutex);
-                    daily_results[file_idx] = failed_day(parquet_files[file_idx], file_idx, de);
+                    daily_results[file_idx] = failed_day(parquet_files[file_idx], file_idx,
+                                                         load_failure(parquet_files[file_idx], de));
                     daily_returns[file_idx] = std::numeric_limits<double>::quiet_NaN();
                     completed_count.fetch_add(1);
                     continue;
@@ -456,8 +458,19 @@ run_backtest_multi(const std::vector<std::string>& parquet_files, const std::str
             threads.reserve(num_engines);
             for (int i = 0; i < num_engines; ++i)
                 threads.emplace_back(worker, i);
+            // Join explicitly: ~jthread() calls request_stop() before joining, which made each
+            // worker quit after its current file and silently dropped the remaining days.
+            for (auto& t : threads)
+                t.join();
         }
         overall_end_time = std::chrono::system_clock::now();
+        for (size_t i = 0; i < daily_results.size(); ++i) {
+            if (daily_results[i].file_path.empty()) { // never picked up: report, don't drop
+                daily_results[i] =
+                    failed_day(parquet_files[i], i, "Not processed: " + parquet_files[i]);
+                daily_returns[i] = std::numeric_limits<double>::quiet_NaN();
+            }
+        }
 
         // Merge per-file metrics in file_index order
         size_t reserve_total = 0;

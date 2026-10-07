@@ -132,5 +132,85 @@ TEST(PositionEngineInvariants, ComboOrderRoutesHeadAndLegTrades) {
     EXPECT_TRUE(found_leg);
 }
  
+
+static utilities::OrderData make_combo_order(std::string orderid, std::string symbol,
+                                             utilities::ComboType type,
+                                             std::vector<std::string> const& leg_symbols) {
+    utilities::OrderData o;
+    o.orderid = std::move(orderid);
+    o.symbol = std::move(symbol);
+    o.is_combo = true;
+    o.combo_type = type;
+    std::vector<utilities::Leg> legs;
+    int con_id = 1;
+    for (auto const& sym : leg_symbols) {
+        utilities::Leg l;
+        l.con_id = con_id++;
+        l.exchange = utilities::Exchange::LOCAL;
+        l.ratio = 1;
+        l.direction = Direction::LONG;
+        l.symbol = sym;
+        legs.push_back(l);
+    }
+    o.legs = legs;
+    return o;
+}
+
+// A straddle opened as "straddle_<sig>" and closed by close_all_strategy_positions as
+// "custom_<sig>" (legs listed in another order) must close the same position. Previously the
+// type round-trip parsed as CUSTOM and the close opened a second, short combo: quantity never
+// reached 0 and the short's cost counted the premium received as paid.
+TEST(PositionEngineInvariants, ComboClosedUnderAnotherPrefixClosesSamePosition) {
+    engines::PositionEngine pe;
+    const std::string strat = "s1";
+    const std::string call = "SPXW-20250804-CALL-6325-100";
+    const std::string put = "SPXW-20250804-PUT-6325-100";
+
+    auto open = make_combo_order("OID-1", "straddle_SIG", utilities::ComboType::STRADDLE,
+                                 {call, put});
+    pe.process_order_event(strat, open);
+    pe.process_trade_event("",
+                           make_trade("OID-1", "T1", "straddle_SIG", Direction::LONG, 31.20, 1));
+    pe.process_trade_event("", make_trade("OID-1", "T1-0", call, Direction::LONG, 3.50, 1));
+    pe.process_trade_event("", make_trade("OID-1", "T1-1", put, Direction::LONG, 27.70, 1));
+
+    auto close =
+        make_combo_order("OID-2", "custom_SIG", utilities::ComboType::CUSTOM, {put, call});
+    pe.process_order_event(strat, close);
+    pe.process_trade_event("",
+                           make_trade("OID-2", "T2", "custom_SIG", Direction::SHORT, 28.50, 1));
+    pe.process_trade_event("", make_trade("OID-2", "T2-0", put, Direction::SHORT, 24.60, 1));
+    pe.process_trade_event("", make_trade("OID-2", "T2-1", call, Direction::SHORT, 3.90, 1));
+
+    const auto& h = pe.get_holding(strat);
+    ASSERT_EQ(h.optionPositions.size(), 1U);
+    const auto& pos = h.optionPositions.begin()->second;
+    ASSERT_TRUE(pos.combo_type.has_value());
+    EXPECT_EQ(*pos.combo_type, utilities::ComboType::STRADDLE);
+    EXPECT_EQ(pos.quantity, 0);
+    double realized = 0.0;
+    for (const auto& leg : pos.legs) {
+        EXPECT_EQ(leg.quantity, 0) << leg.symbol;
+        realized += leg.realized_pnl;
+    }
+    // (24.60 - 27.70 + 3.90 - 3.50) * 100
+    EXPECT_NEAR(realized, -270.0, 1e-9);
+}
+
+// cost_value is signed like current_value(): a short's premium is a credit, so
+// unrealized = current_value() - cost_value is right for both directions.
+TEST(PositionEngineInvariants, ShortCostValueIsSignedSoUnrealizedPnlIsCorrect) {
+    engines::PositionEngine pe;
+    const std::string strat = "s1";
+    const std::string sym = "SPXW_20250804C05000000";
+    pe.process_trade_event(strat, make_trade("OID", "T1", sym, Direction::SHORT, 2.00, 1));
+
+    auto& pos = pe.get_holding(strat).optionPositions.at(sym);
+    EXPECT_EQ(pos.quantity, -1);
+    EXPECT_DOUBLE_EQ(pos.cost_value, -200.0);
+    pos.mid_price = 1.50; // option fell: the short made 50
+    EXPECT_DOUBLE_EQ(pos.current_value() - pos.cost_value, 50.0);
+}
+
 } // namespace
 

@@ -6,6 +6,8 @@
 
 #include "engine_position.hpp"
 #include "otrader_engine.pb.h"
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <sstream>
 #include <stdexcept>
@@ -24,7 +26,13 @@ inline auto round_digits(double value, int digits) -> double {
     return rounded / factor;
 }
 
-auto combo_type_from_string(const std::string& s) -> utilities::ComboType {
+// Accepts the enum name ("STRADDLE", proto / JSON) and utilities::to_string() ("straddle", stored
+// in OrderMeta by process_order). Before both were accepted, every combo position parsed as CUSTOM.
+auto combo_type_from_string(const std::string& raw) -> utilities::ComboType {
+    std::string s = raw;
+    for (char& c : s) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
     if (s == "SINGLE_LEG") {
         return utilities::ComboType::SINGLE_LEG;
     }
@@ -122,7 +130,8 @@ void msg_to_base_position(const otrader::BasePositionMsg& msg, utilities::BasePo
     pos->symbol = msg.symbol();
     pos->quantity = msg.quantity();
     pos->avg_cost = msg.avg_cost();
-    pos->cost_value = msg.cost_value();
+    // Recomputed (signed) rather than trusted: older snapshots stored |cost| for shorts.
+    pos->cost_value = round_digits(pos->avg_cost * pos->quantity * pos->multiplier, 2);
     pos->realized_pnl = msg.realized_pnl();
     pos->mid_price = msg.mid_price();
     pos->delta = msg.delta();
@@ -150,7 +159,7 @@ void option_msg_to_option_position(const otrader::OptionPositionMsg& om,
     opt->symbol = om.symbol();
     opt->quantity = om.quantity();
     opt->avg_cost = om.avg_cost();
-    opt->cost_value = om.cost_value();
+    opt->cost_value = round_digits(opt->avg_cost * opt->quantity * opt->multiplier, 2);
     opt->realized_pnl = om.realized_pnl();
     opt->mid_price = om.mid_price();
     opt->delta = om.delta();
@@ -323,6 +332,30 @@ auto PositionEngine::get_or_create_option_position(
         return &it->second;
     }
 
+    // Same legs = same position, whatever the combo prefix: a closing order may carry another
+    // ComboType (e.g. close_all_strategy_positions on a position parsed as CUSTOM).
+    if (legs_meta != nullptr && !legs_meta->empty()) {
+        std::vector<std::string> want;
+        for (const auto& m : *legs_meta) {
+            auto sym_it = m.find("symbol");
+            want.push_back(sym_it != m.end() ? sym_it->second : "");
+        }
+        std::ranges::sort(want);
+        for (auto& kv : holding.optionPositions) {
+            if (!kv.second.combo_type.has_value() || kv.second.legs.size() != want.size()) {
+                continue;
+            }
+            std::vector<std::string> have;
+            for (const auto& leg : kv.second.legs) {
+                have.push_back(leg.symbol);
+            }
+            std::ranges::sort(have);
+            if (have == want) {
+                return &kv.second;
+            }
+        }
+    }
+
     std::string norm = normalize_combo_symbol(symbol);
     for (auto& kv : holding.optionPositions) {
         if (kv.second.combo_type.has_value() && normalize_combo_symbol(kv.first) == norm) {
@@ -377,7 +410,7 @@ void PositionEngine::apply_position_change(utilities::BasePosition* pos,
                 (pos->avg_cost * std::abs(prev_qty) + trade.price * qty) / total_qty, 2);
         }
         pos->quantity += signed_qty;
-        pos->cost_value = round_digits(pos->avg_cost * std::abs(pos->quantity) * multiplier, 2);
+        pos->cost_value = round_digits(pos->avg_cost * pos->quantity * multiplier, 2);
         return;
     }
 
@@ -393,14 +426,14 @@ void PositionEngine::apply_position_change(utilities::BasePosition* pos,
         pos->cost_value = 0.0;
     } else {
         pos->quantity = (prev_qty > 0 ? 1 : -1) * new_qty;
-        pos->cost_value = round_digits(pos->avg_cost * std::abs(pos->quantity) * multiplier, 2);
+        pos->cost_value = round_digits(pos->avg_cost * pos->quantity * multiplier, 2);
     }
 
     int extra = qty - close_qty;
     if (extra > 0) {
         pos->avg_cost = round_digits(trade.price, 2);
         pos->quantity = (signed_qty > 0 ? 1 : -1) * extra;
-        pos->cost_value = round_digits(pos->avg_cost * std::abs(pos->quantity) * multiplier, 2);
+        pos->cost_value = round_digits(pos->avg_cost * pos->quantity * multiplier, 2);
     }
 }
 
@@ -495,9 +528,9 @@ auto PositionEngine::accumulate_option_position(utilities::OptionPositionData& o
 
     if (opt.quantity != 0) {
         opt.mid_price = round_digits(current_value / (std::abs(opt.quantity) * opt.multiplier), 2);
-        if (opt.cost_value > 0) {
-            opt.avg_cost =
-                round_digits(opt.cost_value / (std::abs(opt.quantity) * opt.multiplier), 2);
+        if (opt.cost_value != 0.0) {
+            const double units = std::abs(opt.quantity) * opt.multiplier;
+            opt.avg_cost = round_digits(std::abs(opt.cost_value) / units, 2);
         }
     }
 

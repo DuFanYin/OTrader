@@ -64,5 +64,21 @@ TEST(PositionEngineDataflow, SerializeLoadRoundTripPreservesKeyFields) {
     EXPECT_DOUBLE_EQ(it2->second.multiplier, o_mult);
 }
 
+
+// Snapshots written before cost_value became signed hold |cost| for shorts; load recomputes it.
+TEST(PositionEngineDataflow, LoadRecomputesSignedCostForShorts) {
+    engines::PositionEngine pe;
+    const std::string strat = "s1";
+    pe.process_trade_event(strat, make_trade("OID-O", "TID-O1", "SPXW_20250804C05000000",
+                                            Direction::SHORT, 2.00, 3));
+    std::string blob = pe.serialize_holding(strat);
+
+    engines::PositionEngine pe2;
+    pe2.load_serialized_holding(strat, blob);
+    const auto& pos = pe2.get_holding(strat).optionPositions.at("SPXW_20250804C05000000");
+    EXPECT_EQ(pos.quantity, -3);
+    EXPECT_DOUBLE_EQ(pos.cost_value, -600.0);
+}
+
 } // namespace
 

@@ -146,6 +146,8 @@ void StraddleInventoryScalperStrategy::enter_straddle(utilities::OptionData* cal
                             0.0, 1.0, utilities::OrderType::MARKET);
     if (!ids.empty()) {
         entry_straddle_cost_ = call->mid_price + put->mid_price;
+        entry_call_ = call;
+        entry_put_ = put;
         entry_minute_ = minutes_elapsed_;
         trade_count_++;
         write_log("Entered 0DTE straddle cost=" + std::to_string(entry_straddle_cost_) +
@@ -167,7 +169,8 @@ void StraddleInventoryScalperStrategy::try_enter_atm_straddle() {
 
 void StraddleInventoryScalperStrategy::check_exit() {
     auto* h = holding();
-    if (h == nullptr || entry_minute_ < 0 || entry_straddle_cost_ <= 0.0) {
+    if (h == nullptr || entry_minute_ < 0 || entry_straddle_cost_ <= 0.0 ||
+        entry_call_ == nullptr || entry_put_ == nullptr) {
         return;
     }
     bool has_straddle = false;
@@ -181,49 +184,39 @@ void StraddleInventoryScalperStrategy::check_exit() {
         return;
     }
 
-    auto opt = get_atm_call_put_or_null();
-    if (!opt) {
-        return;
-    }
-    auto [call, put] = *opt;
-    double current_mark = call->mid_price + put->mid_price;
+    // Mark the straddle we hold, not the current ATM one (the strike moves with the underlying).
+    double current_mark = entry_call_->mid_price + entry_put_->mid_price;
     double pnl_pct = (current_mark - entry_straddle_cost_) / entry_straddle_cost_ * 100.0;
     int hold_minutes = minutes_elapsed_ - entry_minute_;
 
     if (pnl_pct >= profit_target_pct_) {
-        write_log("Exit: profit target " + std::to_string(pnl_pct) + "%");
-        close_all_strategy_positions();
-        entry_minute_ = -1;
-        entry_straddle_cost_ = 0.0;
-        last_exit_minute_ = minutes_elapsed_;
+        exit_straddle("profit target " + std::to_string(pnl_pct) + "%");
         return;
     }
     if (hold_minutes >= profit_target_short_min_ && hold_minutes <= profit_target_short_max_ &&
         pnl_pct >= profit_target_short_pct_) {
-        write_log("Exit: short-window profit " + std::to_string(pnl_pct) + "% at " +
-                  std::to_string(hold_minutes) + " min");
-        close_all_strategy_positions();
-        entry_minute_ = -1;
-        entry_straddle_cost_ = 0.0;
-        last_exit_minute_ = minutes_elapsed_;
+        exit_straddle("short-window profit " + std::to_string(pnl_pct) + "% at " +
+                      std::to_string(hold_minutes) + " min");
         return;
     }
     if (hold_minutes >= time_stop_minutes_) {
-        write_log("Exit: time stop at " + std::to_string(hold_minutes) +
-                  " min, pnl=" + std::to_string(pnl_pct) + "%");
-        close_all_strategy_positions();
-        entry_minute_ = -1;
-        entry_straddle_cost_ = 0.0;
-        last_exit_minute_ = minutes_elapsed_;
+        exit_straddle("time stop at " + std::to_string(hold_minutes) +
+                      " min, pnl=" + std::to_string(pnl_pct) + "%");
         return;
     }
     if (pnl_pct <= -loss_stop_pct_) {
-        write_log("Exit: loss stop " + std::to_string(pnl_pct) + "%");
-        close_all_strategy_positions();
-        entry_minute_ = -1;
-        entry_straddle_cost_ = 0.0;
-        last_exit_minute_ = minutes_elapsed_;
+        exit_straddle("loss stop " + std::to_string(pnl_pct) + "%");
     }
+}
+
+void StraddleInventoryScalperStrategy::exit_straddle(const std::string& reason) {
+    write_log("Exit: " + reason);
+    close_all_strategy_positions();
+    entry_minute_ = -1;
+    entry_straddle_cost_ = 0.0;
+    entry_call_ = nullptr;
+    entry_put_ = nullptr;
+    last_exit_minute_ = minutes_elapsed_;
 }
 
 void StraddleInventoryScalperStrategy::on_timer_logic() {
