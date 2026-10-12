@@ -1,0 +1,47 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "BUILD_BACKTEST": "ON",
+        "BUILD_TESTS": "ON",
+        "BUILD_LIVE_GRPC": "ON",
+        "BUILD_MARKETDATA": "ON",
+        "BUILD_GATEWAY": "OFF",
+        "BUILD_ANALYTICS": "ON"
+      }
+    },
+    {
+      "name": "linux",
+      "displayName": "Linux (GCC + Ubuntu packages)",
+      "inherits": "base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_COMPILER": "g++"
+      }
+    },
+    {
+      "name": "linux-gateway",
+      "displayName": "Linux with IB gateway",
+      "inherits": "linux",
+      "cacheVariables": { "BUILD_GATEWAY": "ON" }
+    },
+    {
+      "name": "linux-debug",
+      "displayName": "Linux Debug",
+      "inherits": "linux",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "linux", "configurePreset": "linux", "targets": ["optra_main"] },
+    { "name": "linux-gateway", "configurePreset": "linux-gateway", "targets": ["optra_main"] },
+    { "name": "linux-debug", "configurePreset": "linux-debug", "targets": ["optra_main"] }
+  ]
+}

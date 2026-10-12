@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; font-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
+<title>Optra architecture · dufanyin</title>
+<meta name="description" content="Architecture of Optra, an options trading and research system: one engine for backtest and live trading, one server with one API for the page and for agents, the numerics both share, cut at gRPC into a control plane and a core.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="/favicon.ico">
+<style>
+:root {
+  color-scheme: light dark;
+  --paper: #ffffff;
+  --text: #111111;
+  --text-2: #555555;
+  --dim: #8a8a8a;
+  --line: #9a9a9a;
+  --rule: #e6e6e6;
+  --box: #fafafa;
+  --control: #c2410c;
+  --core: #1d4ed8;
+  --infra: #15803d;
+  --planned: #a16207;
+  --lab: #6d28d9;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #111111;
+    --text: #ededed;
+    --text-2: #a8a8a8;
+    --dim: #777777;
+    --line: #6e6e6e;
+    --rule: #262626;
+    --box: #161616;
+    --control: #f0916a;
+    --core: #7aa7f7;
+    --infra: #6cc28c;
+    --planned: #d8b25a;
+    --lab: #ae8cf2;
+  }
+}
+* { box-sizing: border-box; }
+html, body { background: var(--paper); }
+body { margin: 0; color: var(--text); font: 16px/1.6 var(--sans); -webkit-font-smoothing: antialiased; }
+main { max-width: 72rem; margin: 0 auto; padding: 32px 16px 80px; }
+@media (min-width: 640px) { main { padding: 48px 32px 96px; } }
+a { color: inherit; }
+.home { color: var(--dim); text-decoration: none; font-size: 14px; }
+.home:hover { color: var(--text); }
+
+header { max-width: 42rem; }
+.eyebrow { margin: 40px 0 4px; color: var(--dim); font-size: 13px; letter-spacing: .08em;
+  text-transform: uppercase; }
+h1 { margin: 0 0 16px; font-size: clamp(32px, 5vw, 44px); font-weight: 600; line-height: 1.1;
+  letter-spacing: -.02em; }
+.lead { margin: 0; color: var(--text-2); font-size: 17px; }
+.lead a { text-underline-offset: 3px; text-decoration-color: var(--line); }
+.lead a:hover { text-decoration-color: var(--text); }
+
+.legend { display: flex; flex-wrap: wrap; gap: 4px 22px; margin: 24px 0 0; padding: 0; list-style: none;
+  color: var(--text-2); font-size: 14px; }
+.legend li { display: inline-flex; align-items: center; gap: 8px; }
+.legend .swatch { width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
+.legend .dash { width: 16px; border-top: 1.5px dashed var(--planned); }
+
+.diagram { margin: 24px -16px 0; padding: 4px 16px 8px; overflow-x: auto; }
+.frame { position: relative; min-width: 860px; }
+svg#arch { display: block; width: 100%; min-width: 860px; height: auto; }
+.hint { margin: 8px 0 0; color: var(--dim); font-size: 13px; }
+.hint .narrow { display: none; }
+@media (max-width: 924px) { .hint .narrow { display: inline; } }
+.hint .js-only { display: none; }
+.arch-live .hint .js-only { display: inline; }
+
+.notes { margin: 56px 0 0; padding-top: 32px; border-top: 1px solid var(--rule); }
+.notes h2 { margin: 0 0 20px; color: var(--dim); font-size: 13px; font-weight: 400; letter-spacing: .08em;
+  text-transform: uppercase; }
+.notes ul { display: grid; grid-template-columns: 1fr; gap: 24px 48px; margin: 0; padding: 0;
+  list-style: none; }
+@media (min-width: 720px) { .notes ul { grid-template-columns: 1fr 1fr; } }
+.notes h3 { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
+.notes p { margin: 0; color: var(--text-2); font-size: 15px; }
+
+/* The diagram: thin lines; a group shows only in its boxes' outline and its label. */
+#arch text { font-family: var(--sans); }
+.box { fill: var(--box); stroke: var(--line); stroke-width: 1; }
+.box.control { stroke: var(--control); }
+.box.core { stroke: var(--core); }
+.box.infra { stroke: var(--infra); }
+.box.lab { stroke: var(--lab); }
+.box.frame { fill: none; }
+.group { font-size: 11px; letter-spacing: .1em; }
+.group .dot { font-size: 8px; }
+.group.control { fill: var(--control); }
+.group.core { fill: var(--core); }
+.group.infra { fill: var(--infra); }
+.group.lab { fill: var(--lab); }
+.end { text-anchor: end; }
+.title { font-size: 14.5px; font-weight: 600; fill: var(--text); text-anchor: middle; }
+.sub { font-size: 12px; fill: var(--text-2); text-anchor: middle; }
+.flow { font-size: 11.5px; fill: var(--dim); }
+.planned-label { font-size: 11.5px; fill: var(--planned); }
+.note { font-size: 12px; fill: var(--dim); }
+.arrow, .planned { fill: none; stroke-width: 1; stroke-linecap: round; stroke-linejoin: round; }
+.arrow { stroke: var(--line); }
+.planned { stroke: var(--planned); stroke-dasharray: 4 4; }
+.head, .head-planned { fill: none; stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round; }
+.head { stroke: var(--line); }
+.head-planned { stroke: var(--planned); }
+.cut { fill: none; stroke: var(--core); stroke-width: 1; stroke-dasharray: 2 5; }
+.cut-label { font-size: 11px; letter-spacing: .1em; fill: var(--core); }
+.cut-note { font-size: 11.5px; fill: var(--dim); }
+.door { fill: var(--paper); stroke: var(--core); stroke-width: 1.2; }
+.door-text { font-size: 12.5px; font-weight: 600; fill: var(--text); text-anchor: middle; }
+.port { fill: var(--paper); stroke: var(--core); stroke-width: 1; }
+.port-text { font-size: 10.5px; fill: var(--core); text-anchor: middle; letter-spacing: .02em; }
+
+/* A box clicked: it and what it touches stay, the rest fades; a card says what it does. */
+.arch-live .node { cursor: pointer; }
+.node { outline: none; }
+.node:focus-visible .title { text-decoration: underline; }
+#arch.focus .node:not(.lit), #arch.focus .edge:not(.lit), #arch.focus .flow:not(.lit),
+#arch.focus .planned-label:not(.lit), #arch.focus .group, #arch.focus .note, #arch.focus .cut,
+#arch.focus .port, #arch.focus .port-text, #arch.focus .cut-label, #arch.focus .cut-note { opacity: .15; }
+.tip { position: absolute; z-index: 2; max-width: 300px; padding: 12px 14px; border-radius: 6px;
+  background: var(--paper); color: var(--text); border: 1px solid var(--rule);
+  box-shadow: 0 6px 20px -8px rgb(0 0 0 / .25); pointer-events: none; }
+.tip b { display: block; margin: 0 0 2px; font-size: 14.5px; font-weight: 600; }
+.tip span { display: block; color: var(--text-2); font-size: 13.5px; line-height: 1.5; }
+.tip i { display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%;
+  vertical-align: 1px; background: var(--accent, var(--core)); }
+</style>
+</head>
+<body>
+<main>
+<a class="home" href="/">&#8592; dufanyin.dev</a>
+<header>
+<p class="eyebrow">Quant options system</p>
+<h1>Architecture</h1>
+<p class="lead">One repository, <a href="https://github.com/DuFanYin/optra">Optra</a>: an options trading engine that runs the same strategies in a backtest and live on Interactive Brokers, one server with one API in front of it for the page and for agents, and one numerics library under both. It is cut in two at gRPC: above, the control plane asks; below, the core owns the trading state and reaches the world through adapters.</p>
+</header>
+
+<ul class="legend">
+  <li><span class="swatch" style="--c: var(--control)"></span>control plane: asks and shows</li>
+  <li><span class="swatch" style="--c: var(--core)"></span>core: owns the trading state</li>
+  <li><span class="swatch" style="--c: var(--infra)"></span>adapters: the outside world</li>
+  <li><span class="swatch" style="--c: var(--lab)"></span>quant: the numerics</li>
+</ul>
+
+<div class="diagram">
+<div class="frame">
+<svg id="arch" viewBox="0 0 1100 700" role="group" aria-label="Architecture: who drives the system, the control plane, the cut at gRPC, the core engines and how quotes, orders and fills move between them, the adapters, and the numerics library both sides use">
+<defs>
+  <marker id="head" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+    <path class="head" d="M1,1.5 L8.5,5 L1,8.5"/>
+  </marker>
+</defs>
+<g class="node outside" id="n-operator" tabindex="0" role="img" aria-label="Operator">
+<desc>Adds, starts and stops strategies, watches the account and the logs, runs backtests, prices and stresses options.</desc>
+<rect class="box outside" x="40" y="10" width="150" height="44" rx="6"/>
+<text class="title" x="115" y="29">Operator</text>
+<text class="sub" x="115" y="45">a browser, signed in</text>
+</g>
+<g class="node outside" id="n-scheduler" tabindex="0" role="img" aria-label="Scheduler">
+<desc>systemd: the engine restarted before each day's open, a check every five minutes while the market is open, the day's report after the close; a Telegram message when something changes.</desc>
+<rect class="box outside" x="230" y="10" width="150" height="44" rx="6"/>
+<text class="title" x="305" y="29">Scheduler</text>
+<text class="sub" x="305" y="45">check, daily report</text>
+</g>
+<g class="node outside" id="n-agents" tabindex="0" role="img" aria-label="Agents">
+<desc>An AI agent prices, calibrates, stresses, screens and backtests with the same tools the page uses: plain HTTP on the server (GET /api/tools lists them). No tool places an order.</desc>
+<rect class="box outside" x="815" y="10" width="245" height="44" rx="6"/>
+<text class="title" x="937.5" y="29">Agents</text>
+<text class="sub" x="937.5" y="45">tools over HTTP, never orders</text>
+</g>
+<path class="arrow" id="e-1" data-from="operator" data-to="webui" data-kind="control" d="M115,54 V94" marker-end="url(#head)"/>
+<path class="arrow" id="e-2" data-from="scheduler" data-to="server" data-kind="control" d="M305,54 V94" marker-end="url(#head)"/>
+<path class="arrow" id="e-3" data-from="agents" data-to="server" data-kind="control" d="M937.5,54 V94" marker-end="url(#head)"/>
+<text class="group control end" x="560" y="90"><tspan class="dot">&#9679;</tspan>&#8202; CONTROL PLANE</text>
+<g class="node control" id="n-webui" tabindex="0" role="img" aria-label="Page">
+<desc>One Preact app, served by the server: Trading (Home, the account, orders, data) and Research (backtests, the screener, pricing, risk, numerics, validation). The signed-in owner reaches it at dufanyin.dev/optra/.</desc>
+<rect class="box control" x="40" y="96" width="150" height="44" rx="6"/>
+<text class="title" x="115" y="115">Page</text>
+<text class="sub" x="115" y="131">Trading and Research</text>
+</g>
+<g class="node control" id="n-server" tabindex="0" role="img" aria-label="Server">
+<desc>One FastAPI app with one API: the trading routes (through gRPC only), backtests (entry_backtest, a process per run), the 36 research tools (through the C ABI), the run history, the day's check and report. It holds no trading state, so it can restart at any time.</desc>
+<rect class="box control" x="230" y="96" width="830" height="44" rx="6"/>
+<text class="title" x="645" y="115">Server</text>
+<text class="sub" x="645" y="131">one API: trading, backtests, research tools, run history, the day</text>
+</g>
+<path class="arrow" id="e-5" data-from="webui" data-to="server" data-kind="control" d="M192,118 H228" marker-start="url(#head)" marker-end="url(#head)"/>
+<path class="cut" d="M15,176 H243 M367,176 H428 M552,176 H875 M1000,176 H1060"/>
+<text class="cut-label" x="40" y="168">THE CUT</text>
+<text class="cut-note" x="40" y="196">control plane above, core below</text>
+<path class="arrow" id="e-8" data-from="server" data-to="grpc" data-kind="control" d="M305,140 V161" marker-start="url(#head)" marker-end="url(#head)"/>
+<path class="arrow" id="e-9" data-from="server" data-to="cli" data-kind="control" d="M490,140 V161" marker-end="url(#head)"/>
+<path class="arrow" id="e-10" data-from="server" data-to="cabi" data-kind="lab" d="M937.5,140 V161" marker-end="url(#head)"/>
+<g class="node door-node" id="n-grpc" tabindex="0" role="img" aria-label="gRPC (live)">
+<desc>The control plane's only way into the live engine: each RPC calls one of the engine's operations and translates its result into the API's messages.</desc>
+<rect class="door" x="245" y="163" width="120" height="26" rx="13"/>
+<text class="door-text" x="305" y="180.5">gRPC (live)</text>
+</g>
+<g class="node door-node" id="n-cli" tabindex="0" role="img" aria-label="CLI (backtest)">
+<desc>entry_backtest: a backtest from the command line, one day or many, its result as JSON.</desc>
+<rect class="door" x="430" y="163" width="120" height="26" rx="13"/>
+<text class="door-text" x="490" y="180.5">CLI (backtest)</text>
+</g>
+<g class="node door-node" id="n-cabi" tabindex="0" role="img" aria-label="C ABI">
+<desc>libanalytics_c.so, loaded with ctypes: a JSON request in, a JSON response out, per workflow. The engine&#8217;s Black (prices and implied vols in a batch) is one of them: the server&#8217;s chains of the engine&#8217;s days and the holdings&#8217; stress use it.</desc>
+<rect class="door" x="877.5" y="163" width="120" height="26" rx="13"/>
+<text class="door-text" x="937.5" y="180.5">C ABI (ctypes)</text>
+</g>
+<path class="arrow" id="e-11" data-from="grpc" data-to="engine" data-kind="core" d="M305,189 V226" marker-end="url(#head)"/>
+<path class="arrow" id="e-12" data-from="cli" data-to="engine" data-kind="core" d="M490,189 V226" marker-end="url(#head)"/>
+<path class="arrow" id="e-13" data-from="cabi" data-to="analytics" data-kind="lab" d="M997.5,176 H1085 V662 H1062" marker-end="url(#head)"/>
+<text class="group core end" x="710" y="222"><tspan class="dot">&#9679;</tspan>&#8202; CORE</text>
+<g class="node core" id="n-engine" tabindex="0" role="img" aria-label="Engine">
+<desc>The engines inside it around five ports: the event loop, the clock, the venue, the storage and the market data. Backtest and live are two assemblies of it; what each event does is written once.</desc>
+<rect class="box core frame" x="30" y="228" width="680" height="376" rx="10"/>
+<text class="title" x="347" y="248">Engine</text>
+<text class="sub" x="347" y="264">one code path, two assemblies; adapters plug into its ports</text>
+</g>
+<g class="node core" id="n-loop" tabindex="0" role="img" aria-label="Event loop">
+<desc>The one writer of the trading state. Live, one thread: fills and commands in one ordered queue, never dropped; the newest snapshot of each portfolio; its own clock for the timer. Logs and socket writes run off it.</desc>
+<rect class="box core" x="44" y="280" width="606" height="52" rx="6"/>
+<text class="title" x="347" y="303">Event loop</text>
+<text class="sub" x="347" y="319">one writer; fills never dropped</text>
+</g>
+<path class="arrow" id="e-14" data-from="loop" data-to="portfolios" data-kind="quotes" d="M114,332 V358" marker-end="url(#head)"/>
+<text class="flow" data-edge="e-14" x="122" y="350">quotes</text>
+<path class="arrow" id="e-15" data-from="loop" data-to="strategies" data-kind="timer" d="M315,332 V358" marker-end="url(#head)"/>
+<text class="flow" data-edge="e-15" x="323" y="350">timer</text>
+<path class="arrow" id="e-16" data-from="loop" data-to="hedging" data-kind="timer" d="M600,332 V358" marker-end="url(#head)"/>
+<text class="flow" data-edge="e-16" x="608" y="350">timer</text>
+<g class="node core" id="n-portfolios" tabindex="0" role="img" aria-label="Portfolios">
+<desc>Option chains keyed by strike and expiry, with their quotes; each snapshot's implied vol and Greeks, Black on each expiry's put-call-parity forward (from quant).</desc>
+<rect class="box core" x="44" y="360" width="140" height="44" rx="6"/>
+<text class="title" x="114" y="379">Portfolios</text>
+<text class="sub" x="114" y="395">chains, IV, Greeks</text>
+</g>
+<g class="node core" id="n-strategies" tabindex="0" role="img" aria-label="Strategies">
+<desc>One code for backtest and live: on_timer once a bar, on_order and on_trade; declared parameters; they see the engine through StrategyContext.</desc>
+<rect class="box core" x="240" y="360" width="150" height="44" rx="6"/>
+<text class="title" x="315" y="379">Strategies</text>
+<text class="sub" x="315" y="395">one code, both modes</text>
+</g>
+<g class="node core" id="n-hedging" tabindex="0" role="img" aria-label="Hedging">
+<desc>Each strategy's delta back into its range, in whole shares of the underlying or of what trades in its place (SPY for SPX).</desc>
+<rect class="box core" x="470" y="360" width="180" height="44" rx="6"/>
+<text class="title" x="560" y="379">Hedging</text>
+<text class="sub" x="560" y="395">delta per strategy</text>
+</g>
+<path class="arrow" id="e-17" data-from="portfolios" data-to="strategies" data-kind="read" d="M184,382 H238" marker-end="url(#head)"/>
+<text class="flow" data-edge="e-17" x="196" y="376">read</text>
+<path class="arrow" id="e-18" data-from="strategies" data-to="risk" data-kind="orders" d="M335,404 V438" marker-end="url(#head)"/>
+<text class="flow" data-edge="e-18" x="343" y="426">orders</text>
+<path class="arrow" id="e-19" data-from="hedging" data-to="risk" data-kind="orders" d="M560,404 V420 H400 V438" marker-end="url(#head)"/>
+<text class="flow" data-edge="e-19" x="568" y="416">orders</text>
+<g class="node core" id="n-risk" tabindex="0" role="img" aria-label="Risk">
+<desc>Every order passes it first, the same in a backtest: size, position, premium, price band, the spread for a market order, no naked shorts, closing 0DTE options settled in shares before the close; the operator's halt lets through only what reduces a holding. Refusals are counted and kept.</desc>
+<rect class="box core" x="280" y="440" width="140" height="44" rx="6"/>
+<text class="title" x="350" y="459">Risk</text>
+<text class="sub" x="350" y="475">limits, the halt</text>
+</g>
+<path class="arrow" id="e-20" data-from="risk" data-to="execution" data-kind="orders" d="M420,462 H478" marker-end="url(#head)"/>
+<g class="node core" id="n-execution" tabindex="0" role="img" aria-label="Execution">
+<desc>An allowed order goes to the venue and is tracked as its strategy&#8217;s until it is done. Each update is merged into the order: a repeat or an older one changes nothing, an end is final, and an end waits until the order&#8217;s fills are booked (10 s at most). A fill IB repeats is dropped, so each is booked once, whatever order they arrive in.</desc>
+<rect class="box core" x="480" y="440" width="170" height="44" rx="6"/>
+<text class="title" x="565" y="459">Execution</text>
+<text class="sub" x="565" y="475">send, merge, dedupe</text>
+</g>
+<path class="arrow" id="e-21" data-from="loop" data-to="execution" data-kind="fills" d="M650,322 H664 V452 H652" marker-end="url(#head)"/>
+<text class="flow end" data-edge="e-21" x="660" y="432">fills</text>
+<path class="arrow" id="e-22" data-from="portfolios" data-to="positions" data-kind="read" d="M114,404 V518" marker-end="url(#head)"/>
+<text class="flow" data-edge="e-22" x="122" y="470">marks</text>
+<path class="arrow" id="e-23" data-from="execution" data-to="positions" data-kind="fills" d="M540,484 V545 H392" marker-end="url(#head)"/>
+<text class="flow" data-edge="e-23" x="548" y="512">fills</text>
+<path class="arrow" id="e-24" data-from="positions" data-to="strategies" data-kind="fills" d="M260,520 V406" marker-end="url(#head)"/>
+<text class="flow" data-edge="e-24" x="268" y="506">holding, fills</text>
+<g class="node core" id="n-positions" tabindex="0" role="img" aria-label="Positions">
+<desc>Holdings, P&amp;L and Greeks per strategy, a combo held as its legs (its quantity from theirs), the P&amp;L split by source (delta, gamma, theta, vega, other, fills against the mid), checked against the broker's positions before a strategy may start; options held past their expiry settled at the close, in cash or in shares.</desc>
+<rect class="box core" x="44" y="520" width="346" height="44" rx="6"/>
+<text class="title" x="217" y="539">Positions</text>
+<text class="sub" x="217" y="555">per strategy, vs broker</text>
+</g>
+<text class="note" x="44" y="590">A timer tick: settle expired options &#8594; strategies &#8594; position metrics &#8594; hedges.</text>
+<rect class="port" x="676" y="281" width="68" height="18" rx="4"/>
+<text class="port-text" x="710" y="293.5">market data</text>
+<rect class="port" x="676" y="461" width="68" height="18" rx="4"/>
+<text class="port-text" x="710" y="473.5">venue</text>
+<rect class="port" x="676" y="531" width="68" height="18" rx="4"/>
+<text class="port-text" x="710" y="543.5">storage</text>
+<text class="group infra" x="815" y="258"><tspan class="dot">&#9679;</tspan>&#8202; ADAPTERS</text>
+<g class="node infra" id="n-marketdata" tabindex="0" role="img" aria-label="Market data">
+<desc>Live: IB quotes into a quote book, a snapshot of each changed portfolio, each minute recorded for a backtest of the day and the screener&#8217;s chains. Backtest: a day from Parquet, its snapshots computed before the run.</desc>
+<rect class="box infra" x="815" y="268" width="245" height="44" rx="6"/>
+<text class="title" x="937.5" y="287">Market data</text>
+<text class="sub" x="937.5" y="303">IB live, Parquet backtest</text>
+</g>
+<g class="node infra" id="n-broker" tabindex="0" role="img" aria-label="Broker gateway">
+<desc>Live: Interactive Brokers through the TWS API, one named paper account. Backtest: orders fill at the next bar&#8217;s quotes. Either way a fill is one contract&#8217;s: a combo fills as its legs.</desc>
+<rect class="box infra" x="815" y="448" width="245" height="44" rx="6"/>
+<text class="title" x="937.5" y="467">Broker gateway</text>
+<text class="sub" x="937.5" y="483">IB live, simulated backtest</text>
+</g>
+<g class="node infra" id="n-sqlite" tabindex="0" role="img" aria-label="SQLite">
+<desc>Contracts, strategies, orders and fills, written by a thread of its own; a restart replays the orders and fills into the holdings. In memory for a backtest.</desc>
+<rect class="box infra" x="815" y="518" width="245" height="44" rx="6"/>
+<text class="title" x="937.5" y="537">SQLite</text>
+<text class="sub" x="937.5" y="553">orders and fills, replayed</text>
+</g>
+<path class="arrow" id="e-25" data-from="marketdata" data-to="loop" data-kind="quotes" d="M815,290 H746" marker-end="url(#head)"/>
+<text class="flow" data-edge="e-25" x="752" y="284">quotes</text>
+<path class="arrow" id="e-26" data-from="marketdata" data-to="loop" data-kind="quotes" d="M676,290 H652" marker-end="url(#head)"/>
+<path class="arrow" id="e-27" data-from="execution" data-to="broker" data-kind="orders" d="M650,470 H674" marker-end="url(#head)"/>
+<path class="arrow" id="e-28" data-from="execution" data-to="broker" data-kind="orders" d="M746,470 H813" marker-start="url(#head)" marker-end="url(#head)"/>
+<text class="flow" data-edge="e-28" x="750" y="463">orders, fills</text>
+<path class="arrow" id="e-29" data-from="broker" data-to="loop" data-kind="fills" d="M700,461 V306 H652" marker-end="url(#head)"/>
+<text class="flow end" data-edge="e-29" x="696" y="392">fills</text>
+<path class="arrow" id="e-30" data-from="execution" data-to="sqlite" data-kind="store" d="M620,484 V540 H674" marker-end="url(#head)"/>
+<path class="arrow" id="e-31" data-from="execution" data-to="sqlite" data-kind="store" d="M746,540 H813" marker-end="url(#head)"/>
+<text class="flow" data-edge="e-31" x="758" y="534">saved</text>
+<text class="group lab end" x="650" y="630"><tspan class="dot">&#9679;</tspan>&#8202; QUANT</text>
+<g class="node lab" id="n-quant" tabindex="0" role="img" aria-label="quant">
+<desc>The numerics, one library for the trading engine and the research tools: Black and Black-Scholes, Greeks, implied vol by LetsBeRational, Monte Carlo, binomial and trinomial trees, finite differences, Longstaff-Schwartz, Heston, the option screener. Parallel with OpenMP, the same result at any thread count.</desc>
+<rect class="box lab" x="44" y="640" width="606" height="44" rx="6"/>
+<text class="title" x="347" y="659">quant</text>
+<text class="sub" x="347" y="675">pricing, IV, Greeks, MC, PDE, Heston</text>
+</g>
+<g class="node lab" id="n-analytics" tabindex="0" role="img" aria-label="quant/analytics">
+<desc>The research workflows on quant (pricing every way at once, scenarios, hedging, validation, calibration, the screener) as JSON requests and responses, behind the C ABI.</desc>
+<rect class="box lab" x="815" y="640" width="245" height="44" rx="6"/>
+<text class="title" x="937.5" y="659">quant/analytics</text>
+<text class="sub" x="937.5" y="675">research workflows, C ABI</text>
+</g>
+<path class="arrow" id="e-32" data-from="quant" data-to="portfolios" data-kind="lab" d="M70,640 V618 H18 V382 H42" marker-end="url(#head)"/>
+<text class="flow" data-edge="e-32" x="78" y="630">IV, Greeks</text>
+<path class="arrow" id="e-33" data-from="analytics" data-to="quant" data-kind="lab" d="M815,662 H652" marker-end="url(#head)"/>
+</svg>
+<div class="tip" id="arch-tip" role="status" aria-live="polite" hidden></div>
+</div>
+</div>
+<p class="hint"><span class="narrow">Scroll sideways for the whole diagram. </span><span class="js-only">Click a box (or tab to it and press Enter) to see what it does and what it touches.</span></p>
+
+<section class="notes">
+<h2>How it holds together</h2>
+<ul>
+  <li><h3>The control plane only asks</h3><p>It holds no trading state and never opens the engine&#8217;s database: every question and every change goes through gRPC.</p></li>
+  <li><h3>One writer</h3><p>One event thread owns strategies, holdings and orders. Fills and commands reach it in order and are never dropped; quotes keep only the newest; logs and socket writes run off it.</p></li>
+  <li><h3>One engine, two assemblies</h3><p>A strategy is written once, and so is the engine: backtest and live differ in the ports only (event loop, clock, venue, storage, and live&#8217;s market data).</p></li>
+  <li><h3>Each fill booked once</h3><p>Execution merges each order update and drops a fill it has seen; an order&#8217;s end waits for its fills, so the holding does not depend on the order IB reports in. Positions update the holding, then the strategy hears of it. Every order and fill is saved; a restart replays them, and a strategy starts only once its positions agree with the broker&#8217;s.</p></li>
+  <li><h3>One set of numerics, one set of data</h3><p>The implied vol and Greeks the engine trades on and the research tools&#8217; pricing are the same code, quant: the engine links it, the server reaches it through a C ABI. The screener reads the engine&#8217;s backtest and recorded days, a pick is backtested as a rule over every day, and the live holdings can be stressed.</p></li>
+  <li><h3>The day runs itself</h3><p>The scheduler restarts the engine before the open, asks the server for a check every five minutes and for the day&#8217;s report after the close; the report replays the recorded day in a backtest and lines the paper fills up against it.</p></li>
+</ul>
+</section>
+</main>
+<script src="architecture.js"></script>
+</body>
+</html>

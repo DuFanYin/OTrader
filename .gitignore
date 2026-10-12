@@ -40,8 +40,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -127,9 +127,8 @@ venv.bak/
 .dmypy.json
 dmypy.json
 
-# Market data (large parquet/dbn files — never commit), but keep the data guide
-data/*
-!data/README.md
+# Market data (large parquet/dbn files — never commit)
+/data/
 
 # Build directories (any depth)
 **/build/
@@ -144,5 +143,6 @@ data/*
 
 local/
 
-# Claude Code local guidance (AGENT.md is the tracked source)
+# Claude Code local guidance (AGENTS.md is the tracked source; a local CLAUDE.md can import it: @AGENTS.md)
 CLAUDE.md
+.vscode/

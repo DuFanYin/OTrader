@@ -1,118 +1,133 @@
 <div align="center">
 
-# OTrader
+# Optra
 
-**A C++20 event-driven options trading & research engine — one strategy codebase, backtest and live.**
+**An options trading system: research a strategy, backtest it, then trade it live.**
 
-[![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)](#)
-[![Build: CMake](https://img.shields.io/badge/build-CMake%20presets-064F8C?logo=cmake&logoColor=white)](#build--run)
-[![Broker: IBKR](https://img.shields.io/badge/live-Interactive%20Brokers-FF6600)](#)
-[![UI: Next.js](https://img.shields.io/badge/UI-Next.js%2016-black?logo=nextdotjs)](#)
+C++23 engine · Python server · web app for trading and research
+
+[![C++23](https://img.shields.io/badge/C%2B%2B-23-00599C?logo=cplusplus&logoColor=white)](#quick-start)
+[![Broker: IBKR](https://img.shields.io/badge/live-Interactive%20Brokers-D81222)](#trade-it-live)
 [![License: non-commercial](https://img.shields.io/badge/license-learning%20%2F%20portfolio-lightgrey)](#license)
 
-**English** · [中文](doc/README.zh.md)
+[Live demo](https://dufanyin.dev/optra-demo/) · [Architecture](https://dufanyin.dev/quant-option/architecture.html) · [Documentation](#documentation) · [中文](doc/README.zh.md)
 
 </div>
 
----
+<p align="center"><img width="860" alt="Optra's web app: a month of a straddle strategy backtested on SPY options, its P&L and the Greeks it carried" src="doc/images/app-backtest.png"></p>
 
-Most backtesters and live traders are two different codebases that quietly disagree. **OTrader is one engine**: strategies consume **Events** (Timer, Snapshot, Order, Trade) and emit **Intents** (order, cancel, log) — the *exact same* strategy code runs in a deterministic backtest and against a live broker. Only the runtime wiring underneath changes.
+Optra is built for options. Option chains by expiry, implied volatility and Greeks, multi-leg combos and settlement at expiry are part of the engine, not added on top.
 
-The core is **~11K lines of C++** (engine + strategy framework), excluding tests, generated protobuf, and example strategies.
+It covers the whole life of a strategy. You study an idea with the research tools, write it as a strategy, backtest it on recorded option days, and then trade it on an Interactive Brokers account. The strategy code is the same at every step.
 
-## Highlights
+## Research options
 
-- 🔁 **One strategy, two modes** — write once, run in backtest and live; no separate "live rewrite" to drift out of sync.
-- 🧩 **Pure-logic core, injected I/O** — strategies/position/hedge never touch the network or DB directly; everything arrives through a `RuntimeAPI`, so the core is trivially unit-testable.
-- ⚡ **Built for low latency** — lock-free SPSC/MPSC ring buffers, object pools, pointer-payload events and a zero-copy hot path; heavy compute runs on a persistent thread pool, not per-event threads.
-- 🛰️ **Process-isolated live stack** — market-data and IB gateway run as **independent processes** over ZeroMQ IPC; a gRPC service exposes the engine for external control.
-- 📈 **Options-native** — multi-leg combos, Black-Scholes IV/Greeks, and a strategy-level delta-hedging engine, all built in.
-- 🖥️ **Full control surface** — FastAPI backend + Next.js UI to launch backtests, manage strategies, and inspect orders/trades.
+The research tools are for understanding a trade before committing to it.
 
-## Architecture
+- **Pricing**: one option priced by Black-Scholes, Monte Carlo and binomial and trinomial trees side by side, with the Greeks and the differences between methods; American options also by finite differences and Longstaff-Schwartz.
+- **Volatility**: implied volatility, Heston calibration to a chain, Greek surfaces.
+- **Multi-leg**: any combination of legs, recognised (straddle, iron condor, ...) and priced as a whole.
+- **Risk**: stress scenarios with each P&L explained by spot, volatility and rate, and hedging schemes compared on simulated paths.
+- **Screener**: searches an option chain for combinations worth a look and ranks them by edge against a model volatility.
+- **Checks**: the numerical methods tested against theory, optionally before every computation.
 
+Live BTC and ETH option chains come from Deribit's public feed; the screener also reads your own backtest days. Every research tool is an HTTP endpoint with a described schema, so an AI agent can run the same research.
+
+<p align="center"><img width="860" alt="The screener ranking option strategies by edge against a model volatility" src="doc/images/research/screener.png"></p>
+
+## Backtest it
+
+A backtest replays recorded option days minute by minute. The strategy sees each minute's full chain, its orders fill at the ask or the bid with fees and slippage, and options held into their expiry are settled at the close.
+
+Each run reports the P&L day by day and splits it into delta, gamma, theta and vega, so you can see where the money came from. Every day runs on its own engine, several days at once, and the same inputs always give the same result.
+
+No market data ships with the repository. You can convert Databento downloads (SPXW and SPY options), replay the quotes the live engine recorded, or generate synthetic days from a model whose answers are known.
+
+## Write your own strategies
+
+A strategy is a C++ class with a few callbacks. It reads the chains and its own holdings, and sends orders through helpers for single options, standard combos and custom legs.
+
+```cpp
+class MyStraddle final : public OptionStrategyTemplate {
+  public:
+    MyStraddle(StrategyContext* context, const std::string& name, const std::string& portfolio,
+               const std::unordered_map<std::string, double>& setting);
+    static std::span<const StrategyParam> parameters();  // shown and set in the web app
+
+    void on_init_logic() override;   // choose the chains to trade
+    void on_timer_logic() override;  // every bar: read quotes and Greeks, place orders
+    void on_stop_logic() override;   // close what is left
+};
+REGISTER_STRATEGY(MyStraddle);
 ```
-          Events (Timer · Snapshot · Order · Trade)
-                          │
-                          ▼
-   ┌───────────────────────────────────────────────┐
-   │  Domain Core  (pure logic, no I/O)             │
-   │  strategy · position · hedge · execution · log │
-   └───────────────────────────────────────────────┘
-                          │  Intents (order · cancel · log)
-                          ▼
-   ┌───────────────────────────────────────────────┐
-   │  Runtime   dispatch loop + intent handling     │
-   │   backtest: synchronous   │   live: queues     │
-   └───────────────────────────────────────────────┘
-        │                                   │
-        ▼ backtest                          ▼ live (separate processes, ZMQ IPC)
-   Parquet history                     Market-data  ·  IB gateway  ·  gRPC
-```
 
-Everything the core needs is **injected** via `RuntimeAPI` (data views, order submission, logging). Swap the infra — a different data source, a paper gateway, another database — without touching a line of strategy or core logic.
+Once registered, it can be backtested and traded from the web app, with its parameters filled in there. Built-in delta hedging can be switched on with one call.
 
-## Build & Run
+Simple combos need no code: `ComboStrategy` takes the legs as rules (call or put, ratio, strike as a percent from the forward, days to expiry), with entry and exit times, take-profit, stop-loss and an optional hedge. The repository includes nine strategies, ComboStrategy among them; they are examples, not proven edges.
+
+## Trade it live
+
+The same strategy, unchanged, trades on an Interactive Brokers account through the TWS API.
+
+- Every order passes a pre-trade risk check, and one button halts all trading.
+- A restart picks up where it stopped, and the holdings are checked against the broker before any strategy starts.
+- A health check runs every five minutes, and a report after the close compares the day's fills with a backtest of the same day.
+
+So far Optra trades a paper account. The engine trades only the one account it is given and refuses a live account unless the machine's administrator allows it.
+
+## Try it
+
+The [live demo](https://dufanyin.dev/optra-demo/) runs the real engine on a simulated account: synthetic SPY option days replayed as the market, three example strategies trading, and the research tools open to use.
+
+### Quick start
+
+Linux with GCC 14 or newer (Ubuntu 26.04 is the reference):
 
 ```bash
-# 1. Build the C++ engine (Release) → Otrader/build/entry_backtest, entry_system
-./build.sh r
+sudo apt install g++ cmake make libarrow-dev libparquet-dev libprotobuf-dev protobuf-compiler libgrpc++-dev \
+  protobuf-compiler-grpc libabsl-dev nlohmann-json3-dev libsqlite3-dev libgtest-dev 7zip
 
-# 2. Run a backtest: <parquet day> <registered strategy>
-./Otrader/build/entry_backtest data/SPXW/SPXW-2025-08/20250804.parquet StraddleTestStrategy
+./build.sh r                     # the engine into engine/build
 
-# 3. Full dev stack (engine + FastAPI backend + Next.js UI)
-(cd app/backend && uv sync)
-./scripts/system_up.sh dev
+# a week of synthetic SPY option days
+uv run --project app/server python scripts/data/synthetic_to_parquet.py \
+  --start 2025-03-03 --end 2025-03-07 --out data --symbol SPY
+
+# a straddle each day, its P&L split by Greek
+./engine/build/entry_backtest --files data/SPY/SPY-2025-03/*.parquet ComboStrategy \
+  leg1_ratio=1 leg2_ratio=1 leg2_right=1
+
+./scripts/dev.sh                 # the server and the web app at http://localhost:5173
 ```
 
-**Prerequisites (macOS):** Clang, CMake ≥ 3.21, and Homebrew `protobuf grpc zeromq apache-arrow libpqxx`; Node.js for the UI; [`uv`](https://github.com/astral-sh/uv) for the Python backend. The toolchain is pinned by [`Otrader/CMakePresets.json`](Otrader/CMakePresets.json).
+`entry_backtest --list-strategies` lists every strategy and its parameters. A backtest needs no network and no database.
 
-> Backtest needs none of the live infra — no network, no database. `./build.sh r` and go.
+## How it is built
 
-## What you provide
+<p align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="doc/images/architecture-dark.png">
+  <img width="720" alt="Optra architecture: the control plane, the cut at gRPC, the engine and its ports, the adapters and the numerics" src="doc/images/architecture-light.png">
+</picture>
+</p>
 
-This is an engine, not a turnkey product. Three pieces are deliberately not bundled:
+The engine is one C++ program. A backtest and live trading run the same engine with different connections plugged in: recorded days and a simulated venue in one, Interactive Brokers in the other. The web app and its server only ask the engine over gRPC; they never touch its state.
 
-- **Backtest data.** No data ships with the repo. The backtester reads per-day Parquet files with a fixed schema (the samples were cleaned from [Databento](https://databento.com/) DBN, but any source works). The Databento → Parquet pipeline is in **[scripts/data_prep](scripts/data_prep/README.md)**; **[data/README.md](data/README.md)** has the schema and layout for any other source.
-- **A live market-data source.** The built-in provider polls the **Tradier** API and needs *your own paid Tradier production token* (`TRADIER_TOKEN`; the sandbox won't do). Prefer another vendor? Write a provider that emits `PortfolioSnapshot`s into the engine — the interface is small and swappable.
-- **A live execution gateway.** The built-in one wraps Interactive Brokers' TWS API (**IBJts**), a private SDK not redistributed here — you obtain and compile it yourself. Or implement your own gateway against the ZeroMQ message contract (it runs as a separate process; the engine only speaks ZMQ to it). Live also needs PostgreSQL.
-
-## Built-in Strategies
-
-Registered in [`strategy_registry.cpp`](Otrader/strategy/strategy_registry.cpp) — run any by name, or use them as templates for your own:
-
-| Strategy | Idea |
-|----------|------|
-| `StraddleTestStrategy` | Long/short straddle reference implementation |
-| `IvMeanRevertStrategy` | Implied-vol mean reversion |
-| `IronCondorTestStrategy` | Defined-risk iron condor |
-| `StraddleInventoryScalperStrategy` | Straddle inventory scalping |
-
-Writing your own is a subclass of the strategy template + one `REGISTER_STRATEGY(...)` line — see the [strategy guide](doc/).
+Bookings are deterministic: one thread owns all trading state, and a position never depends on the order in which the broker reports its fills. The [architecture](doc/architecture.md) explains the design, and the [interactive diagram](https://dufanyin.dev/quant-option/architecture.html) describes each part when you click it.
 
 ## Documentation
 
-- **Architecture** — [English](doc/en/architecture.md) · [中文](doc/cn/architecture.md)
-- **Engine deep-dives** (thread model, zero-copy data path, low-latency design) — [doc/en/engine/](doc/en/engine/)
-- **Component overviews** — [engine](Otrader/README.md) · [backend](app/backend/README.md) · [frontend](app/frontend/README.md)
+- [How Optra fits together](doc/architecture.md): the programs, why they are separate, a quote's path through the engine, from an idea to the paper account
+- [The engine](doc/engine.md): events and bookings, the live process, restarts and expiry, backtests, a simulated market, what IB sends back, building and testing
+- [The server and the web app](doc/server.md): what the server does, the views, running it day to day, the public demo
+- [Research](doc/research.md): the research views, the methods, market data, tools for agents
+- [Backtest data](doc/data.md): the format, converting Databento downloads, replaying paper days, synthetic days
+- For coding agents: [AGENTS.md](AGENTS.md)
 
-## Two Lineages
+## Project status
 
-This repo carries two implementations on purpose:
-
-- **`main`** — the C++20 engine (this README). An **agent-assisted** rewrite focused on latency, structure, and dual-mode design.
-- **[`python-mvp`](../../tree/python-mvp)** — the original **hand-written** Python implementation the C++ engine grew out of. Kept intact as the reference design.
-
-## Layout
-
-```
-Otrader/   C++ engine — core · runtime · infra · strategy · utilities · entry
-app/       backend (FastAPI, gRPC bridge) + frontend (Next.js UI)
-doc/       design docs (cn/ + en/)
-scripts/   dev launcher, test & lint helpers
-```
+About 13,000 lines of core C++ and 154 GoogleTest cases, including concurrency, shutdown and IB paper-account integration tests, with ASan and TSan runs. Trading is on a paper account only. Next: longer multi-day backtests, stocks, and lower latency. The [`python-mvp`](../../tree/python-mvp) branch keeps the original Python implementation the C++ system grew out of.
 
 ## License
 
-For **learning and portfolio/demo** purposes. No commercial use, redistribution, or production integration without written permission. Trading carries substantial risk; connecting to a live account is at your own risk.
+For learning and portfolio use ([LICENSE](LICENSE)). No commercial use, redistribution or production integration without written permission. Trading carries substantial risk; connecting a live account is at your own risk.

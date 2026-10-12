@@ -1,0 +1,16 @@
+Copyright (c) 2026 Hang Zhengyang. All rights reserved.
+
+This repository (Optra: the engine, its numerics in engine/quant, the server and the page in app/) is
+published for learning and portfolio/demo purposes. You may read it, and build and run it for your
+own study.
+
+Without written permission from the copyright holder you may not:
+  - use it, or anything derived from it, commercially;
+  - redistribute it, or anything derived from it;
+  - integrate it into a production system.
+
+Third-party code fetched at build time (the TWS API, the Intel Decimal Floating-Point Math Library,
+LetsBeRational) keeps its own license.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. Trading carries
+substantial risk; connecting it to a live account is at your own risk.

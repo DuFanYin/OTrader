@@ -1,0 +1,22 @@
+{
+  "name": "optra-web",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Optra's page: the trading and research views, Preact + Tailwind, built by Vite into dist/ for the server",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@preact/signals": "2.11.2",
+    "preact": "10.29.8"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "2.10.6",
+    "@tailwindcss/vite": "4.3.3",
+    "tailwindcss": "4.3.3",
+    "vite": "8.3.1"
+  }
+}

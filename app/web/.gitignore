@@ -1,0 +1,9 @@
+# dependencies
+/node_modules
+
+# the build, served by the backend (npm run build)
+/dist
+
+# misc
+.DS_Store
+npm-debug.log*

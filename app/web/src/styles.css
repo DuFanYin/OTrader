@@ -1,0 +1,167 @@
+/* The page's styles, every view alike: Tailwind, themed by the colour tokens below (light by default,
+   dark with the system or data-theme="dark"). Components use the theme names (bg-surface, text-muted,
+   border-line, ...), so a colour is changed here, once. */
+@import "tailwindcss";
+
+@theme inline {
+  --color-page: var(--page);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-soft: var(--accent-soft);
+  --color-up: var(--up);
+  --color-down: var(--down);
+  --color-warn: var(--warn);
+  --color-up-soft: var(--up-soft);
+  --color-down-soft: var(--down-soft);
+  --color-warn-soft: var(--warn-soft);
+}
+
+@theme {
+  --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --text-2xs: 10px;
+  --text-2xs--line-height: 14px;
+  --text-xs: 11px;
+  --text-xs--line-height: 16px;
+  --text-sm: 12px;
+  --text-sm--line-height: 18px;
+  --text-base: 13px;
+  --text-base--line-height: 20px;
+  --text-lg: 15px;
+  --text-lg--line-height: 22px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+}
+
+:root {
+  --page: #f6f6f3;
+  --surface: #ffffff;
+  --surface-2: #f1f1ed;
+  --surface-3: #e8e8e3;
+  --line: #e2e2dc;
+  --line-strong: #cfcfc8;
+  --ink: #18181b;
+  --ink-2: #4b4b53;
+  --muted: #85858d;
+  --accent: #3352d6;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(51, 82, 214, 0.1);
+  --up: #13804b;
+  --down: #c7372f;
+  --warn: #a15c07;
+  --up-soft: rgba(19, 128, 75, 0.12);
+  --down-soft: rgba(199, 55, 47, 0.11);
+  --warn-soft: rgba(161, 92, 7, 0.12);
+  /* chart series, in order */
+  --s1: #3352d6;
+  --s2: #d9822b;
+  --s3: #13804b;
+  --s4: #9b4dca;
+  --s5: #c7372f;
+  --s6: #5f6b7a;
+  --grid: rgba(24, 24, 27, 0.07);
+  --axis: rgba(24, 24, 27, 0.28);
+  --shadow: 0 1px 2px rgba(24, 24, 27, 0.05);
+  --overlay: rgba(24, 24, 27, 0.4);
+
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --page: #0c0c0e;
+    --surface: #141417;
+    --surface-2: #1b1b1f;
+    --surface-3: #242429;
+    --line: #26262c;
+    --line-strong: #34343b;
+    --ink: #f2f2f3;
+    --ink-2: #b4b4bc;
+    --muted: #7c7c86;
+    --accent: #7b93ff;
+    --accent-ink: #0c0c0e;
+    --accent-soft: rgba(123, 147, 255, 0.14);
+    --up: #3ccf8e;
+    --down: #ff6b61;
+    --warn: #f0b44c;
+    --up-soft: rgba(60, 207, 142, 0.14);
+    --down-soft: rgba(255, 107, 97, 0.14);
+    --warn-soft: rgba(240, 180, 76, 0.14);
+    --s1: #7b93ff;
+    --s2: #f0a050;
+    --s3: #3ccf8e;
+    --s4: #c08cf0;
+    --s5: #ff6b61;
+    --s6: #8d98a8;
+    --grid: rgba(255, 255, 255, 0.06);
+    --axis: rgba(255, 255, 255, 0.24);
+    --shadow: none;
+    --overlay: rgba(0, 0, 0, 0.55);
+  }
+}
+:root[data-theme="dark"] {
+  --page: #0c0c0e; --surface: #141417; --surface-2: #1b1b1f; --surface-3: #242429; --line: #26262c; --line-strong: #34343b;
+  --ink: #f2f2f3; --ink-2: #b4b4bc; --muted: #7c7c86; --accent: #7b93ff; --accent-ink: #0c0c0e; --accent-soft: rgba(123, 147, 255, 0.14);
+  --up: #3ccf8e; --down: #ff6b61; --warn: #f0b44c; --up-soft: rgba(60, 207, 142, 0.14); --down-soft: rgba(255, 107, 97, 0.14);
+  --warn-soft: rgba(240, 180, 76, 0.14); --s1: #7b93ff; --s2: #f0a050; --s3: #3ccf8e; --s4: #c08cf0; --s5: #ff6b61; --s6: #8d98a8;
+  --grid: rgba(255, 255, 255, 0.06); --axis: rgba(255, 255, 255, 0.24); --shadow: none; --overlay: rgba(0, 0, 0, 0.55);
+}
+
+@layer base {
+  html { color-scheme: light dark; background: var(--page); }
+  body { @apply bg-page text-ink font-sans text-base antialiased; font-variant-numeric: tabular-nums; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  ::selection { background: var(--accent-soft); }
+  * { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+  input[type="number"]::-webkit-inner-spin-button { opacity: 0.4; }
+}
+
+/* Charts: SVG drawn by src/charts, coloured here so they follow the theme. */
+@layer components {
+  .chart { width: 100%; }
+  .chart svg { display: block; overflow: visible; }
+  .chart .grid { stroke: var(--grid); }
+  .chart .axis { stroke: var(--axis); }
+  .chart .tick { fill: var(--muted); font-size: 10px; }
+  .chart .label { fill: var(--muted); font-size: 10px; }
+  .chart .value { fill: var(--ink-2); font-size: 10px; }
+  .chart .zero { stroke: var(--axis); stroke-dasharray: 3 3; }
+  .chart .s1 { stroke: var(--s1); fill: var(--s1); } .chart .s2 { stroke: var(--s2); fill: var(--s2); }
+  .chart .s3 { stroke: var(--s3); fill: var(--s3); } .chart .s4 { stroke: var(--s4); fill: var(--s4); }
+  .chart .s5 { stroke: var(--s5); fill: var(--s5); } .chart .s6 { stroke: var(--s6); fill: var(--s6); }
+  .chart .up { fill: var(--up); stroke: var(--up); } .chart .down { fill: var(--down); stroke: var(--down); }
+  .chart .muted { fill: var(--line-strong); stroke: var(--line-strong); }
+  .chart .line { fill: none; stroke-width: 1.75; stroke-linejoin: round; stroke-linecap: round; }
+  .chart .area { stroke: none; opacity: 0.12; }
+  .chart .dot { stroke: var(--surface); stroke-width: 1.5; }
+  .chart .hover-line { stroke: var(--axis); }
+}
+
+/* The Run button: the page's one primary action, solid ink like the logo; it pulses while a run is going. The demo's
+   GitHub link is a tint of green with green text, like the Demo badge is of amber. */
+@layer components {
+  .btn-run {
+    color: var(--surface);
+    background: var(--ink);
+    border: 1px solid var(--ink);
+    transition: background-color 0.12s ease;
+  }
+  .btn-run:hover:not(:disabled) { background: color-mix(in oklab, var(--ink) 82%, var(--surface)); }
+  .btn-run:disabled { cursor: progress; animation: run-pulse 1.4s ease-in-out infinite; }
+  .btn-star {
+    color: var(--up);
+    background: var(--up-soft);
+    border: 1px solid color-mix(in oklab, var(--up) 30%, transparent);
+    transition: background-color 0.12s ease, border-color 0.12s ease;
+  }
+  .btn-star:hover { background: color-mix(in oklab, var(--up) 20%, transparent); border-color: color-mix(in oklab, var(--up) 50%, transparent); }
+}
+@keyframes run-pulse { 50% { opacity: 0.7; } }
+@media (prefers-reduced-motion: reduce) { .btn-run:disabled { animation: none; } }

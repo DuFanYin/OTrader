@@ -1,0 +1,91 @@
+{
+  "core4": [
+    {
+      "name": "Vol Spike",
+      "description": "Implied volatility shock upward.",
+      "vol_mult_delta": 0.35
+    },
+    {
+      "name": "Rate Jump",
+      "description": "Risk-free rate upward jump.",
+      "rate_shift": 0.015
+    },
+    {
+      "name": "Gap Move",
+      "description": "Downward spot gap event.",
+      "spot_mult_delta": -0.10,
+      "spot_mult_floor": 0.10
+    },
+    {
+      "name": "Correlation Breakdown",
+      "description": "Proxy breakdown: spot drop + vol up + rate down.",
+      "spot_mult_delta": -0.06,
+      "spot_mult_floor": 0.10,
+      "vol_mult_delta": 0.25,
+      "rate_shift": -0.006
+    }
+  ],
+  "vol_first": [
+    {
+      "name": "Vol Regime Shift",
+      "description": "Broad implied vol repricing upward.",
+      "vol_mult_delta": 0.50
+    },
+    {
+      "name": "Vol Crush",
+      "description": "Fast vol normalization downward.",
+      "vol_mult_delta": -0.30,
+      "vol_mult_floor": 0.05
+    },
+    {
+      "name": "Skew Panic Proxy",
+      "description": "Spot drops while vol rises sharply.",
+      "spot_mult_delta": -0.08,
+      "spot_mult_floor": 0.10,
+      "vol_mult_delta": 0.45
+    }
+  ],
+  "rates_first": [
+    {
+      "name": "Front-End Rate Jump",
+      "description": "Short-end rate repricing upward.",
+      "rate_shift": 0.020
+    },
+    {
+      "name": "Policy Easing Shock",
+      "description": "Rates drop on growth shock.",
+      "rate_shift": -0.015
+    },
+    {
+      "name": "Rate/Vol Divergence",
+      "description": "Rates up and vol up simultaneously.",
+      "rate_shift": 0.012,
+      "vol_mult_delta": 0.20
+    }
+  ],
+  "crash_kit": [
+    {
+      "name": "Crash Day",
+      "description": "Large downside gap with vol spike.",
+      "spot_mult_delta": -0.18,
+      "spot_mult_floor": 0.05,
+      "vol_mult_delta": 0.70
+    },
+    {
+      "name": "Aftershock",
+      "description": "Follow-through downside with elevated vol.",
+      "spot_mult_delta": -0.12,
+      "spot_mult_floor": 0.05,
+      "vol_mult_delta": 0.45,
+      "rate_shift": -0.010
+    },
+    {
+      "name": "Liquidity Vacuum",
+      "description": "Spot down with dislocated rates and vol.",
+      "spot_mult_delta": -0.15,
+      "spot_mult_floor": 0.05,
+      "vol_mult_delta": 0.55,
+      "rate_shift": 0.008
+    }
+  ]
+}
