@@ -1,6 +1,6 @@
 [project]
 name = "optra"
-version = "0.2.0"
+version = "0.0.0"
 description = "Optra's server: the page's API, the live engine through gRPC, backtests, and the lab's tools"
 requires-python = ">=3.13"
 # Pinned to exact versions, each at least two weeks old when chosen.
@@ -15,16 +15,13 @@ dependencies = [
     "polars==1.44.2",
     "pyarrow==25.0.1",
     "numpy==2.5.4",
+    "orjson==3.12.0",
 ]
 
 [tool.uv]
 package = false
 
 [dependency-groups]
-databento = [
-    "databento==0.87.0",
-    "zstandard==0.25.0",
-]
 dev = [
     "pytest==9.1.1",
 ]
@@ -33,3 +30,6 @@ dev = [
 # Run from app/server: the optra package and the evals (tests/evals) import by name.
 pythonpath = [".", "tests"]
 testpaths = ["tests"]
+# /tmp is a RAM disk on the ThinkPad: only the last run's folders of failed tests are kept.
+tmp_path_retention_count = 1
+tmp_path_retention_policy = "failed"

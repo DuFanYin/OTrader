@@ -1,63 +1,58 @@
-"""Backtest service: parameter validation, process management, and C++ runner bridge."""
+"""The page's backtest (POST /api/run_backtest): one strategy over a symbol's days, with the P&L and Greeks minute by
+minute for the chart; a job at the page's priority (research.jobs) like every backtest the server runs. One runs at a
+time: a new one, or POST /api/backtest/cancel, stops the one before."""
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from datetime import date
+from typing import Any
 
-from optra.infra.backtest_runner import cancel_current_backtest, run_backtest_cpp
+from optra.infra import access
+from optra.research import batch as batches
+from optra.research import combo, jobs, ledger
+from optra.research.ledger import Costs
+
+RUN = "page"  # the page's run, by name (jobs.cancel)
 
 
-DEFAULT_FEE_RATE = 0.35
-DEFAULT_RISK_FREE_RATE = 0.05
-DEFAULT_IV_PRICE_MODE = "mid"
+def run_backtest(request: dict[str, Any]) -> dict[str, Any]:
+    symbol = str(request.get("parquet", "")).strip().split("/")[-1]
+    strategy = request.get("strategy", "")
+    if not symbol or not strategy:
+        return {"status": "error", "error": "Missing required fields: parquet (the symbol), strategy"}
+    if not request.get("start_date") or not request.get("end_date"):
+        return {"status": "error", "error": "Missing required fields: start_date, end_date"}
+    iv_price_mode = str(request.get("iv_price_mode") or "mid").lower()
+    if iv_price_mode not in {"mid", "bid", "ask"}:
+        return {"status": "error", "error": "iv_price_mode must be mid, bid, or ask"}
+    try:
+        costs = Costs.model_validate(request.get("costs") or {})
+        risk_free_rate = float(request.get("risk_free_rate", 0.05) or 0.0)
+    except (TypeError, ValueError) as e:
+        return {"status": "error", "error": f"the costs and risk_free_rate: {e}"}
+    setting = {k: float(v) for k, v in (request.get("strategy_setting") or {}).items()
+               if isinstance(v, (int, float))}
+    try:
+        days = combo.days(symbol, date.fromisoformat(request["start_date"]), date.fromisoformat(request["end_date"]))
+        if not access.trusted():  # the agent's runs stop before the holdout
+            ledger.resolve_days([str(d) for d in days])
+        trial = {"id": RUN, "strategy": strategy, "setting": setting, "costs": costs.model_dump(),
+                 "minute_metrics": True}
+        batch = {"files": [str(d) for d in days], "risk_free_rate": risk_free_rate, "iv_price_mode": iv_price_mode,
+                 "trials": [trial]}
+        files, trials = jobs.run(batch, jobs.PRIORITY_PAGE, name=RUN)
+    except jobs.Cancelled:
+        return {"status": "cancelled", "error": "Backtest cancelled"}
+    except ValueError as exc:
+        return {"status": "error", "error": str(exc)}
+    trial = trials[0]
+    trial.pop("id", None)
+    # The trial's days (a column a field) summed as the ledger sums a trial's, and the days it ran: their bars
+    # and quotes.
+    summary = ledger.summary_of(trial["days"], batches.trades_of(trial)[0])
+    return {"status": "ok", **trial, "summary": summary, "day_files": files}
 
 
-class BacktestService:
-    """High-level backtest operations."""
-
-    @staticmethod
-    def run_backtest(request: Dict[str, Any]) -> Dict[str, Any]:
-        parquet = request.get("parquet", "")
-        strategy = request.get("strategy", "")
-        strategy_setting = request.get("strategy_setting", None)
-        iv_price_mode = str(request.get("iv_price_mode", DEFAULT_IV_PRICE_MODE) or DEFAULT_IV_PRICE_MODE).lower()
-        start_date = request.get("start_date")  # YYYY-MM-DD format
-        end_date = request.get("end_date")  # YYYY-MM-DD format
-        try:
-            fee_rate = float(request.get("fee_rate", DEFAULT_FEE_RATE) or DEFAULT_FEE_RATE)
-            slippage_bps = float(request.get("slippage_bps", 5.0) or 5.0)
-            risk_free_rate = float(request.get("risk_free_rate", DEFAULT_RISK_FREE_RATE) or DEFAULT_RISK_FREE_RATE)
-        except (TypeError, ValueError):
-            return {"status": "error", "error": "fee_rate, slippage_bps and risk_free_rate must be numbers"}
-        if iv_price_mode not in {"mid", "bid", "ask"}:
-            return {"status": "error", "error": "iv_price_mode must be mid, bid, or ask"}
-        if fee_rate < 0:
-            return {"status": "error", "error": "fee_rate must be >= 0"}
-        if slippage_bps < 0:
-            slippage_bps = 0.0
-        if not parquet or not strategy:
-            return {"status": "error", "error": "Missing required fields: parquet, strategy"}
-        if not start_date or not end_date:
-            return {"status": "error", "error": "Missing required fields: start_date, end_date"}
-
-        result = run_backtest_cpp(
-            parquet_path=parquet,
-            strategy_name=strategy,
-            fee_rate=fee_rate,
-            slippage_bps=slippage_bps,
-            risk_free_rate=risk_free_rate,
-            iv_price_mode=iv_price_mode,
-            strategy_setting=strategy_setting,
-            start_date=start_date,
-            end_date=end_date,
-        )
-        # progress_info into result
-        if result.get("status") == "ok" and "result" in result and "progress_info" in result:
-            result["result"]["progress_info"] = result.pop("progress_info")
-        return result
-
-    @staticmethod
-    def cancel_backtest() -> Dict[str, Any]:
-        """Cancel running C++ backtest (if any)."""
-        return cancel_current_backtest()
-
+def cancel_backtest() -> dict[str, Any]:
+    stopped = jobs.cancel(name=RUN) > 0
+    return {"status": "ok", "message": "backtest cancelled" if stopped else "no active backtest"}

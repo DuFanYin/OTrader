@@ -8,8 +8,11 @@
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_CXX_COMPILER_LAUNCHER": "ccache",
+        "CMAKE_LINKER_TYPE": "LLD",
         "BUILD_BACKTEST": "ON",
         "BUILD_TESTS": "ON",
+        "BUILD_BENCH": "ON",
         "BUILD_LIVE_GRPC": "ON",
         "BUILD_MARKETDATA": "ON",
         "BUILD_GATEWAY": "OFF",

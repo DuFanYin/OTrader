@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -243,7 +244,22 @@ inline RunStats summarize_runs(std::vector<double> per_round_ns) {
 
 // ----------------------------- reporting -----------------------------
 
+// The section print_header last opened: with OPTRA_BENCH_ROWS set, print_row also appends
+// "section<TAB>row<TAB>p50<TAB>p99" to that file, which bench_check compares with baseline.tsv.
+inline std::string& current_section() {
+    static std::string section;
+    return section;
+}
+
+inline void record_row(const char* name, const Histogram& h) {
+    const char* path = std::getenv("OPTRA_BENCH_ROWS");
+    if (path == nullptr || *path == '\0') return;
+    std::ofstream rows(path, std::ios::app);
+    rows << current_section() << '\t' << name << '\t' << h.pct(50) << '\t' << h.pct(99) << '\n';
+}
+
 inline void print_header(const char* title) {
+    current_section() = title;
     std::printf("\n== %s ==\n", title);
     std::printf("%-40s %10s %10s %10s %10s %10s %10s\n", "operation (ns)", "p50", "p99", "p99.9",
                 "max", "mean", "min");
@@ -254,6 +270,7 @@ inline void print_row(const char* name, const Histogram& h) {
                 (unsigned long long)h.pct(50), (unsigned long long)h.pct(99),
                 (unsigned long long)h.pct(99.9), (unsigned long long)h.max(), h.mean(),
                 (unsigned long long)h.min());
+    record_row(name, h);
 }
 
 inline void print_row_batch(const char* name, const Histogram& per_round) {

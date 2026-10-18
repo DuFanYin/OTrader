@@ -1,7 +1,7 @@
 /**
  * Delta hedging end to end, on synthetic days priced by a known model
- * (POST /api/data/synthetic, or scripts/data/synthetic_to_parquet.py, --tick 0 --spread 0): DeltaHedgedStraddleStrategy
- * holds an ATM straddle and the HedgeEngine trades the underlying. Every bar it checks
+ * (POST /api/data/synthetic, or python -m optra.data.synthetic_days, --tick 0 --spread 0): ComboStrategy
+ * holds an ATM straddle and its delta hedge trades the underlying. Every bar it checks
  *   - the hedge: each underlying trade is the whole number of shares that brings the last bar's
  *     delta back to zero, when that delta was outside the range, and there is none otherwise;
  *   - the delta: the platform's per-option delta against the delta of the model that priced
@@ -13,17 +13,18 @@
  *                            [--rate 0.05] [--engine-rate R] day.parquet...
  * Exits 1 when a hedge trade is not the one the delta called for. A week of options richer than
  * the moves (a sold straddle, hedged, should earn every day):
- *   uv run --project app/server python scripts/data/synthetic_to_parquet.py --start 2025-03-10 --end 2025-03-14 --out /tmp/rich
+ *   uv run --directory app/server python -m optra.data.synthetic_days --start 2025-03-10 --end 2025-03-14 --out /tmp/rich
  *       --tick 0 --spread 0 --realized-vol 0.10 --implied-vol 0.25
  *   test_hedge_backtest --iv 0.25 (the day files in /tmp/rich/SPY/SPY-2025-03)
- * --rate is the rate the data was priced at (synthetic_to_parquet.py --rate); --engine-rate the
+ * --rate is the rate the data was priced at (synthetic_days --rate); --engine-rate the
  * engine's --risk-free-rate (default the same): its forward comes from the quotes, so a wrong
  * rate barely moves its delta.
  */
 
 #include "quant/kernel.h"
-#include "core/engine_backtest.hpp"
-#include "log_level.hpp"
+#include "tests/lone_backtest.hpp"
+#include "strategy/strategy.hpp"
+#include "utilities/log_level.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -103,7 +104,7 @@ auto parse(int argc, char* argv[]) -> std::optional<Options> {
 }
 
 /** What hedging every bar should trade after a bar whose delta was `delta`: the whole shares back
- * to zero when it is outside the range (the HedgeEngine's delta_target 0). */
+ * to zero when it is outside the range (the hedge's delta_target 0). */
 auto expected_hedge(double delta, double range) -> int {
     if (std::abs(delta) <= range) {
         return 0;
@@ -115,65 +116,69 @@ auto expected_hedge(double delta, double range) -> int {
 auto run_day(const Options& o, const std::string& file) -> Day {
     Day day;
     day.file = file;
-    core::backtest::MainEngine engine;
-    engine.configure_execution(0.0, 0.0); // no fees or slippage: the P&L is the hedging's
-    engine.set_log_level(utilities::DISABLED);
-    engine.load_backtest_data(file);
-    if (engine.get_data_engine() == nullptr || !engine.get_data_engine()->has_data()) {
+    test::LoneBacktest backtest;
+    core::Main& engine = backtest.main();
+    backtest.configure_execution({.fee_rate = 0.0}); // no fees: the P&L is the hedging's
+    engine.log_engine()->set_level(utilities::DISABLED);
+    backtest.load_backtest_data(file);
+    if (backtest.historical_data() == nullptr || !backtest.historical_data()->has_data()) {
         std::println(stderr, "{}: no data", file);
         std::exit(2);
     }
-    engine.add_strategy("DeltaHedgedStraddleStrategy", engine.get_data_engine()->portfolio_name(),
-                        {{"position_size", o.size},
-                         {"side", o.side},
+    // An ATM straddle a day or more out (its call and its put), bought or sold, held to expiry.
+    engine.add_strategy("ComboStrategy", backtest.historical_data()->portfolio_name(),
+                        {{"quantity", o.size},
+                         {"leg1_ratio", o.side},
+                         {"leg1_right", 0},
+                         {"leg1_dte", 1},
+                         {"leg2_ratio", o.side},
+                         {"leg2_right", 1},
+                         {"leg2_dte", 1},
+                         {"entry_minute", 1},
+                         {"hold", 1},
                          {"hedge", o.hedge},
                          {"hedge_timer", 1},
-                         {"delta_range", o.range},
-                         {"min_dte", 1},
-                         {"max_dte", 7}});
-    engine.get_data_engine()->set_risk_free_rate(o.engine_rate);
+                         {"delta_range", o.range}});
+    backtest.historical_data()->set_risk_free_rate(o.engine_rate);
 
-    core::backtest::MainEngine* main = &engine;
     std::optional<Bar> last;
-    engine.register_timestep_callback([&](int /*timestep*/, adapters::Timestamp /*ts*/) {
-        model::PortfolioData* portfolio = main->get_portfolio(main->get_data_engine()->portfolio_name());
+    const auto after_bar = [&] {
+        model::Portfolio* portfolio = engine.portfolios()->find_portfolio(
+            backtest.historical_data()->portfolio_name());
         const model::StrategyHolding* holding =
-            main->option_strategy_engine()->get_strategy_holding();
-        if (portfolio == nullptr || holding == nullptr || !portfolio->underlying) {
+            engine.bookkeeping_engine()->find_holding(backtest.strategy()->name);
+        if (portfolio == nullptr || holding == nullptr || !portfolio->underlying()) {
             return;
         }
-        const model::UnderlyingData& u = *portfolio->underlying;
-        const Bar bar{.spot = 0.5 * (u.bid_price + u.ask_price),
+        const model::Underlying u = *portfolio->underlying();
+        const Bar bar{.spot = 0.5 * (u.bid() + u.ask()),
                       .delta = holding->summary.delta,
                       .gamma = holding->summary.gamma,
-                      .shares = holding->underlyingPosition.quantity,
+                      .shares = holding->shares.quantity,
                       .at = portfolio->datetime()};
         if (day.open == 0.0) {
             day.open = bar.spot;
         }
         day.close = bar.spot;
 
-        // The straddle's legs: their delta, and each option's against the model's.
+        // The straddle's options: their delta, and each one's against the model's.
         double option_delta = 0.0;
-        for (const auto& [_, position] : holding->optionPositions) {
-            for (const auto& leg : position.legs) {
-                const auto it = portfolio->options.find(leg.symbol);
-                if (leg.quantity == 0 || it == portfolio->options.end()) {
-                    continue;
-                }
-                const model::OptionData& opt = it->second;
-                option_delta += leg.quantity * opt.delta;
-                const double t = model::years_to_expiry(bar.at, opt.expiry);
-                const bool call = opt.type == model::OptionType::CALL;
-                const double k = opt.strike;
-                const double platform = opt.delta / opt.size;
-                // Black-Scholes at --rate: Black on spot·e^(rt), discounted at r.
-                const double forward = bar.spot * std::exp(o.rate * t);
-                const double model =
-                    quant::black_greeks(call, bar.spot, forward, k, t, o.rate, o.iv).delta;
-                day.max_delta_error = std::max(day.max_delta_error, std::abs(platform - model));
+        holding->for_each_open_option([&](const model::OptionPosition& position) {
+            const std::optional<model::Option> opt = portfolio->option(position.symbol);
+            if (!opt) {
+                return;
             }
-        }
+            option_delta += position.quantity * opt->delta();
+            const double t = model::years_to_expiry(bar.at, opt->expiry());
+            const bool call = opt->type() == model::OptionType::CALL;
+            const double k = opt->strike();
+            const double platform = opt->delta() / opt->multiplier();
+            // Black-Scholes at --rate: Black on spot·e^(rt), discounted at r.
+            const double forward = bar.spot * std::exp(o.rate * t);
+            const double model =
+                quant::black_greeks(call, bar.spot, forward, k, t, o.rate, o.iv).delta;
+            day.max_delta_error = std::max(day.max_delta_error, std::abs(platform - model));
+        });
         day.max_option_delta = std::max(day.max_option_delta, std::abs(option_delta));
         day.max_net_delta = std::max(day.max_net_delta, std::abs(bar.delta));
 
@@ -202,8 +207,14 @@ auto run_day(const Options& o, const std::string& file) -> Day {
         }
         day.pnl = holding->summary.pnl;
         last = bar;
-    });
-    engine.run();
+    };
+    if (backtest.begin_day()) {
+        for (std::size_t i = 0; i < backtest.historical_data()->minutes(); ++i) {
+            backtest.run_bar(i);
+            after_bar();
+        }
+    }
+    (void)backtest.end_day();
     return day;
 }
 
@@ -237,7 +248,7 @@ int main(int argc, char* argv[]) {
         wrong += d.wrong_hedges;
         total += d.pnl;
     }
-    std::println("total P&L {:.2f}; hedge trades not the ones the delta called for: {}", total,
+    std::println("total P&L {:.2f}; hedge fills not the ones the delta called for: {}", total,
                  wrong);
     return wrong == 0 ? 0 : 1;
 }

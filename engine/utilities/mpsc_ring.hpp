@@ -66,7 +66,6 @@ template <typename T, size_t Capacity> class MpscRing {
     }
 
     bool empty() const { return size_approx() == 0; }
-    static constexpr size_t capacity() { return Capacity; }
 
   private:
     static constexpr size_t mask_ = Capacity - 1;

@@ -1,10 +1,8 @@
 #pragma once
 
-/**
- * Event type enum and Event struct with variant payload (shared by live/backtest).
- */
+/** Event: a type and a pooled pointer payload, for live and backtest. */
 
-#include "object.hpp"
+#include "model/object.hpp"
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -15,7 +13,7 @@ namespace model {
 enum class EventType : uint8_t {
     Timer,
     Order,
-    Trade,
+    Fill,
     Snapshot,
     Task, // run on the event thread, in turn with the events queued before it
 };
@@ -25,7 +23,7 @@ using Task = std::function<void()>;
 
 /** All heavy payloads are pointers (pooled); consumer must release on dispatch/drain. */
 using EventPayload =
-    std::variant<std::monostate, OrderData*, TradeData*, PortfolioSnapshot*, Task*>;
+    std::variant<std::monostate, Order*, Fill*, PortfolioSnapshot*, Task*>;
 
 struct Event {
     EventType type = EventType::Timer;

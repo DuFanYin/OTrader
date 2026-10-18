@@ -5,7 +5,7 @@
  * writer, as live), a stand-in broker on a thread of its own (as IB's message thread: it takes the
  * orders the event thread sends and reports them filled, the order's update then its fill), and a
  * strategy that sends an order on each bar of a real day. This thread plays the market data
- * thread: it prices each bar's snapshot (as QuoteBook does) and puts it, and the timer tick behind
+ * thread: it prices each bar's snapshot (as MarketDataEngine does) and puts it, and the timer tick behind
  * it. Logging is on (INFO), written on the log thread to /dev/null.
  *
  * Paths, each hop timed with the TSC (PER_OP, ns):
@@ -16,10 +16,12 @@
  *                       on_snapshot: the path a strategy that answers each quote takes
  *   decision → broker   the strategy's order → the broker's thread has it: the pre-trade check, the
  *                       venue, its SUBMITTING report queued, the hand-off and the broker's wake-up
- *   broker → strategy   the broker reports the order filled and the fill → the strategy's on_trade:
+ *   broker → strategy   the broker reports the order filled and the fill → the strategy's on_fill:
  *                       two events through the queue, booked (orders, holdings, the storage)
  *   quote → fill        the whole loop
- *   fill → strategy     a fill put by another thread (the broker's) → the strategy's on_trade
+ *   ... the underlying  the same when only the underlying ticks (its options' quotes stay) and a
+ *                       second passes every tenth snapshot, as live between option quotes
+ *   fill → strategy     a fill put by another thread (the broker's) → the strategy's on_fill
  *   command             a task from another thread (as gRPC) → run on the event thread → its
  *                       result back on that thread
  *   ... under load      the same while another thread streams the portfolio's snapshots as fast
@@ -29,24 +31,27 @@
  * idle: one at a time with a pause between, so the event thread and the broker sleep in between
  * (as between quotes live); back to back: the next one as soon as the last is done.
  *
- * Data: a day of SPY (data/SPY/SPY-2025-03/20250303.parquet, or OPTRA_TEST_DAY).
+ * Data: a synthetic day of SPY (data/synthetic/SPY/SPY-2025-03/20250303.parquet, or
+ * OPTRA_TEST_DAY).
  */
 
-#include "bench_util.hpp"
+#include "tests/bench/bench_util.hpp"
 
-#include "core/engine_backtest.hpp" // core::backtest::MainEngine
-#include "adapters/backtest/engine_data_historical.hpp"
-#include "adapters/engine_gateway.hpp"
-#include "core/engines/log.hpp"
-#include "core/engines/option_strategy.hpp"
+#include "adapters/market_data/historical_data.hpp"
+#include "adapters/database/sqlite_database.hpp"
+#include "core/gateway/gateway.hpp"
+#include "core/main.hpp"
+#include "core/log/log_engine.hpp"
+#include "core/strategy/strategy_engine.hpp"
 #include "model/event.hpp"
 #include "model/object.hpp"
-#include "core/engine_event.hpp"
+#include "core/event_loop.hpp"
 #include "strategy/strategy_registry.hpp"
-#include "strategy/template.hpp"
+#include "strategy/strategy.hpp"
 
 #include <atomic>
 #include <barrier>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -88,13 +93,13 @@ Probe g_probe;
 
 /** On each bar, an order for one share, buying and selling in turn (the holding stays flat); a
  * fill ends the sample under way. */
-class LatencyProbeStrategy final : public strategy::OptionStrategyTemplate {
+class LatencyProbeStrategy final : public strategy::Strategy {
   public:
-    using OptionStrategyTemplate::OptionStrategyTemplate;
+    using Strategy::Strategy;
 
-    void on_init_logic() override {}
-    void on_stop_logic() override {}
-    void on_timer_logic() override {
+    void on_init() override {}
+    void on_stop() override {}
+    void on_timer() override {
         if (!g_probe.on_snapshot.load(std::memory_order_acquire)) {
             decide();
         }
@@ -104,8 +109,8 @@ class LatencyProbeStrategy final : public strategy::OptionStrategyTemplate {
             decide();
         }
     }
-    void on_trade(const model::TradeData& trade) override {
-        OptionStrategyTemplate::on_trade(trade); // its log line, as every strategy's
+    void on_fill(const model::Fill& fill) override {
+        Strategy::on_fill(fill); // its log line, as every strategy's
         const std::int64_t k = g_probe.sample.load(std::memory_order_acquire);
         if (k >= 0) {
             g_probe.filled[k] = clock_ticks();
@@ -121,8 +126,9 @@ class LatencyProbeStrategy final : public strategy::OptionStrategyTemplate {
         }
         g_probe.decided[k] = clock_ticks();
         buy_ = !buy_;
-        underlying_order(buy_ ? model::Direction::LONG : model::Direction::SHORT, 100.0, 1.0,
-                         model::OrderType::LIMIT);
+        const model::Side side = buy_ ? model::Side::BUY : model::Side::SELL;
+        send_order(std::array{leg(underlying()->symbol(), side)},
+                   side == model::Side::BUY ? 100.0 : -100.0, 1.0, model::OrderType::LIMIT);
     }
 
     bool buy_ = false;
@@ -133,7 +139,7 @@ REGISTER_STRATEGY(LatencyProbeStrategy);
 /** The broker, on a thread of its own as IB's message thread: woken through a mutex and a
  * condition variable (as the TWS API's signal is), it takes each order the event thread sent and
  * reports it filled, as IbGateway reports IB's messages: the order's update, then its fill. */
-class StandInBroker final : public adapters::Gateway {
+class StandInBroker final : public core::Gateway {
   public:
     explicit StandInBroker(utilities::Logger* logger)
         : Gateway(logger, "StandInBroker"),
@@ -144,22 +150,22 @@ class StandInBroker final : public adapters::Gateway {
     /** As IbGateway: an id, SUBMITTING reported at once (from the event thread), the order handed
      * to the broker's thread. */
     std::string send_order(const model::OrderRequest& req) override {
-        model::OrderData order = req.create_order_data(std::to_string(++next_id_), engine_name);
+        model::Order order = req.create_order(std::to_string(++next_id_));
         if (on_order_) {
             on_order_(order);
         }
-        std::string orderid = order.orderid;
+        std::string order_id = order.order_id;
         {
             std::scoped_lock lock(mutex_);
             orders_.push_back(std::move(order));
         }
         wake_.notify_one();
-        return orderid;
+        return order_id;
     }
 
   private:
     void run(const std::stop_token& st) {
-        std::vector<model::OrderData> taken;
+        std::vector<model::Order> taken;
         for (;;) {
             {
                 std::unique_lock lock(mutex_);
@@ -168,7 +174,7 @@ class StandInBroker final : public adapters::Gateway {
                 }
                 taken.swap(orders_);
             }
-            for (model::OrderData& order : taken) {
+            for (model::Order& order : taken) {
                 const std::int64_t k = g_probe.sample.load(std::memory_order_acquire);
                 if (k >= 0) {
                     g_probe.at_broker[k] = clock_ticks();
@@ -176,16 +182,16 @@ class StandInBroker final : public adapters::Gateway {
                 if (!g_probe.broker_fills.load(std::memory_order_acquire)) {
                     continue;
                 }
-                order.status = model::Status::ALLTRADED;
-                order.traded = order.volume;
+                order.status = model::Status::FILLED;
+                order.filled = order.quantity;
                 on_order_(order);
-                model::TradeData fill;
+                model::Fill fill;
                 fill.symbol = order.symbol;
-                fill.orderid = order.orderid;
-                fill.tradeid = "F" + order.orderid;
-                fill.direction = order.direction;
-                fill.price = order.price;
-                fill.volume = order.volume;
+                fill.order_id = order.order_id;
+                fill.fill_id = "F" + order.order_id;
+                fill.side = order.legs.front().side;
+                fill.price = std::abs(order.price);
+                fill.quantity = order.quantity;
                 on_trade_(fill);
             }
             taken.clear();
@@ -195,52 +201,57 @@ class StandInBroker final : public adapters::Gateway {
     int next_id_ = 0; // the event thread's
     std::mutex mutex_;
     std::condition_variable_any wake_;
-    std::vector<model::OrderData> orders_;
+    std::vector<model::Order> orders_;
     std::jthread thread_; // last: it starts once the rest is there, and stops first
 };
 
-/** The backtest assembly as it runs live: a day loaded, logging on (to /dev/null), the stand-in
- * broker its venue, the probe strategy started, its event loop started (no timer of its own: the
- * ticks are put). */
-class LiveAssembly final : public core::backtest::MainEngine {
+/** core::Main as it runs live, over a backtest's day: the stand-in broker its venue, the storage
+ * in memory, the data's clock, logging on (to log_out), the day loaded, the probe strategy
+ * started, its event loop started (no timer of its own: the ticks are put). */
+class LiveAssembly {
   public:
-    LiveAssembly(const std::string& day, std::FILE* log_out) {
-        log_engine()->set_sink([log_out](const utilities::LogData& r) {
+    LiveAssembly(const std::string& day, std::FILE* log_out)
+        : main_(core::Main::Ports{
+                    .database = [](utilities::Logger* logger) -> std::unique_ptr<core::Database> {
+                        return std::make_unique<adapters::SqliteDatabase>(logger, ":memory:");
+                    },
+                    .gateway = [](utilities::Logger* logger, const model::Portfolios&)
+                        -> std::unique_ptr<core::Gateway> {
+                        return std::make_unique<StandInBroker>(logger);
+                    }},
+                utilities::DISABLED),
+          data_(main_.log_engine()) {
+        main_.log_engine()->set_sink([log_out](const utilities::LogRecord& r) {
             std::println(log_out, "{} | {} | {} | {}", r.time, utilities::level_to_string(r.level),
                          r.source, r.msg);
         });
-        set_log_level(utilities::INFO);
-        load_backtest_data(day);
-        auto broker = std::make_unique<StandInBroker>(log_engine());
-        broker->set_callbacks(
-            [this](const model::OrderData& o) {
-                post(model::EventType::Order, acquire_order(), o);
-            },
-            [this](const model::TradeData& t) {
-                post(model::EventType::Trade, acquire_trade(), t);
-            });
-        gateway_ = std::move(broker); // the backtest's venue goes: run() is never called
-        event_engine_ = std::make_unique<core::EventEngine>(this, 0ms);
-        event_engine_->start();
-        strategy_name_ =
-            add_strategy("LatencyProbeStrategy", get_data_engine()->portfolio_name(), {});
-        on_event_thread([this] {
-            strategy::OptionStrategyTemplate* s = option_strategy_engine()->get_strategy();
-            s->on_init();
-            s->on_start();
-        });
+        main_.log_engine()->set_level(utilities::INFO);
+        data_.load(day);
+        data_.load_all_chains();
+        data_.build_portfolio(*main_.portfolios());
+        core::EventLoop& events = *main_.event_loop();
+        events.set_interval(0ms);
+        events.configure_from_environment(); // as live: OPTRA_EVENT_SPIN_US, OPTRA_EVENT_CPU
+        events.start();
+        strategy_name_ = main_.add_strategy("LatencyProbeStrategy", data_.portfolio_name(), {});
+        main_.init_strategy(strategy_name_);
+        main_.start_strategy(strategy_name_);
     }
-    ~LiveAssembly() { event_engine_->stop(); }
+    ~LiveAssembly() { main_.close(); } // the event thread done before the day goes
     LiveAssembly(const LiveAssembly&) = delete;
     LiveAssembly& operator=(const LiveAssembly&) = delete;
 
+    core::Main& main() { return main_; }
+    adapters::HistoricalData* historical_data() { return &data_; }
     /** A fill, as the broker's thread reports one. */
-    void report_fill(const model::TradeData& fill) {
-        post(model::EventType::Trade, acquire_trade(), fill);
+    void report_fill(const model::Fill& fill) {
+        main_.event_loop()->put_fill(fill);
     }
     [[nodiscard]] const std::string& strategy_name() const { return strategy_name_; }
 
   private:
+    core::Main main_;
+    adapters::HistoricalData data_; // into main_'s portfolios
     std::string strategy_name_;
 };
 
@@ -248,7 +259,7 @@ auto test_day() -> std::string {
     if (const char* day = std::getenv("OPTRA_TEST_DAY"); day != nullptr && *day != '\0') {
         return day;
     }
-    return std::string(OPTRA_DATA_DIR) + "/SPY/SPY-2025-03/20250303.parquet";
+    return std::string(OPTRA_DATA_DIR) + "/synthetic/SPY/SPY-2025-03/20250303.parquet";
 }
 
 /** Spin until the sample's fill reached the strategy; false after a second without it. */
@@ -279,26 +290,28 @@ constexpr std::size_t kWarmBars = 10; // each pass's first bars: caches and pool
 void run_day(const std::string& day, std::FILE* log_out, double pause_ns, int passes,
              LoopRows& rows, std::size_t& options) {
     for (int pass = 0; pass < passes; ++pass) {
-        LiveAssembly engine(day, log_out);
-        adapters::BacktestDataEngine* data = engine.get_data_engine();
-        const model::PortfolioData* portfolio = engine.get_portfolio(engine.get_data_engine()->portfolio_name());
-        const std::size_t bars = data->get_precomputed_snapshot_count();
-        options = bars > 0 ? data->get_precomputed_snapshot(0).bid.size() : 0;
+        LiveAssembly assembly(day, log_out);
+        core::Main& engine = assembly.main();
+        adapters::HistoricalData* data = assembly.historical_data();
+        const model::Portfolio* portfolio =
+            engine.find_portfolio(assembly.historical_data()->portfolio_name());
+        const std::size_t bars = data->minutes();
+        options = data->listing()->size();
         g_probe.broker_fills = true;
         g_probe.on_snapshot = false;
         g_probe.done = -1;
-        model::PortfolioSnapshot snapshot;
+        model::PortfolioSnapshot snapshot(data->listing(), data->portfolio_name());
         for (std::size_t bar = 0; bar < bars && bar < Probe::kMax; ++bar) {
             const auto k = static_cast<std::int64_t>(bar);
-            snapshot = data->get_precomputed_snapshot(bar); // as the quotes stand: not timed
+            data->fill(bar, snapshot); // as the quotes stand: not timed
             g_probe.sample.store(k, std::memory_order_release);
             g_probe.start[k] = clock_ticks();
             portfolio->price_snapshot(snapshot); // a new bar: every quote and the time moved
-            engine.put_snapshot(snapshot);
-            engine.put_event(model::Event(model::EventType::Timer));
+            engine.event_loop()->put_snapshot(snapshot);
+            engine.event_loop()->put_event(model::Event(model::EventType::Timer));
             if (!wait_done(k)) {
                 ++rows.skipped; // a bar with no decision (a minute repeated in the data)
-                engine.on_event_thread([] {});
+                engine.event_loop()->on_event_thread([] {});
                 continue;
             }
             if (bar >= kWarmBars) {
@@ -317,39 +330,59 @@ void run_day(const std::string& day, std::FILE* log_out, double pause_ns, int pa
 
 /** A strategy that answers each quote: a few options' quotes change on one bar, the snapshot is
  * priced again (only those) and put, the strategy decides in on_snapshot; samples of them. */
+/** What changes between one snapshot and the next in run_quotes. */
+enum class QuoteChange : std::uint8_t {
+    TwoOptions, // two options' quotes tick; the time and the underlying stay
+    Underlying, // the underlying ticks and the options' quotes stay; every tenth, a second passes
+};
+
 void run_quotes(const std::string& day, std::FILE* log_out, double pause_ns, int samples,
-                LoopRows& rows) {
-    LiveAssembly engine(day, log_out);
-    adapters::BacktestDataEngine* data = engine.get_data_engine();
-    const model::PortfolioData* portfolio = engine.get_portfolio(engine.get_data_engine()->portfolio_name());
+                LoopRows& rows, QuoteChange change = QuoteChange::TwoOptions) {
+    LiveAssembly assembly(day, log_out);
+    core::Main& engine = assembly.main();
+    adapters::HistoricalData* data = assembly.historical_data();
+    const model::Portfolio* portfolio =
+        engine.find_portfolio(assembly.historical_data()->portfolio_name());
     g_probe.broker_fills = true;
     g_probe.on_snapshot = true;
     g_probe.done = -1;
-    model::PortfolioSnapshot book = data->get_precomputed_snapshot(data->get_precomputed_snapshot_count() / 2);
-    portfolio->price_snapshot(book); // as QuoteBook's book stands after its first snapshot
+    model::PortfolioSnapshot book(data->listing(), data->portfolio_name());
+    data->fill(data->minutes() / 2, book);
+    portfolio->price_snapshot(book); // as MarketDataEngine's book stands after its first snapshot
     const std::size_t n = book.bid.size();
     std::vector<std::uint8_t> changed(n, 0);
     for (int i = 0; i < samples && i < static_cast<int>(Probe::kMax); ++i) {
-        // Two options' quotes tick, the time and the underlying stay.
         const std::size_t a = (static_cast<std::size_t>(i) * 7) % n;
         const std::size_t b = (static_cast<std::size_t>(i) * 13 + 5) % n;
         const double tick = (i % 2 == 0) ? 0.01 : -0.01;
-        for (const std::size_t c : {a, b}) {
-            if (book.bid[c] > 0.05) {
-                book.bid[c] += tick;
-                book.ask[c] += tick;
+        const bool underlying = change == QuoteChange::Underlying;
+        if (underlying) {
+            book.underlying_bid += tick;
+            book.underlying_ask += tick;
+            book.underlying_mark += tick;
+            if (i % 10 == 9) {
+                book.datetime += std::chrono::seconds(1); // live: a snapshot every 100 ms
             }
-            changed[c] = 1;
+        } else {
+            for (const std::size_t c : {a, b}) {
+                if (book.bid[c] > 0.05) {
+                    book.values(&model::Frame::bid)[c] += tick;
+                    book.values(&model::Frame::ask)[c] += tick;
+                }
+                changed[c] = 1;
+            }
         }
         const auto k = static_cast<std::int64_t>(i);
         g_probe.sample.store(k, std::memory_order_release);
         g_probe.start[k] = clock_ticks();
-        portfolio->price_snapshot(book, changed, /*underlying_changed=*/false);
-        engine.put_snapshot(book);
+        book.quoted_tsc = g_probe.start[k]; // as MarketDataEngine stamps it: the engine measures from it
+        portfolio->price_snapshot(book, changed, /*underlying_changed=*/underlying,
+                                  model::Portfolio::kLiveTimeStep); // as MarketDataEngine prices
+        engine.event_loop()->put_snapshot(book);
         changed[a] = changed[b] = 0;
         if (!wait_done(k)) {
             ++rows.skipped;
-            engine.on_event_thread([] {});
+            engine.event_loop()->on_event_thread([] {});
             continue;
         }
         if (i >= static_cast<int>(kWarmBars)) {
@@ -364,6 +397,9 @@ void run_quotes(const std::string& day, std::FILE* log_out, double pause_ns, int
     }
     g_probe.sample = -1;
     g_probe.on_snapshot = false;
+    // The engine's own measurement of the same samples (EventLoop's histograms), to check
+    // against the probes above.
+    std::printf("%s\n", engine.event_loop()->latency_report().c_str());
 }
 
 void print_loop(const char* title, const LoopRows& rows) {
@@ -379,26 +415,35 @@ void print_loop(const char* title, const LoopRows& rows) {
 
 /** The strategy's order, left working (the broker does not fill it): the fills put below are its,
  * so each reaches the strategy. */
-auto working_order(LiveAssembly& engine) -> std::string {
+auto working_order(LiveAssembly& assembly) -> std::string {
+    core::Main& engine = assembly.main();
     g_probe.broker_fills = false;
+    // An order the fills can keep coming against: above the default risk limits (10,000 shares an
+    // order, 100,000 held), which would refuse it.
+    engine.set_risk_settings({{"max_share_order", 100'000'000}, {"max_share_position", 1'000'000'000}});
     model::OrderRequest req;
-    req.symbol = engine.option_strategy_engine()->get_strategy()->underlying()->symbol;
-    req.direction = model::Direction::LONG;
+    req.symbol =
+        engine.strategy_engine()->find_strategy(assembly.strategy_name())->underlying()->symbol();
+    req.legs = {{.ratio = 1, .side = model::Side::BUY, .symbol = req.symbol}};
     req.type = model::OrderType::LIMIT;
-    req.volume = 1'000'000;
+    req.quantity = 1'000'000;
     req.price = 100.0;
-    return engine.on_event_thread([&] { return engine.send_order(engine.strategy_name(), req); });
+    return engine.event_loop()->on_event_thread(
+        [&] {
+            return engine.send_order(
+                *engine.strategy_engine()->find_record(assembly.strategy_name()), req);
+        });
 }
 
-auto fill_of(const std::string& orderid, const std::string& symbol, std::size_t n)
-    -> model::TradeData {
-    model::TradeData fill;
+auto fill_of(const std::string& order_id, const std::string& symbol, std::size_t n)
+    -> model::Fill {
+    model::Fill fill;
     fill.symbol = symbol;
-    fill.orderid = orderid;
-    fill.tradeid = std::format("L{}-{}", orderid, n);
-    fill.direction = model::Direction::LONG;
+    fill.order_id = order_id;
+    fill.fill_id = std::format("L{}-{}", order_id, n);
+    fill.side = model::Side::BUY;
     fill.price = 100.0;
-    fill.volume = 1;
+    fill.quantity = 1;
     return fill;
 }
 
@@ -408,16 +453,18 @@ struct SideRows {
 
 /** Fills of the working order put from this thread (the broker's) and commands from it (as
  * gRPC's), one at a time; while `load` is set, another thread streams the day's snapshots. */
-void run_side_paths(LiveAssembly& engine, double pause_ns, int samples, SideRows& rows,
+void run_side_paths(LiveAssembly& assembly, double pause_ns, int samples, SideRows& rows,
                     std::size_t& first_fill) {
-    const std::string orderid = working_order(engine);
-    const std::string symbol = engine.option_strategy_engine()->get_strategy()->underlying()->symbol;
+    core::Main& engine = assembly.main();
+    const std::string order_id = working_order(assembly);
+    const std::string symbol =
+        engine.strategy_engine()->find_strategy(assembly.strategy_name())->underlying()->symbol();
     for (int i = 0; i < samples; ++i) {
-        const model::TradeData fill = fill_of(orderid, symbol, first_fill++);
+        const model::Fill fill = fill_of(order_id, symbol, first_fill++);
         const auto k = static_cast<std::int64_t>(i);
         g_probe.sample.store(k, std::memory_order_release);
         g_probe.start[k] = clock_ticks();
-        engine.report_fill(fill);
+        assembly.report_fill(fill);
         if (!wait_done(k)) {
             std::printf("a fill did not reach the strategy\n");
             std::exit(1);
@@ -429,7 +476,7 @@ void run_side_paths(LiveAssembly& engine, double pause_ns, int samples, SideRows
             bench::spin_for_ns(pause_ns);
         }
         const std::uint64_t t0 = clock_ticks();
-        bench::keep(engine.on_event_thread([] { return 1; }));
+        bench::keep(engine.event_loop()->on_event_thread([] { return 1; }));
         const std::uint64_t t1 = clock_ticks();
         if (i >= static_cast<int>(kWarmBars)) {
             rows.command.record_ns(ns_between(t0, t1));
@@ -445,16 +492,18 @@ void run_side_paths(LiveAssembly& engine, double pause_ns, int samples, SideRows
  * after another, until stopped. */
 class SnapshotStream {
   public:
-    explicit SnapshotStream(LiveAssembly& engine)
-        : thread_([&engine](const std::stop_token& st) {
-              adapters::BacktestDataEngine* data = engine.get_data_engine();
-              const model::PortfolioData* portfolio = engine.get_portfolio(engine.get_data_engine()->portfolio_name());
-              const std::size_t bars = data->get_precomputed_snapshot_count();
-              model::PortfolioSnapshot snapshot;
+    explicit SnapshotStream(LiveAssembly& assembly)
+        : thread_([&assembly](const std::stop_token& st) {
+              core::Main& engine = assembly.main();
+              adapters::HistoricalData* data = assembly.historical_data();
+              const model::Portfolio* portfolio =
+                  engine.find_portfolio(assembly.historical_data()->portfolio_name());
+              const std::size_t bars = data->minutes();
+              model::PortfolioSnapshot snapshot(data->listing(), data->portfolio_name());
               for (std::size_t i = 0; !st.stop_requested(); ++i) {
-                  snapshot = data->get_precomputed_snapshot(i % bars);
+                  data->fill(i % bars, snapshot);
                   portfolio->price_snapshot(snapshot);
-                  engine.put_snapshot(snapshot);
+                  engine.event_loop()->put_snapshot(snapshot);
               }
           }) {}
 
@@ -463,15 +512,17 @@ class SnapshotStream {
 };
 
 /** Four threads put n fills each of the working order; fills/s until all are booked. */
-double fills_per_second(LiveAssembly& engine, std::size_t n, std::size_t& first_fill) {
+double fills_per_second(LiveAssembly& assembly, std::size_t n, std::size_t& first_fill) {
     constexpr int kThreads = 4;
-    const std::string orderid = working_order(engine);
-    const std::string symbol = engine.option_strategy_engine()->get_strategy()->underlying()->symbol;
-    std::vector<std::vector<model::TradeData>> fills(kThreads);
+    core::Main& engine = assembly.main();
+    const std::string order_id = working_order(assembly);
+    const std::string symbol =
+        engine.strategy_engine()->find_strategy(assembly.strategy_name())->underlying()->symbol();
+    std::vector<std::vector<model::Fill>> fills(kThreads);
     for (auto& mine : fills) {
         mine.reserve(n);
         for (std::size_t i = 0; i < n; ++i) {
-            mine.push_back(fill_of(orderid, symbol, first_fill++));
+            mine.push_back(fill_of(order_id, symbol, first_fill++));
         }
     }
     std::barrier ready(kThreads + 1);
@@ -479,24 +530,25 @@ double fills_per_second(LiveAssembly& engine, std::size_t n, std::size_t& first_
     for (int t = 0; t < kThreads; ++t) {
         threads.emplace_back([&, t] {
             ready.arrive_and_wait();
-            for (const model::TradeData& fill : fills[t]) {
-                engine.report_fill(fill);
+            for (const model::Fill& fill : fills[t]) {
+                assembly.report_fill(fill);
             }
         });
     }
     ready.arrive_and_wait();
     const std::uint64_t t0 = clock_ticks();
     threads.clear(); // joined: every fill is put
-    engine.on_event_thread([] {}); // and booked
+    engine.event_loop()->on_event_thread([] {}); // and booked
     const double ns = ticks_to_ns(clock_ticks() - t0);
     return static_cast<double>(kThreads * n) * 1e9 / ns;
 }
 
 /** What write_log costs the event thread: n lines, one at a time, a pause between. */
-Histogram write_log_cost(LiveAssembly& engine, int n) {
+Histogram write_log_cost(LiveAssembly& assembly, int n) {
+    core::Main& engine = assembly.main();
     Histogram h;
     const std::string line(80, 'x'); // a typical line's length
-    engine.on_event_thread([&] {
+    engine.event_loop()->on_event_thread([&] {
         for (int i = 0; i < n; ++i) {
             const std::uint64_t t0 = clock_ticks();
             engine.write_log(line, utilities::INFO);
@@ -532,6 +584,10 @@ int main() {
     LoopRows quotes;
     run_quotes(day, log_out, /*pause_ns=*/300'000, /*samples=*/2000, quotes);
     print_loop("two quotes change -> on_snapshot -> broker -> fill back, idle (ns)", quotes);
+
+    LoopRows ticks;
+    run_quotes(day, log_out, /*pause_ns=*/300'000, /*samples=*/2000, ticks, QuoteChange::Underlying);
+    print_loop("the underlying ticks -> on_snapshot -> broker -> fill back, idle (ns)", ticks);
 
     std::size_t first_fill = 0;
     {

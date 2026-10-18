@@ -34,13 +34,9 @@ bool solve_tridiagonal(const std::vector<double>& a, const std::vector<double>& 
 
 }  // namespace
 
-// Finite-difference solver on S in [0, s_max_mult * max(K, S0)], marching in
-// time-to-expiry tau. Scheme and American (PSOR) handling follow QF-205
-// (src/option_calculator/methods/fd.py) with three corrections:
-//   - boundary values use the tau of the step being solved, (n+1)·dt
-//     (QF-205 used T - n·dt, i.e. the time-0 discount on the first step);
-//   - American boundaries are floored at intrinsic value (S=0 put = K);
-//   - PSOR does not count the boundary term twice at the first / last node.
+// Finite-difference solver on S in [0, s_max_mult * max(K, S0)], marching in time-to-expiry tau.
+// Boundary values use the tau of the step being solved, (n+1)·dt; American boundaries are floored
+// at intrinsic (S=0 put = K); PSOR counts the boundary term once at the first / last node.
 PdeOutcome pde_solve(const PdeSpec& p) {
     PdeOutcome out;
     const int    M     = std::max(p.s_steps, 4);
@@ -143,7 +139,7 @@ PdeOutcome pde_solve(const PdeSpec& p) {
         v.swap(v_new);
     }
 
-    // Linear interpolation at spot (np.interp in QF-205).
+    // Linear interpolation at spot.
     const double pos = p.spot / ds;
     const int    si  = std::min(std::max(static_cast<int>(pos), 0), M - 1);
     const double w   = pos - si;

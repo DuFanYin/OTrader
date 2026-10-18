@@ -1,148 +1,40 @@
-# Environment variables
+# Keys and settings of this machine
 .env
 
-# Cache directories (including subdirectories)
-**/__pycache__/
-**/.cache/
-**/.mypy_cache/
-**/.pytest_cache/
-**/.hypothesis/
-**/.tox/
-**/.nox/
-**/.coverage/
-**/.coverage.*
-**/.ipynb_checkpoints/
-**/.webassets-cache/
-**/.scrapy/
-**/.pyre/
-
-# Byte-compiled / optimized / DLL files
-*.py[cod]
-*$py.class
-
-# System files
-.DS_Store
-**/.DS_Store
-
-# Strategy and trading data files
-setting/order_data.csv
-setting/trade_data.csv
-setting/strategy_data.json
-setting/strategy_setting.json
-setting/strategy_data.yaml
-setting/strategy_setting.yaml
-
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-/lib/
-/lib64/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# PyInstaller
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
-htmlcov/
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-
-# Translations
-*.mo
-*.pot
-
-# Django stuff
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-
-# Flask stuff
-instance/
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-target/
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-.python-version
-
-# pipenv
-#Pipfile.lock
-
-# PEP 582
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath parsed files
-*.sage.py
-
-# Virtual environments
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# IDE settings
-.spyderproject
-.spyproject
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# Type checkers
-.dmypy.json
-dmypy.json
-
-# Market data (large parquet/dbn files — never commit)
+# The owner's notes and plans, data, and what builds and runs leave
+local/
 /data/
-
-# Build directories (any depth)
 **/build/
+dist/
+*.log
 
-# Third-party / vendored dependencies (any depth)
+# Strategies: only strategy/demo is kept (the repository's); research, paper, live and configs are the owner's and agents'.
+/strategy/*
+!/strategy/demo/
+
+# Python
+**/__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+
+# Node
 **/node_modules/
+
+# Third-party code fetched by scripts
 **/thirdparty/
 **/third_party/
 **/vendor/
-**/vcpkg_installed/
 **/_deps/
 
-local/
-
-# Claude Code local guidance (AGENTS.md is the tracked source; a local CLAUDE.md can import it: @AGENTS.md)
+# Editors and systems; a local CLAUDE.md can import AGENTS.md (@AGENTS.md), the tracked source
 CLAUDE.md
 .vscode/
+.DS_Store

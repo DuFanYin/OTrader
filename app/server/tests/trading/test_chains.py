@@ -11,8 +11,8 @@ from optra.utils import files
 from optra.services import market_data  # noqa: E402
 from optra.infra.numerics import is_engine_available  # noqa: E402
 
-from optra.services import synthetic_days  # noqa: E402
-from optra.services import chains  # noqa: E402
+from optra.data import synthetic_days  # noqa: E402
+from optra.data import chains  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not is_engine_available(), reason="libanalytics_c.so not built")
 

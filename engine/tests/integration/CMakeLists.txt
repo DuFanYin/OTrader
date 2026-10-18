@@ -4,8 +4,8 @@ find_package(SQLite3 REQUIRED) # the tests copy the database through SQLite's ba
 
 add_executable(test_ib_paper_gtest test_ib_paper.cpp)
 target_include_directories(test_ib_paper_gtest PRIVATE ${CMAKE_SOURCE_DIR})
-target_link_libraries(test_ib_paper_gtest PRIVATE core_live strategy_factory SQLite::SQLite3
-                                                  GTest::gtest_main)
+target_link_libraries(test_ib_paper_gtest PRIVATE live SQLite::SQLite3 GTest::gtest_main)
+optra_strategy_host(test_ib_paper_gtest LOAD)
 target_compile_definitions(test_ib_paper_gtest PRIVATE
   OPTRA_DEFAULT_DB="${CMAKE_SOURCE_DIR}/../data/optra.db"
   OPTRA_IB_PAPER_DIR="${CMAKE_CURRENT_BINARY_DIR}")

@@ -8,13 +8,20 @@ const SETTINGS_KEY = "optra_settings_v1";
 export const DEFAULTS = {
   // backtest
   btSymbol: "", btStart: "", btEnd: "", btStrategy: "",
-  btFeeRate: 0.35, btSlippageBps: 5, btRiskFreeRate: 0.05, btIvMode: "mid",
+  btCosts: {},  // cost -> value where the value is not the default
+  btRiskFreeRate: 0.05, btIvMode: "mid",
   btSettings: {},  // strategy class -> { parameter: value } where the value is not the default
+  // experiments
+  exFamily: "", exNote: "", exSymbol: "", exStart: "", exEnd: "", exStrategy: "",
+  exSpace: {},  // strategy class -> { parameter: its space as typed ("15, 30", "10..60/10") }
+  exSearch: "grid", exN: 50, exSeed: 0, exCosts: {},
+  // tools
+  toolsFilter: "", toolsOpen: "strategy_api",
   // live
   liveClass: "", livePortfolio: "", liveName: "", liveSettings: {},
   // account
   acValues: "main", acPositions: "open", acPortfolio: "", acExpiry: "", acPrice: null,
-  acBookStrategy: "", acBookSymbol: "", acBookSide: "LONG", acBookVolume: null, acBookPrice: null, acBookReason: "",
+  acBookStrategy: "", acBookSymbol: "", acBookSide: "BUY", acBookQuantity: null, acBookPrice: null, acBookReason: "",
   // orders and trades
   otType: "all", otStrategy: "", otLimit: 200,
   // contracts from IB
@@ -69,7 +76,7 @@ export const setParam = (key, value) => { params.value = { ...params.value, [key
 export const setParams = (values) => { params.value = { ...params.value, ...values }; };
 export const resetParams = () => { params.value = { ...DEFAULTS }; };
 
-export const settings = signal(load(SETTINGS_KEY, { precision: 4, dataMode: "live", tab: "home" }));
+export const settings = signal(load(SETTINGS_KEY, { precision: 4, dataMode: "live", tab: "home", labView: "screener" }));
 persist(SETTINGS_KEY, settings);
 export const setSetting = (key, value) => { settings.value = { ...settings.value, [key]: value }; };
 

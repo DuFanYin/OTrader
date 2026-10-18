@@ -1,23 +1,24 @@
 /**
  * C++23 equivalent of test_backtest_data.py
- * Driven by the backtest MainEngine; observe backtest data and ATM behavior.
+ * Driven by the backtest Main; observe backtest data and ATM behavior.
  *
  * Usage: test_backtest_data <parquet_path> [max_timesteps]
  *
  * Without Arrow/Parquet support, load will fail and the test reports "Parquet not available".
  */
 
-#include "core/engine_backtest.hpp"
-#include "log_level.hpp"
+#include "tests/lone_backtest.hpp"
+#include "utilities/log_level.hpp"
 #include <chrono>
 #include <cstdlib>
+#include <format>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 
-static std::string timestamp_to_string(adapters::Timestamp ts) {
+static std::string timestamp_to_string(model::DateTime ts) {
     auto t = std::chrono::system_clock::to_time_t(ts);
     std::ostringstream os;
     os << std::put_time(std::gmtime(&t), "%Y-%m-%d %H:%M:%S");
@@ -27,21 +28,22 @@ static std::string timestamp_to_string(adapters::Timestamp ts) {
 static void test_load_and_advance_time(
     const std::string& parquet_path, int max_timesteps, const std::string& strategy_name,
     const std::unordered_map<std::string, double>& strategy_setting, bool enable_log) {
-    using namespace core::backtest;
+    using namespace backtest;
     using namespace adapters;
 
     std::cout << std::string(80, '=') << "\n";
-    std::cout << "Backtest Data + ATM Inspection Test (via the backtest MainEngine)\n";
+    std::cout << "Backtest Data + ATM Inspection Test (via the backtest Main)\n";
     std::cout << std::string(80, '=') << "\n";
 
-    MainEngine engine;
+    test::LoneBacktest backtest;
+    core::Main& engine = backtest.main();
     const utilities::LogLevel log_level = enable_log ? utilities::INFO : utilities::DISABLED;
-    engine.set_log_level(log_level);
+    engine.log_engine()->set_level(log_level);
 
     std::cout << "\n[1] Loading parquet file: " << parquet_path << "\n";
-    engine.load_backtest_data(parquet_path);
-    BacktestDataEngine* data_engine = engine.get_data_engine();
-    if (!data_engine || !data_engine->has_data()) {
+    backtest.load_backtest_data(parquet_path);
+    HistoricalData* historical = backtest.historical_data();
+    if (!historical || !historical->has_data()) {
         std::cout << "FAIL Failed to load parquet (or Parquet support not built; use Arrow for "
                      "real data)\n";
         std::cout << "[2] File metadata: (no data)\n";
@@ -49,22 +51,29 @@ static void test_load_and_advance_time(
         return;
     }
     std::cout << "OK Parquet file loaded successfully\n";
+    historical->load_all_chains(); // the whole day inspected, no strategy asking for its chains
 
-    auto meta = data_engine->get_meta();
     std::cout << "\n[2] File metadata:\n";
-    std::cout << "  Path: " << meta.path << "\n";
-    std::cout << "  Row count: " << meta.row_count << "\n";
-    std::cout << "  Time column: " << meta.time_column << "\n";
-    std::cout << "  Start time: " << meta.ts_start << "\n";
-    std::cout << "  End time: " << meta.ts_end << "\n";
+    std::cout << "  Path: " << historical->path() << "\n";
+    std::cout << "  Row count: " << historical->rows() << "\n";
+    std::cout << "  Minutes: " << historical->minutes() << "\n";
+    if (const std::size_t n = historical->minutes(); n > 0) {
+        using std::chrono::floor, std::chrono::seconds;
+        model::PortfolioSnapshot first;
+        model::PortfolioSnapshot last;
+        historical->fill(0, first);
+        historical->fill(n - 1, last);
+        std::cout << std::format("  First and last minute: {:%FT%TZ}, {:%FT%TZ}\n",
+                                 floor<seconds>(first.datetime), floor<seconds>(last.datetime));
+    }
 
-    engine.add_strategy(strategy_name, data_engine->portfolio_name(), strategy_setting);
+    engine.add_strategy(strategy_name, historical->portfolio_name(), strategy_setting);
 
     std::cout << "\n[3] Running backtest and inspecting first " << max_timesteps
               << " timesteps...\n";
 
     int inspected_timesteps = 0;
-    engine.register_timestep_callback([&](int timestep, Timestamp ts) {
+    const auto inspect = [&](int timestep, model::DateTime ts) {
         if (timestep > max_timesteps) {
             return;
         }
@@ -73,64 +82,61 @@ static void test_load_and_advance_time(
         std::cout << "\n  Timestep " << timestep << ": " << timestamp_to_string(ts) << "\n";
 
         // The day's portfolio
-        auto* p_data = engine.get_portfolio(data_engine->portfolio_name());
-        if (!p_data || !p_data->underlying) {
+        auto* p_data = engine.portfolios()->find_portfolio(historical->portfolio_name());
+        if (!p_data || !p_data->underlying()) {
             std::cout << "    (no portfolio/underlying available)\n";
             return;
         }
 
-        double s = p_data->underlying->mid_price;
+        double s = p_data->underlying()->mid();
         std::cout << "    Underlying mid: " << s << "\n";
-        std::cout << "    ATM call/put from PortfolioData (S=" << s << "):\n";
+        std::cout << "    ATM call/put from Portfolio (S=" << s << "):\n";
         if (s <= 0.0) {
             std::cout << "      (no underlying mid price, cannot select ATM options)\n";
             return;
         }
 
-        // get_chain_by_expiry [0, 3650]
-        std::vector<std::string> chain_syms = p_data->get_chain_by_expiry(0, 7);
+        std::vector<std::string> chain_syms = p_data->chains_by_expiry(0, 7);
         int printed_chains = 0;
         for (const auto& chain_sym : chain_syms) {
             if (printed_chains >= 3)
                 break;
-            const auto* chain = p_data->get_chain(chain_sym);
-            if (!chain || chain->atm_strike <= 0)
+            const std::optional<model::Chain> chain = p_data->chain(chain_sym);
+            if (!chain || chain->atm_strike() <= 0)
                 continue;
-            auto call_it = chain->calls.find(chain->atm_strike);
-            auto put_it = chain->puts.find(chain->atm_strike);
-            if (call_it == chain->calls.end() && put_it == chain->puts.end()) {
+            const double atm = chain->atm_strike();
+            const std::optional<model::Option> call = chain->call(atm);
+            const std::optional<model::Option> put = chain->put(atm);
+            if (!call && !put) {
                 continue;
             }
-            std::cout << "      Chain " << chain_sym << " (DTE=" << chain->days_to_expiry
-                      << ") ATM strike=" << chain->atm_strike << " (index=" << chain->atm_strike
-                      << ")\n";
-            if (call_it != chain->calls.end() && call_it->second) {
-                const auto* opt = call_it->second;
-                std::cout << "        CALL " << opt->symbol
-                          << ": K=" << opt->strike
-                          << " bid=" << opt->bid_price << " ask=" << opt->ask_price
-                          << " mid=" << opt->mid_price << " iv=" << opt->mid_iv
-                          << " delta=" << opt->delta << " gamma=" << opt->gamma
-                          << " theta=" << opt->theta << " vega=" << opt->vega << "\n";
-            }
-            if (put_it != chain->puts.end() && put_it->second) {
-                const auto* opt = put_it->second;
-                std::cout << "        PUT  " << opt->symbol
-                          << ": K=" << opt->strike
-                          << " bid=" << opt->bid_price << " ask=" << opt->ask_price
-                          << " mid=" << opt->mid_price << " iv=" << opt->mid_iv
-                          << " delta=" << opt->delta << " gamma=" << opt->gamma
-                          << " theta=" << opt->theta << " vega=" << opt->vega << "\n";
+            std::cout << "      Chain " << chain_sym << " (DTE=" << chain->days_to_expiry()
+                      << ") ATM strike=" << atm << "\n";
+            for (const auto& [side, opt] : {std::pair{"CALL", call}, std::pair{"PUT ", put}}) {
+                if (opt) {
+                    std::cout << "        " << side << " " << opt->symbol()
+                              << ": K=" << opt->strike() << " bid=" << opt->bid()
+                              << " ask=" << opt->ask() << " mid=" << opt->mid()
+                              << " iv=" << opt->iv() << " delta=" << opt->delta()
+                              << " gamma=" << opt->gamma() << " theta=" << opt->theta()
+                              << " vega=" << opt->vega() << "\n";
+                }
             }
             ++printed_chains;
         }
         if (printed_chains == 0) {
             std::cout << "      (no ATM chains available)\n";
         }
-    });
+    };
 
-    // Run backtest
-    BacktestResult result = engine.run();
+    if (backtest.begin_day()) {
+        for (std::size_t i = 0; i < historical->minutes(); ++i) {
+            backtest.run_bar(i);
+            inspect(static_cast<int>(i) + 1, backtest.main().find_portfolio(
+                                                 historical->portfolio_name())->frame().datetime);
+        }
+    }
+    const DailyResult result = backtest.end_day();
 
     std::cout << "\n[4] Summary:\n";
     std::cout << "  Timesteps processed by engine: " << result.processed_timesteps << "\n";
@@ -155,10 +161,8 @@ int main(int argc, char* argv[]) {
         max_timesteps = 5;
 
     // Params
-    const std::string strategy_name = "StraddleTestStrategy";
-    std::unordered_map<std::string, double> strategy_setting = {
-        {"position_size", 0.0}, // Minimal position change, drive engine only
-    };
+    const std::string strategy_name = "RandomBuyStrategy";
+    std::unordered_map<std::string, double> strategy_setting = {};
     const char* log_env = std::getenv("BACKTEST_LOG");
     bool enable_log = (log_env && (std::string(log_env) == "1" || std::string(log_env) == "true"));
 

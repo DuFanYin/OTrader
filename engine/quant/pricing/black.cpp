@@ -61,4 +61,16 @@ double black_implied_vol(double price, double forward, double strike, double mat
     return std::min(iv, kMaxVol);
 }
 
+double black_digital_call(double forward, double strike, double maturity, double rate, double vol) {
+    if (forward <= 0.0 || strike <= 0.0) {
+        return 0.0;
+    }
+    const double df = std::exp(-rate * std::max(maturity, 0.0));
+    if (maturity <= 0.0 || vol <= 0.0) {
+        return forward > strike ? df : 0.0;
+    }
+    const double sd = vol * std::sqrt(maturity);
+    return df * norm_cdf((std::log(forward / strike) / sd) - (0.5 * sd));
+}
+
 } // namespace quant

@@ -1,5 +1,5 @@
 // Account: the IB account (its values, its positions and what each is worth) beside the strategies' holdings,
-// where the positions check stands, expired options waiting for a closing price to settle at, and a fill the engine
+// where the broker check stands, expired options waiting for a closing price to settle at, and a fill the engine
 // missed booked by hand. Asked for on opening and on Refresh only: each ask is a subscription to IB's account window.
 import { signal } from "@preact/signals";
 import { get, post } from "../lib/api.js";
@@ -55,7 +55,7 @@ async function refresh() {
 
 async function check() {
   try {
-    checked.value = await post("api/account/reconcile");
+    checked.value = await post("api/account/check-with-broker");
   } catch (err) {
     toast(err.message, "Check positions");
   }
@@ -83,19 +83,19 @@ async function settle() {
 }
 
 async function book() {
-  const { acBookStrategy: strategy, acBookSymbol: symbol, acBookSide: direction, acBookVolume: volume,
+  const { acBookStrategy: strategy, acBookSymbol: symbol, acBookSide: side, acBookQuantity: quantity,
     acBookPrice: price, acBookReason: reason } = params.value;
-  if (!strategy || !symbol.trim() || !(volume > 0) || !(price >= 0) || !reason.trim()) {
-    toast("Give the strategy, the contract, the side, the volume, the price and why.", "Book a fill by hand");
+  if (!strategy || !symbol.trim() || !(quantity > 0) || !(price >= 0) || !reason.trim()) {
+    toast("Give the strategy, the contract, the side, the quantity, the price and why.", "Book a fill by hand");
     return;
   }
-  if (!confirm(`Book for ${strategy}: ${direction === "LONG" ? "bought" : "sold"} ${volume} ${symbol.trim()} at ${price}? ` +
+  if (!confirm(`Book for ${strategy}: ${side === "BUY" ? "bought" : "sold"} ${quantity} ${symbol.trim()} at ${price}? ` +
     `It is booked as a fill (saved, replayed on a restart) and changes the holding; it sends nothing to ${broker()}.`)) return;
   booking.value = true;
   try {
-    const r = await post("api/account/book", { strategy, symbol: symbol.trim(), direction, volume, price, reason: reason.trim() });
-    toast(`Booked as ${r.orderid}. Check the positions again.`, "Book a fill by hand");
-    setParams({ acBookVolume: null, acBookPrice: null, acBookReason: "" });
+    const r = await post("api/account/book", { strategy, symbol: symbol.trim(), side, quantity, price, reason: reason.trim() });
+    toast(`Booked as ${r.order_id}. Check with the broker again.`, "Book a fill by hand");
+    setParams({ acBookQuantity: null, acBookPrice: null, acBookReason: "" });
   } catch (err) {
     toast(err.message, "Book a fill by hand");
   } finally {
@@ -122,23 +122,23 @@ function Params() {
           placeholder={portfolios.value.length ? undefined : "Engine not running"} />
         <Day k="acExpiry" label="Expiry" wide={false} />
         <Num k="acPrice" label="Underlying's close" min={0} hint="The underlying's price at that day's close (16:00 New York)" />
-        <div class="col-span-2">
+        <div class="col-span-full">
           <Action disabled={!running || settling.value || !p.acPortfolio || !p.acExpiry || !(p.acPrice > 0)} onClick={settle}>
             {settling.value ? "Settling…" : "Settle"}
           </Action>
         </div>
       </DialogGroup>
       <DialogGroup title="Book a fill by hand" summary={`A fill the engine missed while it was down, as ${broker()} has it`} width="520px">
-        <Line>When the positions check disagrees and {broker()} is right (a fill the engine missed while it was down): booked as an
+        <Line>When the broker check disagrees and {broker()} is right (a fill the engine missed while it was down): booked as an
           order of the strategy's filled at once, saved and replayed on a restart. Nothing is sent to {broker()}.</Line>
         <Select k="acBookStrategy" label="Strategy" options={strategyNames.value.map((x) => [x, x])}
           placeholder={strategyNames.value.length ? undefined : "No strategies"} />
         <Text k="acBookSymbol" label="Contract" placeholder="SPY-20261013-C-660" hint="As the engine names it (the positions table)" />
-        <Seg k="acBookSide" label="Side" options={[["LONG", "Bought"], ["SHORT", "Sold"]]} />
-        <Num k="acBookVolume" label="Volume" min={0} />
+        <Seg k="acBookSide" label="Side" options={[["BUY", "Bought"], ["SELL", "Sold"]]} />
+        <Num k="acBookQuantity" label="Quantity" min={0} />
         <Num k="acBookPrice" label="Price" min={0} />
         <Text k="acBookReason" label="Why" placeholder="filled while the engine was down" />
-        <div class="col-span-2">
+        <div class="col-span-full">
           <Action disabled={!running || booking.value || !p.acBookStrategy} onClick={book}>
             {booking.value ? "Booking…" : "Book"}
           </Action>
@@ -193,13 +193,13 @@ const CHECK = { agree: "good", disagree: "bad", failed: "bad", "not yet": "muted
 function Check() {
   const a = account.value, c = checked.value, unsettled = Object.entries(a.unsettled ?? {});
   return (
-    <Card title="Positions check" actions={<Action onClick={check} title={`Ask ${broker()} for the positions and check the holdings against them`}>Check again</Action>}>
+    <Card title="Broker check" actions={<Action onClick={check} title={`Ask ${broker()} for the positions and check the holdings against them`}>Check again</Action>}>
       <Kv cols={1} rows={[
-        [`Holdings against ${broker()}`, <Badge kind={CHECK[a.positions_check] ?? "muted"}>{a.positions_check || "–"}</Badge>],
-        a.positions_problem && ["What differs", a.positions_problem],
+        [`Holdings against ${broker()}`, <Badge kind={CHECK[a.broker_check] ?? "muted"}>{a.broker_check || "–"}</Badge>],
+        a.broker_check_problem && ["What differs", a.broker_check_problem],
       ]} />
       <Note>Checked on connecting and by Check again. A strategy starts only once the account's positions in the contracts
-        the portfolios trade agree with the strategies' holdings summed (OPTRA_RECONCILE=warn only logs a difference).</Note>
+        the portfolios trade agree with the strategies' holdings summed (OPTRA_BROKER_CHECK=warn only logs a difference).</Note>
       {c && !c.agree && (
         <Table compact rows={c.mismatches} cols={[
           { key: "symbol", label: "Contract", align: "left", cls: "font-mono text-xs" },

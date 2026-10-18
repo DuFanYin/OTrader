@@ -59,8 +59,8 @@ def _american_premium():
 def _validation_fix():
     r = call_sync("validate", spot=100, strike=100, rate=0.03, vol=0.2, maturity=0.5, pick_ito=True, ito_n=100,
                           ito_function_type="w2_minus_t")
-    fix = r["result_details"]["explainable_qa"]["minimal_fix_set"][0]
-    return ["ito_n", str(fix["proposed_value"])]
+    (fix,) = [row for row in r["result_details"]["rows"] if row["status"] == "fail"]
+    return [fix["param"], str(fix["proposed_value"])]
 
 
 def _heston_price():

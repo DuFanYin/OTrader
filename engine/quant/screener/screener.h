@@ -1,9 +1,6 @@
 #pragma once
 
-// Option strategy screener — kernel primitives.
-// Ported from option-screener@8b31b95 (cpp/include/{object,factory,strategy}/*.hpp)
-// and its Python-only ForwardVolsGenerator. See doc/research.md, "Where the code came from", for the
-// list of behavioural fixes relative to the original.
+// Option strategy screener: chain input, filters, strategy generators and ranking.
 
 #include <array>
 #include <cmath>
@@ -123,8 +120,7 @@ struct ScreenContext {
     ScreenRank                   rank;
 };
 
-// Bounded best-N buffer. Keeps memory at O(top_n) no matter how many
-// combinations are generated.
+// Bounded best-N buffer: memory stays O(top_n) however many combinations are generated.
 class ScreenTopN {
 public:
     explicit ScreenTopN(ScreenRank rank);
@@ -151,7 +147,7 @@ void   black76_greeks(double forward, double strike, double rate, double vol, do
 
 // ── Option-level primitives ───────────────────────────────────────────────────
 
-double screen_mid(const ChainOption& o);                                   // (bid+ask)/2, else mark
+double screen_mid(const ChainOption& o);                                   // else mark
 double screen_fill_price(const ChainOption& o, int qty, ScreenPriceMode mode);  // NaN if not fillable
 
 std::vector<int> screen_filter_options(std::span<const ChainOption> chain, const ScreenOptionFilter& f);

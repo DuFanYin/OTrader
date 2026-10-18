@@ -9,10 +9,8 @@ namespace quant {
 
 namespace {
 
-// Heston (1993) characteristic function as per the original paper.
-// phi(u) = E[ exp(i*u * ln S_T) ]
-// Parameters: v0 current variance, kappa mean-reversion speed,
-//             theta long-run variance, xi vol-of-vol, rho correlation.
+// Heston (1993) characteristic function phi(u) = E[exp(i*u * ln S_T)].
+// v0 current variance, kappa mean reversion, theta long-run variance, xi vol-of-vol, rho correlation.
 std::complex<double> heston_cf(
     std::complex<double> u,
     double spot, double rate, double maturity,
@@ -33,7 +31,6 @@ std::complex<double> heston_cf(
     const C g   = (b - d) / (b + d);
     const C edt = std::exp(-d * T);
 
-    // Handle potential log of zero
     const C frac = (1.0 - g * edt) / (1.0 - g);
     const C logfrac = std::log(frac);
 
@@ -137,7 +134,6 @@ HestonFit heston_calibrate(
     const int n = static_cast<int>(call_prices.size());
     if (n == 0) return fit;
 
-    // The mean squared error of the model's call prices
     auto objective = [&](std::span<const double> x) -> double {
         double sse = 0.0;
         for (int i = 0; i < n; ++i) {

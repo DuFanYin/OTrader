@@ -1,10 +1,11 @@
-#include "symbol.hpp"
+/** The platform's instrument names: parsing and formatting option and chain symbols. */
+
+#include "model/symbol.hpp"
+#include <array>
 #include <cctype>
 #include <charconv>
 #include <cmath>
 #include <format>
-#include <ranges>
-#include <vector>
 
 namespace model {
 
@@ -76,10 +77,19 @@ auto chain_symbol(std::string_view root, std::chrono::year_month_day expiry) -> 
 }
 
 auto parse_option_symbol(std::string_view symbol) -> std::optional<OptionId> {
-    const auto fields = symbol | std::views::split('-') |
-                        std::views::transform([](auto f) { return std::string_view(f); }) |
-                        std::ranges::to<std::vector<std::string_view>>();
-    if (fields.size() != 4 || fields[0].empty() || fields[2].size() != 1) {
+    // Exactly four fields: three '-'.
+    std::array<std::string_view, 4> fields;
+    std::size_t start = 0;
+    for (std::size_t i = 0; i < 3; ++i) {
+        const std::size_t dash = symbol.find('-', start);
+        if (dash == std::string_view::npos) {
+            return std::nullopt;
+        }
+        fields[i] = symbol.substr(start, dash - start);
+        start = dash + 1;
+    }
+    fields[3] = symbol.substr(start);
+    if (fields[3].contains('-') || fields[0].empty() || fields[2].size() != 1) {
         return std::nullopt;
     }
     OptionId id;

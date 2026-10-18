@@ -13,14 +13,9 @@ constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 
 double black76_price(double forward, double strike, double rate, double vol, double years, bool is_call) {
     if (forward <= 0.0 || strike <= 0.0) return kNaN;
-    const double df = std::exp(-rate * std::max(years, 0.0));
-    if (years <= 0.0) return df * std::max(is_call ? forward - strike : strike - forward, 0.0);
+    if (years <= 0.0) return std::max(is_call ? forward - strike : strike - forward, 0.0);
     if (vol <= 0.0) return kNaN;
-    const double sd = vol * std::sqrt(years);
-    const double d1 = (std::log(forward / strike) + 0.5 * sd * sd) / sd;
-    const double d2 = d1 - sd;
-    return is_call ? df * (forward * norm_cdf(d1) - strike * norm_cdf(d2))
-                   : df * (strike * norm_cdf(-d2) - forward * norm_cdf(-d1));
+    return black_price(is_call, forward, strike, years, rate, vol);
 }
 
 void black76_greeks(double forward, double strike, double rate, double vol, double years, bool is_call,
@@ -29,17 +24,12 @@ void black76_greeks(double forward, double strike, double rate, double vol, doub
         *out_delta = *out_gamma = *out_theta_day = *out_vega_pt = kNaN;
         return;
     }
-    const double df     = std::exp(-rate * years);
-    const double sqrt_t = std::sqrt(years);
-    const double sd     = vol * sqrt_t;
-    const double d1     = (std::log(forward / strike) + 0.5 * sd * sd) / sd;
-    const double pdf1   = norm_pdf(d1);
-    const double price  = black76_price(forward, strike, rate, vol, years, is_call);
-
-    *out_delta     = is_call ? df * norm_cdf(d1) : -df * norm_cdf(-d1);
-    *out_gamma     = df * pdf1 / (forward * sd);
-    *out_vega_pt   = forward * df * pdf1 * sqrt_t / 100.0;
-    *out_theta_day = (-forward * df * pdf1 * vol / (2.0 * sqrt_t) + rate * price) / 365.0;
+    // to the forward: black_greeks with the spot at the forward
+    const BlackGreeks g = black_greeks(is_call, forward, forward, strike, years, rate, vol);
+    *out_delta     = g.delta;
+    *out_gamma     = g.gamma;
+    *out_vega_pt   = g.vega;
+    *out_theta_day = g.theta;
 }
 
 // ── Option-level primitives ───────────────────────────────────────────────────

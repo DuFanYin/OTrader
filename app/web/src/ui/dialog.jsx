@@ -1,6 +1,7 @@
 // A modal window for inputs too big for the sidebar (legs, filters): the native <dialog>, so Escape,
 // focus and the backdrop come for free. Clicking the backdrop closes it.
 import { useEffect, useRef, useState } from "preact/hooks";
+import { Button } from "./blocks.jsx";
 import { Group } from "./controls.jsx";
 
 export function Dialog({ open, onClose, title, children, footer, width = "640px" }) {
@@ -28,20 +29,12 @@ export function Dialog({ open, onClose, title, children, footer, width = "640px"
   );
 }
 
-export function Button({ children, onClick, primary, title, type = "button" }) {
-  return (
-    <button type={type} title={title} onClick={onClick}
-      class={`h-8 rounded-sm px-3 text-sm transition-colors ${primary
-        ? "bg-accent font-semibold text-accent-ink hover:opacity-90" : "border border-line text-ink-2 hover:border-line-strong hover:text-ink"}`}>
-      {children}
-    </button>
-  );
-}
+export { Button };
 
 /** A summary in the sidebar with the button that opens the full editor. */
 export function Summary({ label, children, action, onOpen }) {
   return (
-    <div class="col-span-2 flex flex-col gap-1">
+    <div class="col-span-full flex flex-col gap-1">
       {label && <span class="text-xs text-muted">{label}</span>}
       <button type="button" onClick={onOpen}
         class="group flex min-h-[26px] w-full items-start justify-between gap-2 rounded-sm border border-line bg-surface px-2 py-1 text-left text-sm transition-colors hover:border-accent">
@@ -53,15 +46,15 @@ export function Summary({ label, children, action, onOpen }) {
 }
 
 /** A group of inputs too many or too detailed for the sidebar: the sidebar shows a one-line summary of their values,
- * and Edit opens them in a dialog (two columns, as in the sidebar). */
-export function DialogGroup({ title, summary, children, width = "560px" }) {
+ * and Edit opens them in a dialog, a row each (label left, control right) in `columns` columns. */
+export function DialogGroup({ title, summary, children, width = "600px", columns = 2 }) {
   const [open, setOpen] = useState(false);
   return (
     <Group title={title}>
       <Summary action="Edit" onOpen={() => setOpen(true)}><span class="text-xs text-ink-2">{summary}</span></Summary>
       <Dialog open={open} onClose={() => setOpen(false)} title={title} width={width}
         footer={<Button primary onClick={() => setOpen(false)}>Done</Button>}>
-        <div class="grid grid-cols-2 gap-x-3 gap-y-3">{children}</div>
+        <div class="grid gap-x-8 gap-y-1.5" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}>{children}</div>
       </Dialog>
     </Group>
   );

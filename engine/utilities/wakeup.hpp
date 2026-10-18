@@ -8,18 +8,36 @@
  * The waiter: wait_until(deadline, has_work) returns at once when has_work(); otherwise it sleeps
  * until a wake() after the work was made visible, or the deadline. A producer: make the work
  * visible (a push, a store), then wake().
+ *
+ * set_spin(d): before sleeping, the waiter polls has_work() for up to d, not marked asleep, so
+ * work that comes meanwhile costs neither side a system call (a wake() is then a fence and a
+ * load). The latency of a hand-off drops from a futex wake-up (about 5 us) to well under one, for
+ * a core kept busy while it spins. Zero (the default): sleep at once.
  */
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <climits>
 #include <cstdint>
 #include <ctime>
 #include <linux/futex.h>
+#if defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h>
+#endif
 #include <sys/syscall.h>
 #include <unistd.h>
 
 namespace utilities {
+
+/** A hint to the core that this is a spin loop: a sibling hyperthread gets the cycles. */
+inline void cpu_pause() {
+#if defined(__x86_64__) || defined(__i386__)
+    _mm_pause();
+#elif defined(__aarch64__)
+    asm volatile("yield");
+#endif
+}
 
 class Wakeup {
   public:
@@ -34,8 +52,24 @@ class Wakeup {
         }
     }
 
+    /** How long the waiter polls before it sleeps (zero: it sleeps at once). Set before it waits. */
+    void set_spin(std::chrono::nanoseconds spin) { spin_ = spin; }
+
     /** Sleep until has_work() or the deadline (Clock::time_point::max(): none). */
     template <typename HasWork> void wait_until(Clock::time_point deadline, HasWork&& has_work) {
+        if (spin_ > std::chrono::nanoseconds::zero()) {
+            const Clock::time_point until = std::min(deadline, Clock::now() + spin_);
+            for (unsigned polls = 0;; ++polls) {
+                if (has_work()) {
+                    return;
+                }
+                // The clock every 64 polls: a few hundred ns between looks at it.
+                if ((polls & 63U) == 63U && Clock::now() >= until) {
+                    break;
+                }
+                cpu_pause();
+            }
+        }
         const std::uint32_t epoch = epoch_.load(std::memory_order_relaxed);
         sleeping_.store(true, std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_seq_cst); // sleeping_, before reading the work
@@ -65,6 +99,7 @@ class Wakeup {
 
     std::atomic<std::uint32_t> epoch_{0}; // the futex word: a wake moves it on
     std::atomic<bool> sleeping_{false};
+    std::chrono::nanoseconds spin_{0};
     static_assert(sizeof(std::atomic<std::uint32_t>) == sizeof(std::uint32_t));
 };
 

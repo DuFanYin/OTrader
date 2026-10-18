@@ -1,4 +1,4 @@
-// Orders and trades: what the live engine recorded in its database (SQLite), newest first.
+// Orders and fills: what the live engine recorded in its database (SQLite), newest first.
 import { signal } from "@preact/signals";
 import { get } from "../lib/api.js";
 import { count, fmt } from "../lib/format.js";
@@ -13,10 +13,10 @@ async function load() {
   const p = params.value;
   const query = new URLSearchParams({ limit: String(Math.min(5000, Math.max(1, p.otLimit ?? 200))) });
   if (p.otStrategy) query.set("strategy", p.otStrategy);
-  if (p.otType !== "all") query.set("record_type", p.otType === "order" ? "Order" : "Trade");
+  if (p.otType !== "all") query.set("record_type", p.otType === "order" ? "Order" : "Fill");
   records.value = { ...records.value, state: "loading" };
   try {
-    const d = await get(`api/orders-trades?${query}`);
+    const d = await get(`api/orders-fills?${query}`);
     records.value = { state: "ok", list: d.records ?? [], strategies: d.strategies ?? records.value.strategies };
   } catch (err) {
     records.value = { state: "error", list: [], strategies: records.value.strategies, error: err.message };
@@ -44,24 +44,24 @@ function Params() {
   );
 }
 
-const SIDE = { LONG: "good", SHORT: "bad" };
+const SIDE = { BUY: "good", SELL: "bad" };
 
 function Results() {
   const r = records.value;
-  if (r.state === "loading" && !r.list.length) return <Card title="Orders and trades" wide><Running /></Card>;
+  if (r.state === "loading" && !r.list.length) return <Card title="Orders and fills" wide><Running /></Card>;
   return (
-    <Card title="Orders and trades" wide meta={r.state === "ok" && `${count(r.list.length)} rows`}>
+    <Card title="Orders and fills" wide meta={r.state === "ok" && `${count(r.list.length)} rows`}>
       {r.state === "error" ? <ErrorText>{r.error}</ErrorText> : (
         <Table compact rows={r.list} empty="Nothing recorded yet." cols={[
           { key: "timestamp", label: "Time", align: "left", cls: "text-muted" },
-          { key: "record_type", label: "Kind", align: "left", fmt: (v) => <Badge kind={v === "Trade" ? "accent" : "muted"}>{v}</Badge> },
+          { key: "record_type", label: "Kind", align: "left", fmt: (v) => <Badge kind={v === "Fill" ? "accent" : "muted"}>{v}</Badge> },
           { key: "strategy_name", label: "Strategy", align: "left" },
           { key: "id", label: "Id", align: "left", cls: "font-mono text-xs" },
           { key: "symbol", label: "Symbol", align: "left", cls: "font-mono text-xs" },
-          { key: "direction", label: "Side", align: "left", fmt: (v) => (v ? <Badge kind={SIDE[v] ?? "muted"}>{v}</Badge> : "–") },
+          { key: "side", label: "Side", align: "left", fmt: (v) => (v ? <Badge kind={SIDE[v] ?? "muted"}>{v}</Badge> : "–") },
           { key: "price", label: "Price", fmt },
-          { key: "volume", label: "Volume", fmt },
-          { key: "traded", label: "Traded", fmt },
+          { key: "quantity", label: "Quantity", fmt },
+          { key: "filled", label: "Filled", fmt },
           { key: "status", label: "Status", align: "left" },
         ]} />
       )}
@@ -71,7 +71,7 @@ function Results() {
 
 export const orders = {
   id: "orders",
-  label: "Orders & trades",
+  label: "Orders & fills",
   about: "",
   enter: load,
   Params,

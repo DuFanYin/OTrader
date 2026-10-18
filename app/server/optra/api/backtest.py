@@ -1,48 +1,37 @@
-"""Backtest-related HTTP API: files, strategies, metadata, run/cancel."""
+"""Backtest-related HTTP API: files, run/cancel."""
 
 from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, Body, Query
+from fastapi import APIRouter, Body, Depends
 
-from optra.utils.files import backtest_duration, inspect_parquet_to_dict, list_files
-from optra.services.backtest import BacktestService
+from optra.infra import access
+from optra.utils.files import list_files
+from optra.services import backtest
 
 
 router = APIRouter()
+ANYONE = [Depends(access.anyone)]
+PERSON = [Depends(access.person_only)]
 
 
-@router.get("/api/files")
+@router.get("/api/files", dependencies=ANYONE)
 def api_files() -> List[Dict[str, Any]]:
     """List .dbn and .parquet under download/ and data/."""
     return [f.__dict__ for f in list_files()]
 
 
-@router.get("/api/file_info")
-def api_file_info(
-    path: str = Query(..., description="Relative path to .parquet"),
-) -> Dict[str, Any]:
-    """Parquet meta: row_count, ts_start, ts_end, unique_ts_count."""
-    return inspect_parquet_to_dict(path)
-
-
-@router.get("/api/backtest_duration")
-def api_backtest_duration() -> Dict[str, Any]:
-    """Backtest duration by symbol (covered_days, date range)."""
-    return backtest_duration()
-
-
-@router.post("/api/run_backtest")
+@router.post("/api/run_backtest", dependencies=PERSON)
 def api_run_backtest(
     request: Dict[str, Any] = Body(...),
 ):
     """Run backtest (blocking); return results + metrics."""
-    return BacktestService.run_backtest(request)
+    return backtest.run_backtest(request)
 
 
-@router.post("/api/backtest/cancel")
+@router.post("/api/backtest/cancel", dependencies=PERSON)
 def api_backtest_cancel() -> Dict[str, Any]:
     """Cancel running C++ backtest (if any)."""
-    return BacktestService.cancel_backtest()
+    return backtest.cancel_backtest()
 

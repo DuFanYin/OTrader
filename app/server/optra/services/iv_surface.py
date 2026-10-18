@@ -42,7 +42,6 @@ def smiles_by_expiry(surface: list[dict], spot: float) -> dict[str, list[dict]]:
             "years": row["years"],
             "log_moneyness": round(math.log(max(row["strike"], 1e-8) / max(spot, 1e-8)), 6),
             "iv": row["iv"],
-            "iv_pct": row["iv_pct"],
         })
     return smiles
 
@@ -70,7 +69,7 @@ def grid(surface: list[dict], spot: float, maturity: float, k_steps: int, t_step
             iv, method = _interpolate(surface, spot, spot * k, t)
             iv = iv or 0.0
             rows.append({"k_ratio": round(k, 4), "strike": round(spot * k, 2), "years": round(t, 6),
-                         "iv": round(iv, 6), "iv_pct": round(iv * 100, 3), "zone": "normal", "method": method})
+                         "iv": round(iv, 6), "zone": "normal", "method": method})
     return rows
 
 
@@ -113,7 +112,6 @@ async def diagnose(spot: float, strike: float, maturity: float, smile_points: in
         "term_points": len(term),
         "smile_points": len(smile["rows"]),
         "interp_iv": round(iv, 6) if iv is not None else None,
-        "interp_iv_pct": round(iv * 100, 3) if iv is not None else None,
         "interp_method": method,
         "smile_selected_expiry": smile["selected_expiry"],
         "smile_selected_years": smile["selected_years"],

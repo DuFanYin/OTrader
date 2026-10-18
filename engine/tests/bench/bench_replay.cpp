@@ -1,24 +1,24 @@
 /**
  * Event-replay throughput.
  *
- * "How fast can the engine eat the stream?" Loads a REAL parquet day via the backtest MainEngine
+ * "How fast can the engine eat the stream?" Loads a REAL parquet day via the backtest Main
  * (throughput must use real data), which builds the portfolio + precomputes snapshots
  * (one-time setup, excluded from the throughput window). Then replays every snapshot through
- * PortfolioData::apply_frame as fast as possible — no wall-clock throttling. Reports events/sec.
+ * Portfolio::apply_frame as fast as possible — no wall-clock throttling. Reports events/sec.
  *
- * Parallel scaling: N independent MainEngines each replay the same file concurrently (mirrors
+ * Parallel scaling: N independent backtest Mains each replay the same file concurrently (mirrors
  * run_backtest_multi's num_engines=4 jthreads), reporting aggregate events/sec and speedup vs 1
  * worker. apply_frame itself forks and joins on the shared thread pool for a large chain; one
  * range at a time, so concurrent replays compute theirs inline: this shows how the two kinds of
  * parallelism mix.
  *
- * Usage: bench_replay <parquet_path> [underlying_symbol]
+ * Usage: bench_replay <parquet_path>
  */
 
-#include "bench_util.hpp"
+#include "tests/bench/bench_util.hpp"
 
-#include "../../adapters/backtest/engine_data_historical.hpp"
-#include "core/engine_backtest.hpp"
+#include "adapters/market_data/historical_data.hpp"
+#include "tests/lone_backtest.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -33,24 +33,37 @@ using bench::ticks_to_ns;
 
 namespace {
 
-// Load via backtest MainEngine (builds portfolio + precomputes snapshots). Returns (engine, count).
+// Load via the backtest (builds portfolio + precomputes snapshots). Returns (engine, count).
 struct Loaded {
-    std::unique_ptr<core::backtest::MainEngine> engine;
-    adapters::BacktestDataEngine* data = nullptr;
+    std::unique_ptr<test::LoneBacktest> engine;
+    adapters::HistoricalData* data = nullptr;
+    model::Portfolio* portfolio = nullptr;
     size_t count = 0;
+    std::unique_ptr<model::PortfolioSnapshot> minute = std::make_unique<model::PortfolioSnapshot>();
+
+    /** Bar i into the portfolio, read in place (the day and the minute outlive the replay). */
+    void apply(size_t i) const {
+        data->fill(i, *minute);
+        portfolio->apply(*minute,
+                         std::shared_ptr<const void>(std::shared_ptr<void>{}, minute.get()));
+    }
 };
 
-Loaded load(const std::string& path, const std::string& sym) {
+Loaded load(const std::string& path) {
     Loaded L;
-    L.engine = std::make_unique<core::backtest::MainEngine>();
-    L.data = L.engine->load_backtest_data(path, sym);
-    if (L.data && L.data->has_data()) L.count = L.data->get_precomputed_snapshot_count();
+    L.engine = std::make_unique<test::LoneBacktest>();
+    L.data = L.engine->load_backtest_data(path);
+    if (L.data && L.data->has_data()) {
+        L.data->load_all_chains(); // every chain replayed
+        L.portfolio = L.engine->main().portfolios()->find_portfolio(L.data->portfolio_name());
+        L.count = L.data->minutes();
+    }
     return L;
 }
 
-double replay_once(adapters::BacktestDataEngine& d, size_t n) {
+double replay_once(const Loaded& L) {
     uint64_t t0 = clock_ticks();
-    for (size_t i = 0; i < n; ++i) d.apply_precomputed_snapshot(i);
+    for (size_t i = 0; i < L.count; ++i) L.apply(i);
     return ticks_to_ns(clock_ticks() - t0);
 }
 
@@ -59,14 +72,13 @@ double replay_once(adapters::BacktestDataEngine& d, size_t n) {
 int main(int argc, char** argv) {
     bench::print_env();
     if (argc < 2) {
-        std::fprintf(stderr, "usage: %s <parquet_path> [underlying_symbol]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <parquet_path>\n", argv[0]);
         return 2;
     }
     std::string path = argv[1];
-    std::string sym = argc > 2 ? argv[2] : "";
 
     uint64_t setup0 = clock_ticks();
-    Loaded L = load(path, sym);
+    Loaded L = load(path);
     double setup_ns = ticks_to_ns(clock_ticks() - setup0);
     if (L.count == 0) {
         std::fprintf(stderr, "failed to load or no snapshots: %s\n", path.c_str());
@@ -79,7 +91,7 @@ int main(int argc, char** argv) {
     // ---- Single-thread replay (best of 5) ----
     double best_ns = 1e30;
     for (int r = 0; r < 5; ++r) {
-        double e = replay_once(*L.data, L.count);
+        double e = replay_once(L);
         if (e < best_ns) best_ns = e;
     }
     double single_eps = static_cast<double>(L.count) * 1e9 / best_ns;
@@ -94,7 +106,7 @@ int main(int argc, char** argv) {
     for (int workers : {1, 2, 4, 8}) {
         std::vector<Loaded> loaded;
         loaded.reserve(workers);
-        for (int w = 0; w < workers; ++w) loaded.push_back(load(path, sym));
+        for (int w = 0; w < workers; ++w) loaded.push_back(load(path));
 
         std::atomic<bool> go{false};
         std::atomic<int> ready{0};
@@ -107,7 +119,7 @@ int main(int argc, char** argv) {
                 ready.fetch_add(1, std::memory_order_release);
                 while (!go.load(std::memory_order_acquire)) {}
                 auto& l = loaded[w];
-                for (size_t i = 0; i < l.count; ++i) l.data->apply_precomputed_snapshot(i);
+                for (size_t i = 0; i < l.count; ++i) l.apply(i);
             });
         }
         while (ready.load(std::memory_order_acquire) < workers) {}

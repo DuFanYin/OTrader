@@ -6,7 +6,7 @@
 
 namespace utilities {
 
-/** A plain enum, so utilities::INFO stays the one spelling; no int converts to it, so a level is
+/** A plain enum, so INFO stays the one spelling; no int converts to it, so a level is
  * always one of these. */
 enum LogLevel : int {
     DEBUG = 10,

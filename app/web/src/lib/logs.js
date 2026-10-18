@@ -19,6 +19,7 @@ function parse(raw) {
 
 let socket = null;
 let retry = 1000;
+let pending = [], flush = null;
 
 export function connectLogs() {
   if (socket) return;
@@ -28,7 +29,14 @@ export function connectLogs() {
     retry = 1000;
     lines.value = [];  // the backend sends its recent lines again
   };
-  socket.onmessage = (e) => { lines.value = [...lines.value.slice(-(MAX - 1)), parse(String(e.data))]; };
+  socket.onmessage = (e) => {
+    pending.push(parse(String(e.data)));
+    flush ??= requestAnimationFrame(() => {  // a burst of lines is one update of the list
+      lines.value = [...lines.value, ...pending].slice(-MAX);
+      pending = [];
+      flush = null;
+    });
+  };
   socket.onclose = () => {
     connected.value = false;
     socket = null;

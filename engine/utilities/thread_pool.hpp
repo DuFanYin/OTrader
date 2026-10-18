@@ -1,22 +1,17 @@
 #pragma once
 
 /**
- * Persistent thread pool for data-parallel compute (per-option IV/Greeks in
- * PortfolioData::apply_frame), without a lock.
- *
- * Why this exists: apply_frame used to spawn hardware_concurrency() std::jthreads PER CALL, so the
- * thread create/join cost (~110 µs for 64 options, tail into tens of ms) dwarfed the actual work. A persistent pool creates its workers
- * ONCE.
+ * Persistent lock-free thread pool for data-parallel compute (per-option IV/Greeks); workers are
+ * created once because spawning threads per call cost more than the work.
  *
  * parallel_for is a fork/join: the caller publishes the range (a generation counter the workers
- * sleep on: one futex wake for all of them), runs a share itself, and waits for the workers'
- * shares (spinning a little, then on a futex). Each of the n workers and the caller takes one
- * contiguous share. One range at a time: a caller that finds the pool busy with another thread's
- * range runs its own inline, as it does a range at or below inline_threshold.
- *
- * Scope: one engine-level SHARED pool for the whole process (see shared_pool()).
+ * sleep on: one futex wake for all), runs a share itself, and waits for the workers' shares
+ * (spinning a little, then on a futex). One range at a time: a caller that finds the pool busy
+ * with another thread's range runs its own inline, as it does a range at or below
+ * inline_threshold.
  */
 
+#include "utilities/wakeup.hpp"
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
@@ -91,7 +86,7 @@ class ThreadPool {
 
         std::uint32_t done = done_.load(std::memory_order_acquire);
         for (int spin = 0; done < n_workers_ && spin < kSpins; ++spin) {
-            pause();
+            cpu_pause();
             done = done_.load(std::memory_order_acquire);
         }
         while (done < n_workers_) {
@@ -104,14 +99,6 @@ class ThreadPool {
   private:
     /** The caller's spins for the workers before it sleeps (a share takes tens of µs). */
     static constexpr int kSpins = 2000;
-
-    static void pause() {
-#if defined(__x86_64__)
-        __builtin_ia32_pause();
-#elif defined(__aarch64__)
-        asm volatile("yield");
-#endif
-    }
 
     template <typename F> static void run_range(void* fn, std::size_t s, std::size_t e) {
         F& f = *static_cast<F*>(fn);
@@ -160,11 +147,7 @@ class ThreadPool {
     std::atomic<bool> stop_{false};
 };
 
-/**
- * Process-wide shared pool (Meyers singleton: thread-safe init, ordered destruction). This is the
- * "engine-level shared pool" — all portfolios/engines use this one instance rather than spawning
- * their own threads.
- */
+/** The process-wide pool every engine uses (Meyers singleton). */
 inline ThreadPool& shared_pool() {
     static ThreadPool pool;
     return pool;

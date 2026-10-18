@@ -4,10 +4,11 @@
 // (on demand). Polled every few seconds while open; the fills and the check every 30 seconds.
 import { signal } from "@preact/signals";
 import { useEffect } from "preact/hooks";
-import { del, get, post } from "../lib/api.js";
+import { del, follow, get, post } from "../lib/api.js";
 import { catalog, loadCatalog } from "../lib/catalog.js";
 import { broker, gatewayName, live, refreshStatus, status } from "../lib/engine.js";
 import { count, fixed, usd } from "../lib/format.js";
+import { poll } from "../lib/poll.js";
 import { params, setParams } from "../lib/store.js";
 import { Action, Badge, Card, ErrorText, Kv, Note, Signed, Sub, Table, Warnings } from "../ui/blocks.jsx";
 import { Group, Line, Select, Text } from "../ui/controls.jsx";
@@ -15,16 +16,17 @@ import { Button, Dialog } from "../ui/dialog.jsx";
 import { toast } from "../ui/toast.jsx";
 import { account } from "./account.jsx";
 import { Parameters, changedOf } from "./parameters.jsx";
+import { WriteStrategy } from "./strategy_code.jsx";
 
 const strategies = signal({ state: "idle", list: [] });  // [{ strategy_name, class_name, portfolio, status }]
-const holdings = signal({});                              // strategy name -> { underlying, options, summary }
+const holdings = signal({});                              // strategy name -> { shares, options, summary }
 const portfolios = signal([]);
 const selected = signal(null);
 const updated = signal(null);
 const busy = signal(false);
-const risk = signal(null);  // GET api/risk: { halted, halt_reason, halted_at, limits, refused, recent_refusals }
+const risk = signal(null);  // GET api/risk: { halted, halt_reason, halted_at, limits, refused, recent_refusals, day_stops }
 const stressed = signal({ state: "idle" });  // the holdings_stress tool (GET api/risk/stress): its summary, details and warnings
-const fills = signal({ state: "idle", list: [] });  // the latest trades the engine saved (GET api/orders-trades)
+const fills = signal({ state: "idle", list: [] });  // the latest fills the engine saved (GET api/orders-fills)
 const check = signal(null);  // GET api/session/check: { problems }
 const limitsOpen = signal(false);
 
@@ -34,26 +36,36 @@ const today = () => new Date().toLocaleDateString("en-CA", { timeZone: "America/
 /** The fills and the session check: slower to change, asked every 30 seconds. */
 async function refreshDay() {
   if (!live.value.running) return;
-  const [f, c] = await Promise.all([get("api/orders-trades?record_type=Trade&limit=200").catch(() => null),
+  const [f, c] = await Promise.all([get("api/orders-fills?record_type=Fill&limit=200").catch(() => null),
     get("api/session/check").catch(() => null)]);
   if (f) fills.value = { state: "ok", list: f.records ?? [] };
   if (c) check.value = c;
 }
 
+/** The strategies, their holdings and the risk state, as the server pushes them (api/live/stream) or refresh reads them. */
+function show({ strategies: list, holdings: held, risk: r, error }) {
+  if (error) {
+    strategies.value = { ...strategies.value, state: "error", error };
+    return;
+  }
+  const shown = list ?? [];
+  strategies.value = { state: "ok", list: shown };
+  holdings.value = held ?? {};
+  risk.value = r ?? null;
+  updated.value = new Date();
+  if (!shown.some((x) => x.strategy_name === selected.value)) {  // a running one first
+    selected.value = (shown.find((x) => x.status === "running") ?? shown[0])?.strategy_name ?? null;
+  }
+}
+
+/** The same, read at once: on entering, after an action, and every 3 seconds when the stream cannot be had. */
 async function refresh() {
   if (!live.value.running) return;
   try {
     const [s, h, r] = await Promise.all([get("api/strategies"), get("api/strategies/holdings"), get("api/risk").catch(() => null)]);
-    strategies.value = { state: "ok", list: s.strategies ?? [] };
-    holdings.value = h.holdings ?? {};
-    risk.value = r;
-    updated.value = new Date();
-    if (!strategies.value.list.some((x) => x.strategy_name === selected.value)) {  // a running one first
-      const list = strategies.value.list;
-      selected.value = (list.find((x) => x.status === "running") ?? list[0])?.strategy_name ?? null;
-    }
+    show({ strategies: s.strategies, holdings: h.holdings, risk: r });
   } catch (err) {
-    strategies.value = { ...strategies.value, state: "error", error: err.message };
+    show({ error: err.message });
   }
 }
 
@@ -106,7 +118,7 @@ async function addStrategy() {
 /** A connection's state and the button that changes it. action: [label, onClick] */
 function Connection({ name, on, state, action, disabled }) {
   return (
-    <div class="col-span-2 flex h-[26px] items-center justify-between gap-2 text-sm">
+    <div class="col-span-full flex h-[26px] items-center justify-between gap-2 text-sm">
       <span class="flex min-w-0 items-center gap-2">
         <span class={`h-1.5 w-1.5 shrink-0 rounded-full ${on ? "bg-up" : "bg-line-strong"}`} />
         <span class="truncate">{name}</span>
@@ -157,6 +169,7 @@ function Params() {
           hint="Name the instance to run one class more than once on a portfolio" />
       </Group>
       <Parameters storeKey="liveSettings" cls={p.liveClass} />
+      <WriteStrategy />
     </>
   );
 }
@@ -170,16 +183,16 @@ function Strategies() {
   const on = (path, what, method = post) => act(() => method(`api/strategies/${encodeURIComponent(name)}/${path}`), `${what} ${name}`);
   const pick = list.findIndex((s) => s.strategy_name === name);
   return (
-    <Card title="Strategies" wide meta={updated.value && `updated ${updated.value.toLocaleTimeString()}`} actions={name && (
+    <Card title="Strategies" meta={updated.value && `updated ${updated.value.toLocaleTimeString()}`} actions={name && (
       <>
         <Action onClick={() => on("init", "Initialise")} title="on_init: choose chains, set up state">Init</Action>
-        <Action onClick={() => on("start", "Start")} title="Start: on_timer_logic runs every bar">Start</Action>
+        <Action onClick={() => on("start", "Start")} title="Start: on_timer runs every bar">Start</Action>
         <Action onClick={() => on("stop", "Stop")} title="Stop: on_stop (the built-in strategies close their positions)">Stop</Action>
         <Action danger onClick={() => { if (confirm(`Remove ${name}? It stops, and its holding is dropped.`)) on("remove", "Remove", del); }}>Remove</Action>
       </>
     )}>
       {strategies.value.state === "error" && <ErrorText>{strategies.value.error}</ErrorText>}
-      <Table rows={list} selected={pick} onRow={(s) => (selected.value = s.strategy_name)}
+      <Table compact rows={list} selected={pick} onRow={(s) => (selected.value = s.strategy_name)}
         empty="No strategies yet: add one from the sidebar, then Init and Start it." cols={[
           { key: "strategy_name", label: "Name", align: "left", cls: "font-medium" },
           { key: "class_name", label: "Class", align: "left" },
@@ -196,13 +209,15 @@ function Holding() {
   const name = selected.value, h = holdings.value[name];
   if (!name) return null;
   const s = h?.summary ?? {};
-  const positions = Object.entries(h?.options ?? {}).map(([key, o]) => ({ key, ...o })).filter((o) => o.quantity !== 0);
-  const u = h?.underlying;
-  if (u?.quantity) positions.push({ key: u.symbol, ...u, combo_type: "underlying" });
+  // One row a contract, those opened together in one combo next to each other.
+  const positions = Object.entries(h?.options ?? {}).map(([key, o]) => ({ key, ...o })).filter((o) => o.quantity !== 0)
+    .sort((a, b) => (a.combo || a.key).localeCompare(b.combo || b.key) || a.key.localeCompare(b.key));
+  const u = h?.shares;
+  if (u?.quantity) positions.push({ key: u.symbol, ...u, combo_type: "shares" });
   return (
     <>
-      <Card title={`Holding · ${name}`} wide>
-        <Kv cols={4} rows={[
+      <Card title={`Holding · ${name}`}>
+        <Kv cols={2} rows={[
           ["PnL", <Signed value={s.pnl} format={usd} />],
           ["Unrealised", <Signed value={s.unrealized_pnl} format={usd} />],
           ["Realised", <Signed value={s.realized_pnl} format={usd} />],
@@ -214,19 +229,21 @@ function Holding() {
           ["Vega", fixed(s.vega, 2)],
         ]} />
         <Sub>P&L by source since the engine started</Sub>
-        <Kv cols={4} rows={["delta", "gamma", "theta", "vega", "other", "fills"].map((k) => [k, <Signed value={s[`pnl_${k}`]} format={usd} />])} />
+        <Kv cols={3} rows={["delta", "gamma", "theta", "vega", "other", "fills"].map((k) => [k, <Signed value={s[`pnl_${k}`]} format={usd} />])} />
       </Card>
-      <Card title="Positions" wide meta={`${positions.length} open`}>
-        <Table compact rows={positions} empty="No open positions." cols={[
-          { key: "key", label: "Position", align: "left", cls: "font-mono text-xs" },
-          { key: "combo_type", label: "Kind", align: "left", fmt: (v) => (v || "single").toLowerCase() },
-          { key: "quantity", label: "Qty", fmt: count },
-          { key: "avg_cost", label: "Avg cost", fmt: usd },
-          { key: "mid_price", label: "Mid", fmt: usd },
-          { key: "realized_pnl", label: "Realised", fmt: (v) => <Signed value={v} format={usd} /> },
-          { key: "delta", label: "Delta", fmt: (v) => fixed(v, 2) },
-        ]} />
-      </Card>
+      <div class="flex min-w-0 flex-col gap-3">
+        <Card title="Positions" meta={`${positions.length} open`}>
+          <Table compact rows={positions} empty="No open positions." cols={[
+            { key: "key", label: "Position", align: "left", cls: "font-mono text-xs" },
+            { key: "combo_type", label: "Opened in", align: "left", cls: "max-w-[11rem] truncate", fmt: (v, r) => (v === "shares" ? v : r.combo && r.combo !== r.key ? `${(v || "custom").toLowerCase()} ${r.combo}` : "single") },
+            { key: "quantity", label: "Qty", fmt: count },
+            { key: "avg_cost", label: "Avg cost", fmt: usd },
+            { key: "mid_price", label: "Mid", fmt: usd },
+            { key: "delta", label: "Delta", fmt: (v) => fixed(v, 2) },
+          ]} />
+        </Card>
+        <Fills />
+      </div>
     </>
   );
 }
@@ -242,13 +259,14 @@ function Risk() {
     if (!Number.isFinite(value)) return toast(`${text} is not a number.`, "Risk limit");
     act(() => post("api/risk/limits", { values: { [limit.name]: value } }), `Set ${limit.name}`);
   };
-  const changed = r.limits.filter((l) => l.value !== l.default);
+  const changed = r.limits.filter((l) => l.value !== l.default), inForce = r.limits.filter((l) => l.value !== 0);
   return (
     <Card title="Risk" meta={`${count(r.refused)} refused since the engine started`}
       actions={<Action onClick={() => (limitsOpen.value = true)} title="Every limit, its default and its range">Limits</Action>}>
       {r.halted ? <ErrorText>Trading halted{r.halted_at ? ` at ${r.halted_at} UTC` : ""}: {r.halt_reason}. Only closing orders go; clear the halt in the sidebar.</ErrorText>
-        : <Note>Orders allowed. Every order is checked against these limits{changed.length ? `; ${changed.length} set apart from the default (amber)` : ""}.</Note>}
-      <Kv rows={r.limits.map((l) => [l.name, <span class={l.value !== l.default ? "text-warn" : ""} title={`default ${l.default}`}>{fixed(l.value, l.integer ? 0 : 2)}</span>])} />
+        : <Note>Orders allowed. The limits in force ({inForce.length} of {r.limits.length}; 0 is off, Limits shows every one){changed.length ? `, ${changed.length} set apart from the default (amber)` : ""}.</Note>}
+      {Object.values(r.day_stops ?? {}).map((why) => <ErrorText key={why}>{why}: only closing orders until tomorrow.</ErrorText>)}
+      <Kv rows={inForce.map((l) => [l.name, <span class={l.value !== l.default ? "text-warn" : ""} title={`default ${l.default}`}>{fixed(l.value, l.integer ? 0 : 2)}</span>])} />
       {r.recent_refusals.length > 0 && (
         <Table compact maxHeight="10rem" rows={[...r.recent_refusals].reverse().map((line) => ({ line }))} cols={[
           { key: "line", label: "Latest refusals", align: "left", cls: "font-mono text-xs whitespace-normal" },
@@ -285,8 +303,8 @@ function Today() {
   const nl = accountValue("NetLiquidation"), upnl = accountValue("UnrealizedPnL"), rpnl = accountValue("RealizedPnL");
   const money = (x) => (x ? <Signed value={x.value} format={(v) => `${usd(v)}${x.currency ? ` ${x.currency}` : ""}`} /> : "–");
   return (
-    <Card title="Today" wide meta={`${day} New York`}>
-      <Kv cols={4} rows={[
+    <Card title="Today" meta={`${day} New York`}>
+      <Kv cols={2} rows={[
         ["Net liquidation", nl ? `${usd(nl.value)}${nl.currency ? ` ${nl.currency}` : ""}` : "–"],
         ["Strategies' P&L", <Signed value={pnl} format={usd} />],
         [`${broker()} unrealised`, money(upnl)],
@@ -312,8 +330,8 @@ function Fills() {
         { key: "timestamp", label: "Time", align: "left", fmt: (v) => String(v).slice(5, 16) },
         { key: "strategy_name", label: "Strategy", align: "left", cls: "max-w-[12rem] truncate" },
         { key: "symbol", label: "Contract", align: "left", cls: "max-w-[14rem] truncate font-mono text-xs" },
-        { key: "direction", label: "Side", align: "left" },
-        { key: "volume", label: "Qty", fmt: count },
+        { key: "side", label: "Side", align: "left" },
+        { key: "quantity", label: "Qty", fmt: count },
         { key: "price", label: "Price", fmt: (v) => fixed(v, 2) },
       ]} />
     </Card>
@@ -340,7 +358,7 @@ function Stress() {
   })) : [];
   const marked = r.state === "ok" ? Object.entries(r.marked_at).map(([root, at]) => `${root} at ${at.slice(0, 16).replace("T", " ")} NY (${r.marked_on[root]})`).join(", ") : "";
   return (
-    <Card title="Stress" wide meta={marked}
+    <Card title="Stress" meta={marked}
       actions={<Action onClick={runStress} disabled={r.state === "busy"} title="Value every holding again under each scenario">
         {r.state === "busy" ? "Running…" : r.state === "idle" ? "Run" : "Run again"}</Action>}>
       {r.state === "idle" && <Note>The holdings revalued under the lab&apos;s stress pack (core4) and a spot ladder: each option at its own implied vol and its expiry&apos;s forward from the newest quotes, by the engine&apos;s Black.</Note>}
@@ -362,8 +380,15 @@ function Stress() {
 
 function Results() {
   useEffect(() => {
-    const fast = setInterval(refresh, 3000), slow = setInterval(refreshDay, 30000);
-    return () => { clearInterval(fast); clearInterval(slow); };
+    const down = () => status.value.state === "down";
+    let polling = null;
+    const stops = [
+      follow("api/live/stream", { onData: show, onUnchanged: () => { updated.value = new Date(); },
+        failed: () => { polling ??= poll(refresh, 3000, down); } }),
+      () => polling?.(),
+      poll(refreshDay, 30000, down),
+    ];
+    return () => stops.forEach((stop) => stop());
   }, []);
   if (status.value.state === "down") return <Card title="Live" wide><ErrorText>The backend is not answering: {status.value.error}</ErrorText></Card>;
   if (!live.value.running) {
@@ -376,15 +401,14 @@ function Results() {
       </Card>
     );
   }
+  // Two columns: the day beside the strategies, the chosen one's holding beside its positions and the fills, the
+  // risk beside the stress.
   return (
     <>
       <Today />
       <Strategies />
-      <Holding />
-      <div class="col-span-full grid items-stretch gap-3 xl:grid-cols-2">
-        <Fills />
-        <Risk />
-      </div>
+      {selected.value ? <Holding /> : <Fills />}
+      <Risk />
       <Stress />
     </>
   );

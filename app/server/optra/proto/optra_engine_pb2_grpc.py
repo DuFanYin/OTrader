@@ -80,10 +80,10 @@ class EngineServiceStub:
                 request_serializer=optra__engine__pb2.Empty.SerializeToString,
                 response_deserializer=optra__engine__pb2.LogLine.FromString,
                 _registered_method=True)
-        self.GetOrdersAndTrades = channel.unary_unary(
-                '/optra.EngineService/GetOrdersAndTrades',
-                request_serializer=optra__engine__pb2.OrdersAndTradesRequest.SerializeToString,
-                response_deserializer=optra__engine__pb2.OrdersAndTradesResponse.FromString,
+        self.GetOrdersAndFills = channel.unary_unary(
+                '/optra.EngineService/GetOrdersAndFills',
+                request_serializer=optra__engine__pb2.OrdersAndFillsRequest.SerializeToString,
+                response_deserializer=optra__engine__pb2.OrdersAndFillsResponse.FromString,
                 _registered_method=True)
         self.ListSavedContracts = channel.unary_unary(
                 '/optra.EngineService/ListSavedContracts',
@@ -100,6 +100,11 @@ class EngineServiceStub:
                 request_serializer=optra__engine__pb2.Empty.SerializeToString,
                 response_deserializer=optra__engine__pb2.ListPortfoliosResponse.FromString,
                 _registered_method=True)
+        self.GetQuotes = channel.unary_unary(
+                '/optra.EngineService/GetQuotes',
+                request_serializer=optra__engine__pb2.QuotesRequest.SerializeToString,
+                response_deserializer=optra__engine__pb2.QuotesResponse.FromString,
+                _registered_method=True)
         self.SyncContracts = channel.unary_unary(
                 '/optra.EngineService/SyncContracts',
                 request_serializer=optra__engine__pb2.SyncContractsRequest.SerializeToString,
@@ -109,11 +114,6 @@ class EngineServiceStub:
                 '/optra.EngineService/ListStrategyClasses',
                 request_serializer=optra__engine__pb2.Empty.SerializeToString,
                 response_deserializer=optra__engine__pb2.ListStrategyClassesResponse.FromString,
-                _registered_method=True)
-        self.GetStrategyClassDefaults = channel.unary_unary(
-                '/optra.EngineService/GetStrategyClassDefaults',
-                request_serializer=optra__engine__pb2.GetStrategyClassDefaultsRequest.SerializeToString,
-                response_deserializer=optra__engine__pb2.GetStrategyClassDefaultsResponse.FromString,
                 _registered_method=True)
         self.GetRemovedStrategies = channel.unary_unary(
                 '/optra.EngineService/GetRemovedStrategies',
@@ -155,10 +155,10 @@ class EngineServiceStub:
                 request_serializer=optra__engine__pb2.Empty.SerializeToString,
                 response_deserializer=optra__engine__pb2.AccountResponse.FromString,
                 _registered_method=True)
-        self.ReconcilePositions = channel.unary_unary(
-                '/optra.EngineService/ReconcilePositions',
+        self.CheckWithBroker = channel.unary_unary(
+                '/optra.EngineService/CheckWithBroker',
                 request_serializer=optra__engine__pb2.Empty.SerializeToString,
-                response_deserializer=optra__engine__pb2.ReconcileResponse.FromString,
+                response_deserializer=optra__engine__pb2.BrokerCheckResponse.FromString,
                 _registered_method=True)
         self.SettleExpired = channel.unary_unary(
                 '/optra.EngineService/SettleExpired',
@@ -254,8 +254,8 @@ class EngineServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def GetOrdersAndTrades(self, request, context):
-        """The database: orders/trades, contracts, emptying; portfolio list
+    def GetOrdersAndFills(self, request, context):
+        """The database: orders/fills, contracts, emptying; portfolio list
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -280,8 +280,14 @@ class EngineServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetQuotes(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def SyncContracts(self, request, context):
-        """saved for the next start
+        """rolled into the running engine at once
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -290,12 +296,6 @@ class EngineServiceServicer:
     def ListStrategyClasses(self, request, context):
         """Strategy: class list, removed strategies, defaults
         """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def GetStrategyClassDefaults(self, request, context):
-        """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -352,7 +352,7 @@ class EngineServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def ReconcilePositions(self, request, context):
+    def CheckWithBroker(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -446,10 +446,10 @@ def add_EngineServiceServicer_to_server(servicer, server):
                     request_deserializer=optra__engine__pb2.Empty.FromString,
                     response_serializer=optra__engine__pb2.LogLine.SerializeToString,
             ),
-            'GetOrdersAndTrades': grpc.unary_unary_rpc_method_handler(
-                    servicer.GetOrdersAndTrades,
-                    request_deserializer=optra__engine__pb2.OrdersAndTradesRequest.FromString,
-                    response_serializer=optra__engine__pb2.OrdersAndTradesResponse.SerializeToString,
+            'GetOrdersAndFills': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetOrdersAndFills,
+                    request_deserializer=optra__engine__pb2.OrdersAndFillsRequest.FromString,
+                    response_serializer=optra__engine__pb2.OrdersAndFillsResponse.SerializeToString,
             ),
             'ListSavedContracts': grpc.unary_unary_rpc_method_handler(
                     servicer.ListSavedContracts,
@@ -466,6 +466,11 @@ def add_EngineServiceServicer_to_server(servicer, server):
                     request_deserializer=optra__engine__pb2.Empty.FromString,
                     response_serializer=optra__engine__pb2.ListPortfoliosResponse.SerializeToString,
             ),
+            'GetQuotes': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetQuotes,
+                    request_deserializer=optra__engine__pb2.QuotesRequest.FromString,
+                    response_serializer=optra__engine__pb2.QuotesResponse.SerializeToString,
+            ),
             'SyncContracts': grpc.unary_unary_rpc_method_handler(
                     servicer.SyncContracts,
                     request_deserializer=optra__engine__pb2.SyncContractsRequest.FromString,
@@ -475,11 +480,6 @@ def add_EngineServiceServicer_to_server(servicer, server):
                     servicer.ListStrategyClasses,
                     request_deserializer=optra__engine__pb2.Empty.FromString,
                     response_serializer=optra__engine__pb2.ListStrategyClassesResponse.SerializeToString,
-            ),
-            'GetStrategyClassDefaults': grpc.unary_unary_rpc_method_handler(
-                    servicer.GetStrategyClassDefaults,
-                    request_deserializer=optra__engine__pb2.GetStrategyClassDefaultsRequest.FromString,
-                    response_serializer=optra__engine__pb2.GetStrategyClassDefaultsResponse.SerializeToString,
             ),
             'GetRemovedStrategies': grpc.unary_unary_rpc_method_handler(
                     servicer.GetRemovedStrategies,
@@ -521,10 +521,10 @@ def add_EngineServiceServicer_to_server(servicer, server):
                     request_deserializer=optra__engine__pb2.Empty.FromString,
                     response_serializer=optra__engine__pb2.AccountResponse.SerializeToString,
             ),
-            'ReconcilePositions': grpc.unary_unary_rpc_method_handler(
-                    servicer.ReconcilePositions,
+            'CheckWithBroker': grpc.unary_unary_rpc_method_handler(
+                    servicer.CheckWithBroker,
                     request_deserializer=optra__engine__pb2.Empty.FromString,
-                    response_serializer=optra__engine__pb2.ReconcileResponse.SerializeToString,
+                    response_serializer=optra__engine__pb2.BrokerCheckResponse.SerializeToString,
             ),
             'SettleExpired': grpc.unary_unary_rpc_method_handler(
                     servicer.SettleExpired,
@@ -812,7 +812,7 @@ class EngineService:
             _registered_method=True)
 
     @staticmethod
-    def GetOrdersAndTrades(request,
+    def GetOrdersAndFills(request,
             target,
             options=(),
             channel_credentials=None,
@@ -825,9 +825,9 @@ class EngineService:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/optra.EngineService/GetOrdersAndTrades',
-            optra__engine__pb2.OrdersAndTradesRequest.SerializeToString,
-            optra__engine__pb2.OrdersAndTradesResponse.FromString,
+            '/optra.EngineService/GetOrdersAndFills',
+            optra__engine__pb2.OrdersAndFillsRequest.SerializeToString,
+            optra__engine__pb2.OrdersAndFillsResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -920,6 +920,33 @@ class EngineService:
             _registered_method=True)
 
     @staticmethod
+    def GetQuotes(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/optra.EngineService/GetQuotes',
+            optra__engine__pb2.QuotesRequest.SerializeToString,
+            optra__engine__pb2.QuotesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
     def SyncContracts(request,
             target,
             options=(),
@@ -963,33 +990,6 @@ class EngineService:
             '/optra.EngineService/ListStrategyClasses',
             optra__engine__pb2.Empty.SerializeToString,
             optra__engine__pb2.ListStrategyClassesResponse.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def GetStrategyClassDefaults(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/optra.EngineService/GetStrategyClassDefaults',
-            optra__engine__pb2.GetStrategyClassDefaultsRequest.SerializeToString,
-            optra__engine__pb2.GetStrategyClassDefaultsResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -1217,7 +1217,7 @@ class EngineService:
             _registered_method=True)
 
     @staticmethod
-    def ReconcilePositions(request,
+    def CheckWithBroker(request,
             target,
             options=(),
             channel_credentials=None,
@@ -1230,9 +1230,9 @@ class EngineService:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/optra.EngineService/ReconcilePositions',
+            '/optra.EngineService/CheckWithBroker',
             optra__engine__pb2.Empty.SerializeToString,
-            optra__engine__pb2.ReconcileResponse.FromString,
+            optra__engine__pb2.BrokerCheckResponse.FromString,
             options,
             channel_credentials,
             insecure,

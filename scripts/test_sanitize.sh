@@ -18,12 +18,12 @@ BUILD_DIR="build/sanitize-$KIND"
 
 # Every test that runs more than one thread, and the backtest ones the live event loop shares.
 TESTS=(
-  test_live_event_loop_gtest test_live_event_engine_safety_gtest test_live_shutdown_e2e_gtest
+  test_live_event_loop_gtest test_event_loop_safety_gtest test_live_shutdown_e2e_gtest
   test_live_flow_gtest test_live_restore_gtest test_market_data_engine_gtest
-  test_live_event_engine_concurrency_mixed_gtest test_live_event_engine_burst_gtest
+  test_event_loop_concurrency_mixed_gtest test_event_loop_burst_gtest
   test_live_connect_gtest test_log_engine_gtest test_mpsc_ring_gtest
   test_object_pool_gtest test_concurrency_design_gtest test_concurrency_shutdown_gtest
-  test_backtest_cancel_late_fill_gtest test_backtest_dispatch_order_contract_gtest
+  test_booking_cancel_late_fill_gtest test_booking_before_strategy_callbacks_gtest
 )
 
 echo ">>> Configuring $BUILD_DIR ($FLAGS)"

@@ -1,172 +1,187 @@
 # The engine
 
-The engine is the part of Optra that trades. It is written in C++23, and the same code runs a backtest and live trading on Interactive Brokers. This page explains how it works: how a strategy sees the market, how orders and fills are booked, how the live process is organised, how it survives restarts, and how a backtest differs. The last sections cover what Interactive Brokers actually sends back, performance, building and testing.
-
-For how the engine fits with the rest of Optra, start with [architecture.md](architecture.md).
+The part of Optra that trades: C++23, the same code for backtests and for live trading on Interactive Brokers. How it fits with the rest: [architecture.md](architecture.md).
 
 ## Events in, orders out
 
-A strategy never calls the outside world. It reacts to *events* and produces *intents*.
+A strategy does no I/O. It is called on these events:
 
-There are four kinds of event:
+| Event | When |
+|---|---|
+| snapshot | a portfolio's latest option and underlying quotes, priced (IVs; Greeks on demand) |
+| timer | once a bar in a backtest, once a second live |
+| order update | accepted, filled, cancelled, rejected |
+| fill | a quantity of one contract at a price |
 
-- a **snapshot**: the latest prices of a portfolio's options and underlying, with each option's implied volatility and Greeks already worked out;
-- a **timer** tick, once per bar in a backtest and once a second live;
-- an **order update**: an order was accepted, filled, cancelled or rejected;
-- a **fill**: some quantity of one contract traded at a price.
+It can send orders and cancels and write log lines.
 
-And there are three kinds of intent: send an order, cancel an order, write a log line.
+- A timer tick: settle what expired, close what would settle in shares, run the strategies, value every holding and measure its risk, check the day's loss, run the delta hedges (`core::Main::on_timer`).
+- An order update or a fill is booked first, then told to its strategy.
 
-Everything between the two is the engine's job. When a snapshot arrives, the engine updates the portfolio's prices and tells the strategies trading it. On each timer tick it first settles any options that have expired, then runs the strategies, then refreshes each strategy's position metrics, then runs the delta hedges. When an order update or a fill arrives, it books it and then tells the strategy that owns the order.
-
-This is written once (in `core::Engine`) and used by both the backtest and live trading. The engine does not know which mode it is in. The difference lies only in what is plugged into it: where events come from, what the clock is, where orders go, and where records are kept.
+What differs between modes is only what is plugged in:
 
 | Plugged in | Backtest | Live |
 |---|---|---|
-| Quotes | a day's file of recorded quotes | Interactive Brokers, through the market-data connection |
-| Clock | the time of the current bar | the wall clock |
-| Orders go to | a simulated venue that fills at the next bar | Interactive Brokers |
-| Records kept in | an in-memory database | `data/optra.db` |
+| Quotes | a day's file of recorded quotes | IB |
+| Clock | the current bar's time | the wall clock |
+| Venue | a simulated venue, fills at the next bar | IB |
+| Records | memory (`BacktestDatabase`) | `data/optra.db` (SQLite) |
+| Event loop | events handled as they are put | its own thread |
+
+## How the engine is organised
+
+| Folder | What it is |
+|---|---|
+| `core/main.*` | `core::Main`: owns the engines and the ports, routes every event in a fixed order |
+| `core/event_loop.*` | the event thread: one ordered queue, a snapshot slot per portfolio |
+| `core/bookkeeping/` | each strategy's orders, fills and holding; valuation each bar, settlement at expiry, the check against the broker |
+| `core/risk/` | the limits, the exposure marks, the daily loss, the halt |
+| `core/strategy/` | the strategies, their states, callback timing, the delta hedges they ask for |
+| `core/market_data/` | turns live quotes into priced snapshots on its own thread |
+| `core/log/` | the log thread |
+| `core/gateway/`, `core/database/` | the ports: `core::Gateway`, `core::MarketData`, `core::Database` |
+| `assembly/` | `Main` put together: live (`live.*`, with the trading days) and backtest (`backtest.*`: the replay, a day, many trials) |
+| `adapters/` | the ports' implementations: IB, the backtest venue, the simulated market, the Parquet days, SQLite |
+| `model/` | contracts, orders, fills, the portfolio (`Listing`, `Portfolio`, `PortfolioSnapshot`), a strategy's record, `Param` |
+| `strategy/` | what a strategy is written against: `Strategy`, `StrategyContext`, the registry |
+| `quant/` | the numerical library and its C ABI ([research.md](research.md#the-methods)) |
+| `entry/` | the programs and the gRPC API (`optra_engine.proto`) |
+
+Rules:
+
+- The engines that keep trading state do no I/O and never call anything above them, so each can be tested alone and a backtest reproduces a run to the byte.
+- `Main` routes a fill to bookkeeping, then storage, then the strategy. Every order (strategy, hedge, close before expiry) goes risk check → venue → bookkeeping. The operator's commands arrive at the same place.
+- Broker, storage, market data and clock are ports; a new broker is one adapter, not a change to the engine.
+- Everything that changes trading state runs on the **event thread**. Other threads hand it work through lock-free queues. A command from another thread runs there and returns when done; a read is handed there too, so nothing outside sees half-changed state.
 
 ## Writing a strategy
 
-A strategy is a C++ class with a handful of callbacks: when it starts, on each snapshot, on each timer tick, on each order update and fill. It declares its parameters (a name, a default, a range), so the page and the server can show and validate them without knowing anything about the strategy. It reads the time with `now()`, never by counting ticks, so the same code works whether a bar is a minute in a backtest or a second live.
+- A C++ class with callbacks: init, each trading day (`on_day`), each snapshot, each timer tick, its order updates and fills.
+- The base class gives the trading day and minute, chain and strike selection, its holding, and order sending. Time is read with `now()`, never by counting ticks.
+- Parameters are a struct of `Param` lines (name, default, range) that the page can show and check; the risk limits are declared the same way. The setting is checked once when the strategy is added.
+- A strategy sees the engine only through its `StrategyContext`:
 
-A strategy sees the engine through a narrow view: its portfolio's prices, its own position, its working orders, and the ability to send orders. It cannot reach the database, the network or other strategies.
+| It reads | It does |
+|---|---|
+| its record (name, class, portfolio, setting) | `send_order` |
+| its portfolio | `register_hedging` / `unregister_hedging` |
+| its holding, whether an order is working | `subscribe_chains` |
+| values by day (`daily()`, from `data/daily`) | `write_log`, `set_error` |
 
-The most general strategy is **ComboStrategy**. It trades one combination of options described by rules rather than by contracts: each leg's ratio, call or put, strike as a percentage away from its expiry's forward price, and days to expiry. It opens at a set minute, closes at another, and can close early at a profit or loss measured against the premium. It can optionally delta-hedge, and it can optionally open only when a Heston model calibrated to the day's options says the combination is cheap. This is the strategy the research tools hand trade ideas to.
+- It cannot reach the database, the network or other strategies.
+- States: added → inited → running, or error. Each step only from the one before; only a running strategy can be stopped, so a stop never closes positions by mistake. A callback that throws, or keeps running over its time budget, puts it in error until it is inited again.
+- Each `.cpp` under `strategy/` is its own library, loaded at run time. Backtests load the demo and research strategies; a trading engine loads the demo ones and those installed for its account, which takes a person. Agent-written code stays off a trading account.
+
+**ComboStrategy** (`strategy/demo/`) trades one combination described by rules: up to four legs, each with ratio, call or put, strike relative to the forward, days to expiry. It opens and closes at set minutes, exits on profit or loss, can delta-hedge, and can wait for a Heston edge. Research ideas become settings of it.
 
 ## Booking orders and fills
 
-Getting positions right is the engine's most important job, and three rules make it reliable.
+| Rule | What it means |
+|---|---|
+| An order is units of legs | each leg a contract, a side and a ratio; one contract is one leg. A limit price is the net per unit, as IB prices a combination. Only the IB adapter treats combinations specially |
+| A position is one contract's | each leg is booked to the strategy's position in that contract, so holdings are checked against the broker contract by contract; each position remembers the combination it was opened in |
+| The order of reports does not matter | updates merged, repeats dropped, "done" held back until its fills are booked; an order stays active until the broker ends it, even after a cancel |
+| P&L is explained | each bar, split into delta, gamma, theta, vega, each fill's cost against the mid, and the rest; the parts add up to the total |
 
-**A fill is always one contract's.** When a combination of options trades, the engine books each leg separately. A combination's position is then just its legs, and its quantity follows from theirs. This keeps the bookkeeping identical for single options and combinations.
+Fees follow IB: 1.2 USD an option contract by default in research; 0.005 USD a share, 1 USD minimum an order.
 
-**The order of reports does not matter.** Brokers report order updates and fills in whatever order they like: an order may be reported "filled" before its fills arrive. The engine merges every update into the order, ignores ones that are stale or repeated, and holds back the news that an order is finished until its fills have been booked. A strategy that hears "your order is done" can therefore trust its position. A fill that arrives twice is booked once.
+## The risk check
 
-**Profit and loss is explained, not just reported.** Between updates, each strategy's P&L is split by where it came from: the underlying's move (delta), the curvature of that move (gamma), time passing (theta), changes in volatility (vega), the prices paid against the middle of the market at each fill, and whatever is left over. The parts add up to the total, so a strategy that makes money can be checked for *why* it did.
+Every order passes it, in backtests as well as live (`core/risk/risk_engine.hpp` lists every limit):
 
-Fees follow Interactive Brokers: a fee per option contract, and for shares a fixed 0.005 USD each, at least 1 USD an order.
+| Kind | Limits |
+|---|---|
+| Size | contracts or shares in one order; what a strategy may hold of a contract; options held at once |
+| Price | premium paid; a limit price's distance from the mid; the spread a market order may cross |
+| Shape | options sold uncovered refused when `short_options` is 0; SPY options expiring today closed `flatten_minutes` before the close, none bought after |
+| Exposure | delta, gamma and vega in USD, per strategy and in total; margin |
+| Loss | a strategy past its daily loss only closes until the next day; all together past theirs halts trading to closing orders |
+| Data | no opening order on quotes older than `max_quote_age_seconds`, nor while the broker is disconnected |
 
-Every order also passes a **risk check** before it leaves: limits on order size, position size and premium, a price band around the market, a maximum quoted spread for market orders, no naked short options, and only closing orders shortly before an expiring option that settles in shares. The operator can halt everything except orders that only reduce positions. The same checks run in backtests.
+- Exposure, margin and the loss since the New York day began are marked every bar. On a day the market is closed only the marks move.
+- Margin, estimated: per expiry, the most the options can lose at expiry (nothing for options bought), plus 20% of the underlying for each call sold uncovered; shares, half their value.
+- The operator can halt to closing orders at any time.
 
 ## The live engine
 
-Live, the engine is one process that runs all day. Inside it are a few threads, each with one job:
+One process all day. The event thread runs the strategies and books everything; IB, market data, the log, the database and the gRPC requests have threads of their own ([latency.md](latency.md)).
 
-| Thread | Job |
-|---|---|
-| the event thread | runs every strategy and books every order and fill; the only thread that changes trading state |
-| the IB order thread | receives order updates and fills from Interactive Brokers, and writes orders out to the network |
-| the IB market-data thread | receives quotes and turns each batch into fresh, priced snapshots |
-| the log thread | writes log lines out |
-| the database thread | saves orders, fills and positions in batches |
-| the gRPC threads | answer the server's requests |
+| Layer | Start | Stop |
+|---|---|---|
+| The engine | log, database, event thread; strategies, orders and fills restored | the event thread drains its queue; the database closes |
+| The run | connect to IB, roll in the day's contracts, start market data and the strategies that were running | stop the daily roll, then market data, then IB |
 
-The most important choice is the first row: **one thread owns all trading state**. Strategies, booking, positions and hedging all run there, one event after another. There are no locks around positions or orders, and events happen in the same order as they would in a backtest. The price of this choice is that the event thread must never be slowed down by the outside world, so it never waits: writing to the network, to the log and to the database is all handed to other threads.
-
-How events reach the event thread depends on what they are:
-
-- **Order updates, fills and commands** join an ordered queue that never drops anything and never makes the sender wait. Losing a fill would be a bookkeeping error, so this queue has no size limit.
-- **Snapshots** go into one slot per portfolio. A new snapshot replaces one that has not been used yet. If quotes arrive faster than the strategies can react, they simply see the latest prices, and a burst of quotes can never push a fill back in the queue.
-- **Log lines** go through a bounded buffer. If it ever overflows, log lines are dropped and counted, rather than slowing anything down.
-
-When a thread has nothing to do it sleeps, and a producer only wakes it when it is actually asleep. The server's commands ("start this strategy", "list the positions") are run on the event thread too, so they see a consistent state.
-
-**Stopping** is orderly. The server's connection is closed, the IB connections stop (orders not yet sent are reported as rejected), the event thread finishes what is already queued, and the database is closed. Strategies are *not* stopped, because a strategy's stop routine may close positions. They are simply resumed on the next start.
+- Strategies are not stopped when the engine stops (a stop may close positions); they resume on the next start.
+- If IB cannot be reached or the day's contracts cannot be fetched, nothing trades and the engine tries again each minute, logging the failure once.
+- Accounts: only `IB_ACCOUNT`, a paper account. A live account must be named by the administrator in `/etc/optra/live-account`, and then runs only the strategies listed in `/etc/optra/live-strategies`, a line each: class, the code its library was built from, its setting (`ComboStrategy e20212171aaeb093 entry_minute=30.0 ...`; what the line leaves out is the default). Anything else is refused by the engine itself.
+- Other settings: `entry_live --help`.
 
 ## Restarts, expiry and the trading day
 
-The engine is restarted every morning, and it always resumes where it stopped. Every order, fill and strategy setting is saved as it happens.
-
-**On start**, the engine adds back each strategy under its old name with its old settings, and rebuilds its position from the last saved state plus any fills after it. Then it connects to Interactive Brokers and catches up: today's fills it may have missed, the orders still working, and finally the account's positions. These are compared, contract by contract, with what the strategies hold. A strategy may only start once they agree. Contracts that no strategy trades (a trade placed by hand, say) are listed but not compared.
-
-**At expiry**, an option a strategy holds is settled by the engine itself, using the underlying's price at the 16:00 New York close. SPXW options settle in cash at their intrinsic value. SPY options that finish in the money deliver shares at the strike. The settlement is booked like any other fill. If the engine was not running at the close and has no price for it, the option waits, and its strategy cannot start until the operator settles it by hand with the closing price.
-
-**Names are permanent.** A strategy's orders and fills are saved under its name, so a name is never reused for a different strategy. A removed strategy can be brought back with its position.
-
-**Each trading morning** the engine is stopped and started again with `entry_live --sync SPY --sync SPXW --resume`. It first fetches today's option contracts from Interactive Brokers, then connects, checks the positions, and starts the market data and the strategies that were running.
-
-The engine only trades the one account named in `IB_ACCOUNT`, which must be a paper account. A live account is refused unless the machine's administrator names it in a root-owned file. The other settings (where IB Gateway listens, how many quote lines to use, where to record quotes) come from the environment and are listed by `entry_live --help`.
+- **Restart**: every order, fill and setting is saved as it happens. On start each strategy comes back under its name, its holding replayed from its orders and fills; the engine catches up with IB and compares positions contract by contract; no strategy starts until they agree.
+- **A strategy restarted mid-day** starts with its members empty and reads what it did today from its holding (`traded_today`, `last_order_minute`, `holds_options`). A backtest trial's `restart_minute` makes the strategy again at that minute each day to check this.
+- **Expiry**: at the New York close the engine settles expiring options itself: SPXW and XSP in cash at intrinsic value, SPY, QQQ and IWM in the money by delivering shares at the strike (`model/portfolio_spec.hpp`). If the engine was down at the close, it asks the broker for that day's official close and settles at it when the answer comes; the strategy cannot start until then (the operator can settle by hand).
+- **Dividends**: the day before an ex-dividend day of a share-settled underlying, combos with a call sold are closed before the close (early exercise). The ex-dividend days are read from `data/daily/<underlying>_ex_dividend.csv`; without that file the rule does not apply.
+- **Names**: orders and fills are saved under the strategy's name, so a name is never reused and a removed strategy can be restored with its holding.
+- **The daily roll**: at 08:45 New York the day's contracts are fetched and rolled in without stopping. Held contracts stay, expired ones go; strategies pick the day's chains in `on_day`. Option and chain handles are good only until the next roll, so a strategy keeps symbols.
 
 ## Backtests
 
-A backtest replays one or more days of recorded quotes:
-
 ```bash
 ./engine/build/entry_backtest --list-strategies          # every strategy and its parameters
-./engine/build/entry_backtest --files data/SPY/SPY-2025-03/*.parquet ComboStrategy leg1_ratio=1 leg2_ratio=1 leg2_right=1
+./engine/build/entry_backtest --files data/SPY/SPY-2025-03/*.parquet ComboStrategy leg1_ratio=1 leg2_ratio=1 leg2_right=1 \
+    --costs '{"fee_rate": 1.2, "multi_leg_fill_position": 0.5}'
+./engine/build/entry_backtest --batch spec.json                # many trials over the same days
 ```
 
-Before a day starts, every minute's snapshot is priced in one pass, in parallel. The day then runs minute by minute: the snapshot is applied, orders sent at the previous minute are filled (buying at the ask, selling at the bid, adjusted by the slippage), and the timer runs the strategies. Each day runs on its own engine, four at a time. Options can be priced from the bid, the ask or the mid, and fees, slippage and the interest rate are options on the command line.
-
-The program prints a single JSON document: the summary (P&L, fees, drawdown, Sharpe ratio, the largest Greeks held, the P&L by source), each day's result, and the series the page draws. Logs go to the error stream, so the output is always clean JSON. The data format is described in [data.md](data.md).
+- Days run as live trades them: one engine and one strategy, in date order, each morning's contracts rolled in from the day's file.
+- **Fills**: each minute, orders from the minute before fill at a set position in each leg's spread (ask or bid by default; one position for single-leg orders, another for combos), optionally limited to the size shown or delayed. These costs are one object defined in the server (fees, the two positions, the fill model, the delay, the risk limits) and handed to the engine whole.
+- **At the close**: expiring options settle, working orders are cancelled, holdings carry to the next day.
+- **Batch**: many trials over the same days, each on its own engine, each day read and priced once for all ([backtesting.md](backtesting.md)). A trial gives exactly the result it gives alone.
+- **Output**: one JSON line per trial (its days and round trips as columns), then a line with the days (each file, its bars and quotes, the underlying's open and close); fills only when asked. The engine does not sum days; the server does, in one place, for the ledger, the tools and the page.
+- **Day cache**: a day's contracts and minutes in a `.day` file, each chain loaded in a `.chain` file (quotes, forwards, IVs), read in place. A chain is loaded only when a strategy subscribes to it, holds or orders one of its options. Greeks are not stored: they are priced on demand by the live code, bit for bit the same.
+- **Round trips**: from the bar a position opens to the bar it holds nothing again, the same day or later (an option exercised ends when its delivered shares are sold the next morning). Each has its P&L after fees and by source, its maximum loss at the open, what its orders paid over the mids, and what its options settled for. Per-trade measures (R, win rate, number of trades) are built from these.
+- **Errors**: a run stops rather than give a wrong answer, for example when a day is missing between two held days. Logs go to stderr. The data format is in [data.md](data.md).
 
 ## A simulated market
 
-The live engine can also run with no broker at all: `entry_simulate <day.parquet>` is the same engine, served the same way, but its venue, its quotes and its clock are simulated ones. It replays a recorded day (the backtest's files, real or synthetic) as if it were the live market. The engine's clock starts at the day's first quote and then runs at the wall clock's pace, so a strategy sees one minute of quotes per real minute. Orders are filled at the quotes, the same way a backtest fills them (buying at the ask, selling at the bid), and the fills build up a simulated account: cash, positions valued at the latest prices, realised and unrealised P&L, saved next to the database so the account carries on across restarts. Expiring options are settled at the close like real ones. Fifteen minutes after the last quote the engine stops, so a service can start it again on the next day.
-
-Everything else is the real engine: the same strategies, booking, risk checks, settlement, P&L breakdown and logs, and the same API, so the page shows a simulated account exactly as it shows the paper account. The engine does not know the difference: it is built with whatever venue, source of quotes and clock it is handed, and only `entry_simulate` hands it simulated ones, as `entry_live` hands it Interactive Brokers. This is what powers the public demo; it is also a way to watch a strategy trade through a whole day without a broker.
+`entry_simulate <day.parquet>` runs the live engine with no broker, replaying a recorded day as the market at wall-clock pace. Orders fill as in a backtest and build a simulated account; everything else is the real engine and API. This powers the public demo.
 
 ## What Interactive Brokers sends back
 
-The details of the broker's reports matter, because booking depends on them. Everything below was recorded on the paper account on 2026-10-12 by the integration test `IbPaper.ComboFillsAreBookedAsLegs`, which can be run again after an upgrade (during market hours; it trades and ends flat):
+Recorded on the paper account on 2026-10-12 by `IbPaper.ComboFillsAreBookedAsLegs` (trades and ends flat; run in market hours):
 
 ```bash
 set -a && . ./.env && set +a && cd engine/build && OPTRA_IB_PAPER_TESTS=1 OPTRA_IB_PAPER_FILLS=1 OPTRA_IB_PAPER_RAW=1 \
   ./tests/integration/test_ib_paper_gtest --gtest_filter='*ComboFillsAreBookedAsLegs*'
 ```
 
-**A single option.** IB sends the order's state several times (`PreSubmitted`, then `Filled`, often repeated with nothing new) and one execution with the side, the quantity in contracts and the price per share. The option is identified by its OCC symbol, from which the engine names it (for example `SPXW-20261013-C-7820`). The execution's timestamp is in whatever time zone IB Gateway is set to, so the engine stamps fills itself when it books them.
-
-**A combination** (IB calls it a BAG) produces three executions for a two-leg fill, all under one order number:
+| Case | What IB does | What the engine does |
+|---|---|---|
+| a single option | several state reports, one execution, timestamped in IB Gateway's time zone | stamps fills itself |
+| a combination (BAG) | three executions under one order number: the combination at its net price, then each leg; the order reported filled before the legs arrive | books only the legs |
+| a combination of one option | no answer at all | sends a single option as an ordinary order |
+| after reconnecting | resends the day's executions for the client number | drops those already booked; one client number per database |
+| message 10197 | no market data: the live login the paper account shares data with is logged in elsewhere | |
 
 ```
-secType=BAG  side=BOT price=2.3                       the combination as a whole: the net price per unit
+secType=BAG  side=BOT price=2.3                           the combination: the net per unit
 secType=OPT  SPXW 261013C07815000  side=BOT price=12.4    the first leg
 secType=OPT  SPXW 261013C07820000  side=SLD price=10.1    the second leg
 ```
 
-The combination's own execution is not a trade of any one contract, so it is not booked as a fill; the two legs are, each at its own side and price (12.4 − 10.1 = the 2.3 paid). IB reports the order as filled *before* the legs' executions arrive, which is exactly the case the engine's booking rules exist for.
-
-**A combination of one option gets no answer at all** from IB: no acknowledgement, no error. So the engine always sends a single option as an ordinary order.
-
-**After reconnecting**, IB resends all of today's executions for the connection's client number, whichever process placed them. The engine drops the ones it has already booked, and logs (but does not hold) fills of orders it does not know. Because order numbers restart per client number and session, each database uses one client number.
-
-Some informational messages are routine (2104, 2106, 2158: market data connected; 2100: account updates unsubscribed). One is worth knowing: **10197** means no market data, because the live login that the paper account shares data with is logged in somewhere else (TWS, the mobile app, the web portal).
-
-## Speed
-
-Most of the engine's speed comes from not doing unnecessary work on the event thread.
-
-- **Nothing is copied to be passed along.** Events carry a pointer to their data, and the data lives in pools of reusable objects, so a quote, an order or a fill is written once by its producer and read in place by everything that needs it. Copies happen only at the edges: the network, the database and the log.
-- **Nothing on the event thread waits** for the network, the disk or the log, as described above.
-- **Prices are worked out once.** Live, a snapshot only reprices options whose inputs changed. In a backtest, every minute's snapshot is priced before the day runs.
-
-These paths are measured by `scripts/bench.sh`, which times, through the real threads, how long a quote takes to become an order, a fill to reach its strategy, and a command to make a round trip.
-
-The numerical library is parallelised with OpenMP rather than a hand-written thread pool, and a benchmark in `engine/tests/bench/concurrency` shows why. On an 8-core laptop, OpenMP was as fast as the pool or faster in every case, and up to 1.8 times faster with 16 threads, because one American-option valuation enters about a hundred parallel sections and a pool pays a queue, an allocation and a wake-up for each piece of work. Results are bit-for-bit identical whatever the number of threads: work is split into fixed chunks, each with its own random numbers, combined in a fixed order.
-
-## Building
-
-The engine builds on Linux with GCC 14 or newer and the Ubuntu packages listed in the README.
+## Building and testing
 
 ```bash
-./build.sh r             # Release build: entry_backtest, entry_live, entry_simulate and the numerics library, into engine/build
-./build.sh r 0 g         # a clean build that includes the Interactive Brokers connection
-```
-
-The pieces build as separate libraries, from the bottom up: general utilities and the numerical library; the data model; the strategy framework; the connections to the outside (IB, the backtest venue and data, SQLite); the engine itself; and the two programs on top. The IB connection needs the TWS API, which is fetched rather than kept in the repository (`scripts/fetch_ibjts.sh`; `build.sh` does it when needed).
-
-## Testing
-
-```bash
-ctest --test-dir engine/build                  # about 150 unit tests: no network, no database file
+./build.sh r                                   # Release: the programs and the numerics library
+./build.sh r 0 g                               # a clean build with the Interactive Brokers connection
+ctest --test-dir engine/build                  # the unit tests: no network, no database file
+scripts/bench.sh --check                       # the latency benchmarks against their baseline
 scripts/test_sanitize.sh thread                # the threaded tests under ThreadSanitizer (or address)
 ```
 
-The unit tests cover the lock-free queues and pools, the booking rules (out-of-order and repeated reports, a fill after a cancel), positions and their P&L breakdown, the risk check, settlement, restoring after a restart, shutting down (closing the engine must not stop its strategies), the IB connection against a fake broker, and the strategy framework.
-
-Two other kinds of test run by hand. The **paper-account tests** trade on the real IB paper account, so they run only during market hours and only when asked. The **data checks** run the engine on synthetic days whose answers are known: that it reads back the implied volatility the quotes were priced at, and that a delta-hedged straddle earns what the model says it should.
-
-Finally, every change to the engine is checked against the example strategies' backtest results from the last run, which should not move unless the change means them to.
+- Linux, GCC 14 or newer, the packages in the README; `build.sh` fetches the TWS API when needed.
+- Unit tests: booking, holdings and P&L, risk, settlement, hedging, restarts, shutdown, reconnecting, the IB adapter against a fake broker, the strategy framework. Paper-account tests (`ctest -L ib_paper`) run by hand in market hours.
+- On synthetic days, with the server's tests ([`test_backtest_truth.py`](../app/server/tests/trading/test_backtest_truth.py)): every fill is the next bar's quote and every day's P&L exact to the cent; changing every quote after a minute does not change what a strategy did before it.
+- Every engine change is checked against the example strategies' last backtest results.
+- The latency benchmarks fail when a hot path is more than 15% slower at p50, or 50% at p99, than its baseline at a fixed clock.

@@ -1,6 +1,9 @@
+"""The live engine's gRPC client. Every call has a deadline (DEADLINE unless it gives its own): an engine that does not
+answer costs a route an error, never a thread for good."""
+
 from __future__ import annotations
 
-import json
+import collections
 import os
 from typing import Any, Dict, List
 
@@ -9,6 +12,30 @@ from google.protobuf.json_format import MessageToDict
 
 from optra.proto import optra_engine_pb2 as pb2
 from optra.proto import optra_engine_pb2_grpc as pb2_grpc
+
+
+DEADLINE = 15.0  # seconds
+
+
+class _Details(collections.namedtuple("_Details", ("method", "timeout", "metadata", "credentials",
+                                                    "wait_for_ready", "compression")), grpc.ClientCallDetails):
+    pass
+
+
+class _Deadline(grpc.UnaryUnaryClientInterceptor, grpc.UnaryStreamClientInterceptor):
+    """DEADLINE for a call that gives none; a stream that should run on (the logs) gives its own."""
+
+    def _with_deadline(self, details: grpc.ClientCallDetails) -> grpc.ClientCallDetails:
+        if details.timeout is not None:
+            return details
+        return _Details(details.method, DEADLINE, details.metadata, details.credentials, details.wait_for_ready,
+                        details.compression)
+
+    def intercept_unary_unary(self, continuation, client_call_details, request):
+        return continuation(self._with_deadline(client_call_details), request)
+
+    def intercept_unary_stream(self, continuation, client_call_details, request):
+        return continuation(self._with_deadline(client_call_details), request)
 
 
 def _risk(state) -> Dict[str, Any]:
@@ -25,11 +52,12 @@ def _risk(state) -> Dict[str, Any]:
         ],
         "refused": state.refused,
         "recent_refusals": list(state.recent_refusals),
+        "day_stops": dict(state.day_stops),
     }
 
 
 class EngineClient:
-    """gRPC client for C++ live EngineService (gateway, strategies, orders/trades, holdings)."""
+    """gRPC client for C++ live EngineService (gateway, strategies, orders/fills, holdings)."""
 
     def __init__(self, target: str | None = None) -> None:
         if target is None:
@@ -39,53 +67,57 @@ class EngineClient:
         self._channel = grpc.insecure_channel(
             self._target, options=[("grpc.max_receive_message_length", 64 * 1024 * 1024)]
         )
-        self._stub = pb2_grpc.EngineServiceStub(self._channel)
+        self._stub = pb2_grpc.EngineServiceStub(grpc.intercept_channel(self._channel, _Deadline()))
 
-    def get_status(self) -> Dict[str, Any]:
-        resp = self._stub.GetStatus(pb2.Empty())
+    def close(self) -> None:
+        self._channel.close()
+
+    def get_status(self, timeout: float | None = None) -> Dict[str, Any]:
+        resp = self._stub.GetStatus(pb2.Empty(), timeout=timeout)
         return {
             "status": "running" if resp.running else "stopped",
             "connected": bool(resp.connected),
             "detail": resp.detail,
             "halted": bool(resp.halted),
+            "code": resp.code,  # the trading core it was built from (code_identity.engine_hash)
         }
 
-    def get_orders_and_trades(self, strategy: str | None, limit: int) -> Dict[str, Any]:
-        """The orders and trades the engine saved, newest first: the latest `limit` of each (of one
-        strategy, or of all), and every strategy name orders or trades are saved under."""
-        resp = self._stub.GetOrdersAndTrades(
-            pb2.OrdersAndTradesRequest(strategy_name=strategy or "", limit=limit)
+    def get_orders_and_fills(self, strategy: str | None, limit: int) -> Dict[str, Any]:
+        """The orders and fills the engine saved, newest first: the latest `limit` of each (of one
+        strategy, or of all), and every strategy name orders or fills are saved under."""
+        resp = self._stub.GetOrdersAndFills(
+            pb2.OrdersAndFillsRequest(strategy_name=strategy or "", limit=limit)
         )
         records: List[Dict[str, Any]] = [
             {
                 "record_type": "Order",
                 "timestamp": o.timestamp,
                 "strategy_name": o.strategy_name,
-                "id": o.orderid,
+                "id": o.order_id,
                 "symbol": o.symbol,
-                "direction": o.direction,
+                "side": o.side,
                 "price": o.price,
-                "volume": o.volume,
-                "traded": o.traded,
+                "quantity": o.quantity,
+                "filled": o.filled,
                 "status": o.status,
             }
             for o in resp.orders
         ]
         records += [
             {
-                "record_type": "Trade",
-                "timestamp": t.timestamp,
-                "datetime": t.datetime,  # when it filled, as the venue said ("" if unknown)
-                "strategy_name": t.strategy_name,
-                "id": t.tradeid,
-                "symbol": t.symbol,
-                "direction": t.direction,
-                "price": t.price,
-                "volume": t.volume,
-                "traded": None,
+                "record_type": "Fill",
+                "timestamp": f.timestamp,
+                "datetime": f.datetime,  # when it filled, as the venue said ("" if unknown)
+                "strategy_name": f.strategy_name,
+                "id": f.fill_id,
+                "symbol": f.symbol,
+                "side": f.side,
+                "price": f.price,
+                "quantity": f.quantity,
+                "filled": None,
                 "status": None,
             }
-            for t in resp.trades
+            for f in resp.fills
         ]
         records.sort(key=lambda r: r["timestamp"], reverse=True)
         return {"strategies": list(resp.strategies), "records": records}
@@ -97,8 +129,8 @@ class EngineClient:
             {
                 "symbol": c.symbol,
                 "product": c.product,
-                "size": c.size,
-                "pricetick": c.pricetick,
+                "multiplier": c.multiplier,
+                "price_tick": c.price_tick,
                 "option_type": c.option_type,
                 "option_strike": c.option_strike,
                 "option_expiry": c.option_expiry,
@@ -108,7 +140,7 @@ class EngineClient:
         ]
 
     def wipe_database(self, what: str) -> Dict[str, int]:
-        """Empty "trading" (orders, trades, holdings) or "contracts"; the rows each table lost.
+        """Empty "trading" (orders, fills, holdings) or "contracts"; the rows each table lost.
         The engine refuses the trading record while a strategy holds positions."""
         resp = self._stub.WipeDatabase(pb2.WipeDatabaseRequest(what=what))
         return dict(resp.emptied)
@@ -130,15 +162,10 @@ class EngineClient:
             for s in resp_iter
         ]
 
-    def get_strategy_classes(self) -> List[str]:
+    def get_strategy_classes(self) -> Dict[str, List[str]]:
+        """The classes, the strategy libraries built since loaded first; and the libraries not loaded, with why."""
         resp = self._stub.ListStrategyClasses(pb2.Empty())
-        return list(resp.classes)
-
-    def get_strategy_class_defaults(self, strategy_class: str) -> Dict[str, float]:
-        """Return default strategy settings for a class (as the class declares them)."""
-        req = pb2.GetStrategyClassDefaultsRequest(strategy_class=strategy_class)
-        resp = self._stub.GetStrategyClassDefaults(req)
-        return dict(resp.settings)
+        return {"classes": list(resp.classes), "refused": list(resp.refused)}
 
     def get_removed_strategies(self) -> List[str]:
         resp = self._stub.GetRemovedStrategies(pb2.Empty())
@@ -154,7 +181,7 @@ class EngineClient:
         req = pb2.AddStrategyRequest(
             strategy_class=strategy_class,
             portfolio_name=portfolio_name,
-            setting_json=json.dumps(setting or {}),
+            setting={k: float(v) for k, v in (setting or {}).items()},
             strategy_name=strategy_name or "",
         )
         resp = self._stub.AddStrategy(req)
@@ -197,7 +224,7 @@ class EngineClient:
 
     def connect_gateway(self) -> Dict[str, Any]:
         """Connect IBKR gateway (account/order channel); market data is separate."""
-        self._stub.ConnectGateway(pb2.Empty())
+        self._stub.ConnectGateway(pb2.Empty(), timeout=60)
 
         status = self.get_status()
         # Confirm C++ side reports IB connected
@@ -250,7 +277,7 @@ class EngineClient:
 
     def get_account(self) -> Dict[str, Any]:
         """The account at IB (its values; its positions, with the strategies' holdings beside them),
-        where the positions check stands, and expired options waiting to be settled. When IB cannot
+        where the broker check stands, and expired options waiting to be settled. When IB cannot
         be asked, from_ib is false, ib_error says why, and only the engine's side is filled."""
         resp = self._stub.GetAccount(pb2.Empty(), timeout=90)
         return {
@@ -264,14 +291,14 @@ class EngineClient:
                 MessageToDict(p, preserving_proto_field_name=True, always_print_fields_with_no_presence=True)
                 for p in resp.positions
             ],
-            "positions_check": resp.positions_check,
-            "positions_problem": resp.positions_problem,
+            "broker_check": resp.broker_check,
+            "broker_check_problem": resp.broker_check_problem,
             "unsettled": {u.strategy_name: list(u.options) for u in resp.unsettled},
         }
 
-    def reconcile_positions(self) -> Dict[str, Any]:
+    def check_with_broker(self) -> Dict[str, Any]:
         """Ask IB for the positions again and check the strategies' holdings against them."""
-        resp = self._stub.ReconcilePositions(pb2.Empty(), timeout=90)
+        resp = self._stub.CheckWithBroker(pb2.Empty(), timeout=90)
 
         def diffs(items: Any) -> List[Dict[str, Any]]:
             return [{"symbol": d.symbol, "engine": d.engine, "broker": d.broker} for d in items]
@@ -284,12 +311,12 @@ class EngineClient:
         resp = self._stub.SettleExpired(pb2.SettleExpiredRequest(portfolio=portfolio, expiry=expiry, price=price))
         return {"status": "ok", "settlements": resp.settlements}
 
-    def book_manually(self, strategy: str, symbol: str, direction: str, volume: float, price: float,
+    def book_manually(self, strategy: str, symbol: str, side: str, quantity: float, price: float,
                       reason: str) -> Dict[str, Any]:
         """Book a fill the engine missed, as an order of the strategy's filled at once."""
         resp = self._stub.BookManually(pb2.BookManuallyRequest(
-            strategy=strategy, symbol=symbol, direction=direction, volume=volume, price=price, reason=reason))
-        return {"status": "ok", "orderid": resp.orderid}
+            strategy=strategy, symbol=symbol, side=side, quantity=quantity, price=price, reason=reason))
+        return {"status": "ok", "order_id": resp.order_id}
 
     def get_risk(self) -> Dict[str, Any]:
         """The limits every order is checked against, the halt, the orders refused."""
@@ -306,12 +333,7 @@ class EngineClient:
         return _risk(self._stub.ClearHalt(pb2.Empty()))
 
     def stream_logs(self):
-        """Yield log lines from C++ via gRPC StreamLogs (server-formatted)."""
-        try:
-            for msg in self._stub.StreamLogs(pb2.Empty()):
-                # msg.line is a plain text line
-                yield msg.line
-        except grpc.RpcError:
-            # Connection dropped or stream ended
-            return
+        """The engine's log lines as it writes them, until the stream ends (grpc.RpcError when it breaks)."""
+        for msg in self._stub.StreamLogs(pb2.Empty(), timeout=365 * 86400):
+            yield msg.line
 

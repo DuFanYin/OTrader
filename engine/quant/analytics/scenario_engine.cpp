@@ -1,20 +1,26 @@
-#include "engine.h"
+// Scenario task: one option repriced under four shocks (spot up and down, vol up, rate up),
+// ranked by how far each moves it.
+#include "json_io.h"
 #include "quant/kernel.h"
 
 #include <algorithm>
 #include <cmath>
 #include <ranges>
-#include <vector>
 
 namespace quant::analytics {
 
-ScenarioResult run_scenario(const ScenarioParams& p) {
+std::string run_scenario_json(const std::string& src, double t0_ms) {
+    const auto req = parse_request(src, {"spot", "strike", "rate", "vol", "maturity"},
+                                   "missing_required_scenario_fields");
+    if (!req) return req.error();
+    const json& j = *req;
     double prices[5] = {0};
-    scenario_bs5(p.spot, p.strike, p.rate, p.vol, p.maturity, p.dividend_yield, p.option_type != "put", prices);
-
+    scenario_bs5(jv(j, "spot", 0.0), jv(j, "strike", 0.0), jv(j, "rate", 0.0), jv(j, "vol", 0.0),
+                 jv(j, "maturity", 0.0), jv(j, "dividend_yield", 0.0),
+                 jv<std::string>(j, "option_type", "call") != "put", prices);
     static const char* names[5] = {"base", "spot_up", "spot_down", "vol_up", "rate_up"};
 
-    // rank by abs deviation from base
+    // Ranked by the distance from the base price.
     int idx[5] = {0, 1, 2, 3, 4};
     std::ranges::sort(idx, [&](int a, int b) {
         return std::abs(prices[a] - prices[0]) > std::abs(prices[b] - prices[0]);
@@ -22,26 +28,24 @@ ScenarioResult run_scenario(const ScenarioParams& p) {
     int ranks[5] = {};
     for (int i = 0; i < 5; ++i) ranks[idx[i]] = i + 1;
 
-    ScenarioResult r;
-    r.base_price = prices[0];
-    r.max_price  = *std::ranges::max_element(prices);
-    r.min_price  = *std::ranges::min_element(prices);
-
+    const double base = prices[0];
+    const bool has_pct = std::abs(base) > 1e-12;
+    json rows = json::array(), tornado = json::array();
     for (int i = 0; i < 5; ++i) {
-        ScenarioRow row;
-        row.name         = names[i];
-        row.bs_price     = prices[i];
-        row.vs_base_diff = prices[i] - prices[0];
-        row.abs_diff     = std::abs(row.vs_base_diff);
-        row.rank         = ranks[i];
-        row.has_pct      = std::abs(prices[0]) > 1e-12;
-        if (row.has_pct) {
-            row.vs_base_pct = row.vs_base_diff / prices[0];
-            row.vs_base_bps = row.vs_base_pct * 10000.0;
-        }
-        r.rows.push_back(row);
+        const double diff = prices[i] - base;
+        const double pct = has_pct ? diff / base : 0.0;
+        rows.push_back({{"rank", ranks[i]}, {"scenario", names[i]}, {"base_price", base},
+                        {"bs_price", prices[i]}, {"vs_base_diff", diff}, {"abs_vs_base_diff", std::abs(diff)},
+                        {"vs_base_pct", has_pct ? json(pct) : json(nullptr)},
+                        {"vs_base_bps", has_pct ? json(pct * 10000.0) : json(nullptr)}});
+        if (i > 0) tornado.push_back({{"label", names[i]}, {"value", diff}});
     }
-    return r;
+    const double max_price = *std::ranges::max_element(prices);
+    const double min_price = *std::ranges::min_element(prices);
+    json summary = {{"base_price", base}, {"max_price", max_price}, {"min_price", min_price},
+                    {"price_range", max_price - min_price}, {"scenario_count", 5}};
+    return ok_response(std::move(summary), {{"rows", std::move(rows)}, {"tornado_points", std::move(tornado)}},
+                       t0_ms);
 }
 
 }  // namespace quant::analytics

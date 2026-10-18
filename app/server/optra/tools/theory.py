@@ -13,10 +13,8 @@ from optra.infra.numerics import (
     ito_check as engine_ito_check,
     measure_compare as engine_measure_compare,
     measure_density_path,
-    simulation_path,
     stats_normal,
 )
-from optra.services.explainable_qa import build_explainable_qa
 from optra.tools.base import Result, Tool, engine_task
 
 
@@ -29,14 +27,11 @@ def ito_check(req: ItoCheckRequest) -> Result:
 
 
 def simulate_path(req: SimulationRequest) -> Result:
-    values = simulation_path(req.model, req.n_steps, req.dt, req.sigma, req.kappa, req.theta, req.x0) or [req.x0]
-    return Result(summary={"model": req.model, "n_steps": req.n_steps, "x_final": values[-1],
-                           "x_min": min(values), "x_max": max(values)},
-                  details={"values_preview": values})
+    return engine_task("simulation", req.model_dump())
 
 
 def measure_density(req: MeasureChangeRequest) -> Result:
-    density = measure_density_path(req.mu, req.r, req.sigma, req.t, req.n_steps) or [1.0]
+    density = measure_density_path(req.mu, req.r, req.sigma, req.t, req.n_steps)
     theta = (req.mu - req.r) / max(req.sigma, 1e-8)
     return Result(summary={"theta_market_price_of_risk": theta, "final_density": density[-1],
                            **summarize_density(density, req.t)},
@@ -73,10 +68,8 @@ def measure_compare(req: MeasureCompareRequest) -> Result:
 
 
 def validate(req: ValidationGateRequest) -> Result:
-    payload = req.model_dump()
-    gate = engine_task("validation_gate", payload, "validation")
-    gate.details["explainable_qa"] = build_explainable_qa(gate.details.get("rows", []), gate.summary, payload)
-    failed = [r for r in gate.details.get("rows", []) if r.get("status") == "fail"]
+    gate = engine_task("validation_gate", req.model_dump())
+    failed = [r for r in gate.details["rows"] if r["status"] == "fail"]
     gate.warnings += [f"{r['capability']}.{r['metric']} = {r['value']:.4g} is over its threshold {r['threshold']:.4g}" for r in failed]
     return gate
 
@@ -95,7 +88,7 @@ TOOLS = [
          ItoCheckRequest, ito_check, "/lab/ito/run", example={"function_type": "w2_minus_t", "n_steps": 1000}),
     Tool("simulate_path", "Simulate a path",
          "Simulates one path of Brownian motion or a Vasicek (mean-reverting) process. Returns the final, lowest and highest "
-         "values and the path in result_details.values_preview.",
+         "values and the path in result_details.values_preview (at most about 200 points of it).",
          SimulationRequest, simulate_path, "/lab/simulation/run", example={"model": "vasicek", "n_steps": 250, "dt": 0.004}),
     Tool("measure_density", "Radon-Nikodym density",
          THEORY + "The Radon-Nikodym density path dQ/dP for a geometric Brownian motion with drift mu under P and r under Q, "
@@ -108,8 +101,9 @@ TOOLS = [
     Tool("validate", "Validation gate",
          "Runs the chosen checks (pick_stats, pick_ito, pick_simulation, pick_lattice) with their parameters, each against a "
          "threshold, and says what to change when one fails. Use it before trusting a run, or to see whether a numerical "
-         "setting is good enough. Returns result_summary (gate_decision go / warn / block, checks_failed), result_details.rows "
-         "(value, threshold, status per check) and result_details.explainable_qa (ranked fixes, each a parameter and a new value).",
+         "setting is good enough. Returns result_summary (gate_decision go / warning / blocked, checks_failed) and "
+         "result_details.rows: per check its value, threshold and status, what to change (action) and, where an input "
+         "cures it, that input (param) with its current_value and proposed_value.",
          ValidationGateRequest, validate, "/lab/validation/gate",
          example={"spot": 100.0, "strike": 100.0, "rate": 0.03, "vol": 0.2, "maturity": 0.5,
                   "pick_stats": True, "pick_ito": True, "pick_lattice": True}),

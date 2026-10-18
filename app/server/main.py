@@ -7,52 +7,25 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 import grpc
-from fastapi import FastAPI, Request, WebSocket
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
-from optra.api import backtest, lab, session, system, tools
+from optra.api import backtest, jobs as jobs_api, lab, session, system, tools
 from optra.api import engine as engine_api
-from optra.infra.live_client_lifespan import live_client_lifespan
-from optra.infra.state import AppState
-from optra.infra.websockets import handle_logs_websocket, handle_strategies_websocket, log_queue_processor
+from optra.infra import access, live, numerics, watchdog
+from optra.research import jobs
 from optra.services import market_data
 from optra.tools import ToolError
 
 # The page, built by `npm run build` in app/web; served beside the API when built.
 _WEB_DIST = Path(__file__).resolve().parents[1] / "web" / "dist"
-
-
-@asynccontextmanager
-async def _engine_lifespan() -> AsyncGenerator[None, None]:
-    """The live engine's client and the log stream; without an engine the server still runs backtests and the lab."""
-    log_task: asyncio.Task | None = None
-    try:
-        AppState.main_loop = asyncio.get_running_loop()
-        log_task = asyncio.create_task(log_queue_processor())
-        async with live_client_lifespan():
-            yield
-    except Exception as e:  # pragma: no cover - keep backtest-only mode working
-        print(f"Optra engine not loaded (backtest-only mode): {e}")
-        yield
-    finally:
-        if log_task is not None:
-            log_task.cancel()
-            try:
-                await log_task
-            except asyncio.CancelledError:
-                pass
-
-
-@asynccontextmanager
-async def _no_engine() -> AsyncGenerator[None, None]:
-    yield
 
 
 # The engine's answer, as HTTP: a request it refuses (400, 404), one the engine's state does not
@@ -69,17 +42,41 @@ _HTTP_STATUS = {
 }
 
 
+class _Who:
+    """A request with the key (X-Optra-Key) is the person's or the system's; any other, the agent's
+    (infra/access.py)."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] in ("http", "websocket"):
+            given = dict(scope["headers"]).get(access.HEADER.encode())
+            if given and access.holds_key(given.decode(errors="replace")):
+                with access.system():
+                    return await self.app(scope, receive, send)
+        await self.app(scope, receive, send)
+
+
 def create_app(engine: bool = True) -> FastAPI:
-    """The server. engine=False leaves the live engine's client out (the tests: the lab and the tools only)."""
+    """The server. engine=False leaves the live engine's link out (the tests: the lab and the tools only)."""
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
+        jobs.use_workers()  # backtests are jobs for the research workers, never run in this process
         market_data.start_rate_refresh()  # the Treasury curve takes ~18 s: start it at once
-        async with _engine_lifespan() if engine else _no_engine():
+        beat = asyncio.create_task(watchdog.run())
+        async with AsyncExitStack() as stack:
+            if engine:
+                await stack.enter_async_context(live.lifespan())
             yield
+        beat.cancel()
         await market_data.close()
+        numerics.shutdown()
+        jobs.use_workers(False)
 
     app = FastAPI(title="Optra", version="0.2.0", lifespan=lifespan)
+    app.add_middleware(_Who)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -94,24 +91,27 @@ def create_app(engine: bool = True) -> FastAPI:
         detail = exc.details() if hasattr(exc, "details") else str(exc)
         return JSONResponse(status_code=_HTTP_STATUS.get(code, 502), content={"detail": detail})
 
+    @app.exception_handler(access.NotTheAgents)
+    async def not_the_agents(_request: Request, exc: access.NotTheAgents) -> JSONResponse:
+        return JSONResponse({"detail": str(exc)}, status_code=403)
+
     @app.exception_handler(ToolError)
     async def tool_error(_request: Request, exc: ToolError) -> JSONResponse:
         return JSONResponse({"detail": exc.message}, status_code=exc.status)
+
+    @app.exception_handler(numerics.EngineError)
+    async def numerics_error(_request: Request, exc: numerics.EngineError) -> JSONResponse:
+        return JSONResponse({"detail": str(exc)}, status_code=exc.status)
 
     @app.exception_handler(ValidationError)
     async def invalid_arguments(_request: Request, exc: ValidationError) -> JSONResponse:
         return JSONResponse({"detail": exc.errors(include_url=False, include_context=False)}, status_code=422)
 
-    for module in (engine_api, backtest, system, session, lab, tools):
-        app.include_router(module.router)
-
-    @app.websocket("/ws/logs")
-    async def ws_logs(ws: WebSocket) -> None:
-        await handle_logs_websocket(ws)
-
-    @app.websocket("/ws/strategies")
-    async def ws_strategies(ws: WebSocket) -> None:
-        await handle_strategies_websocket(ws)
+    routers = [m.router for m in (engine_api, backtest, jobs_api, system, session, lab, tools)]
+    if open_by_default := access.undeclared([r for router in routers for r in router.routes]):
+        raise RuntimeError(f"routes that do not say whose they are (access.WHO): {', '.join(open_by_default)}")
+    for router in routers:
+        app.include_router(router)
 
     if _WEB_DIST.is_dir():  # after the API routes: it answers every other path
         app.mount("/", StaticFiles(directory=_WEB_DIST, html=True), name="web")

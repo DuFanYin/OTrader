@@ -32,9 +32,9 @@ def implied_vol_batch(req: ImpliedVolBatchRequest) -> Result:
     result = engine_iv_batch(market_prices=req.market_prices, strikes=req.strikes, expiries=req.expiries,
                              spot=req.spot, rate=req.rate, dividend_yield=req.dividend_yield)
     return Result(
-        summary={"n_converged": result.get("n_converged", 0), "convergence_rate": result.get("convergence_rate", 0.0),
+        summary={"n_converged": result["n_converged"], "convergence_rate": result["convergence_rate"],
                  "n_points": len(req.market_prices)},
-        details={"ivs": result.get("ivs", []), "converged": result.get("converged", [])},
+        details={"ivs": result["ivs"], "converged": result["converged"]},
     )
 
 
@@ -54,7 +54,7 @@ def calibrate_heston(req: HestonCalibrateRequest) -> Result:
     summary = {k: result[k] for k in ("v0", "kappa", "theta", "xi", "rho", "rmse", "max_abs_error", "iterations", "converged")}
     # The fit's quality from the RMSE as a share of the average quote, so it reads the same at any price level
     scale = sum(abs(p) for p in req.market_prices) / max(len(req.market_prices), 1)
-    rel = result.get("rmse", float("inf")) / scale if scale > 0 else float("inf")
+    rel = result["rmse"] / scale if scale > 0 else float("inf")
     summary["rmse_rel"] = rel
     summary["fit_quality"] = "good" if rel < 0.02 else "fair" if rel < 0.05 else "poor"
     warnings = [] if summary["fit_quality"] != "poor" else [f"poor fit: RMSE is {rel:.1%} of the average quote"]

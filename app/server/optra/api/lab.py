@@ -6,63 +6,54 @@ from __future__ import annotations
 
 import math
 
-from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
 from optra.services.market_data import (
     pick_rate,
-    _fetch_btc_spot,
-    _fetch_btc_dvol,
+    _fetch_spot,
+    _fetch_dvol,
     _fetch_funding_rate,
     _fetch_rate_curve,
     fetch_iv_surface,
+    rate_curve_info,
 )
-from optra.infra.numerics import run_engine_task, vol_surface_interp
-from optra.version import CONTRACT_VERSION
+from optra.infra import access
+from optra.infra.numerics import vol_surface_interp
 
 router = APIRouter(prefix="/api/lab", tags=["lab"])
+ANYONE = [Depends(access.anyone)]
 
 
 # ── Sub-endpoints for progressive frontend display ────────────────────────────
 
-@router.get("/market/spot")
+@router.get("/market/spot", dependencies=ANYONE)
 async def get_spot() -> dict:
-    spot = await _fetch_btc_spot()
-    return {"spot": round(spot, 2)}
+    spot, source = await _fetch_spot("BTC")
+    return {"spot": round(spot, 2), "source": source}
 
 
-@router.get("/market/dvol")
+@router.get("/market/dvol", dependencies=ANYONE)
 async def get_dvol() -> dict:
-    dvol = await _fetch_btc_dvol()
-    return {"vol": round(dvol, 4), "vol_pct": round(dvol * 100, 2)}
+    dvol, source = await _fetch_dvol("BTC")
+    return {"vol": round(dvol, 4), "source": source}
 
 
-@router.get("/market/funding")
+@router.get("/market/funding", dependencies=ANYONE)
 async def get_funding() -> dict:
-    funding_ann = await _fetch_funding_rate()
-    return {
-        "mu": round(funding_ann, 4),
-        "mu_pct": round(funding_ann * 100, 3),
-        "funding_8h_pct": round((funding_ann / (3 * 365)) * 100, 4),
-    }
+    funding_ann, source = await _fetch_funding_rate()
+    return {"mu": round(funding_ann, 4), "funding_8h": round(funding_ann / (3 * 365), 6), "source": source}
 
 
-@router.get("/market/rates")
+@router.get("/market/rates", dependencies=ANYONE)
 async def get_rates() -> dict:
     curve = await _fetch_rate_curve()
     _, rate_3m = pick_rate(curve, 0.25)
-    curve_pct = {k: round(v * 100, 3) for k, v in curve.items()}
-    return {
-        "rate": round(rate_3m, 4),
-        "rate_pct": round(rate_3m * 100, 3),
-        "rate_curve": curve,
-        "rate_curve_pct": curve_pct,
-    }
+    return {"rate": round(rate_3m, 4), "rate_curve": curve, "source": rate_curve_info()["source"]}
 
 
-@router.get("/market/surface")
+@router.get("/market/surface", dependencies=ANYONE)
 async def get_surface(spot: float) -> dict:
     surface_data = await fetch_iv_surface(spot)
     return {"iv_surface": surface_data["surface"]}
@@ -74,7 +65,6 @@ class ResolveSurface(BaseModel):
     strike: float
     years:  float
     iv:     float
-    iv_pct: float
     instrument: str = ""
 
 
@@ -88,9 +78,7 @@ class ResolveRequest(BaseModel):
 
 class ResolveResponse(BaseModel):
     vol:          float
-    vol_pct:      float
     rate:         float
-    rate_pct:     float
     rate_tenor:   str
     iv_instrument: str
     iv_matched_strike: float
@@ -98,7 +86,7 @@ class ResolveResponse(BaseModel):
     interp_method: str   # "cpp_bilinear" | "py_nearest" | "dvol_fallback"
 
 
-@router.post("/market/resolve", response_model=ResolveResponse)
+@router.post("/market/resolve", response_model=ResolveResponse, dependencies=ANYONE)
 def resolve_params(req: ResolveRequest) -> ResolveResponse:
     """
     Given a strike and maturity, resolve:
@@ -144,9 +132,7 @@ def resolve_params(req: ResolveRequest) -> ResolveResponse:
 
     return ResolveResponse(
         vol               = round(iv, 6),
-        vol_pct           = round(iv * 100, 3),
         rate              = round(rate, 6),
-        rate_pct          = round(rate * 100, 4),
         rate_tenor        = tenor_label,
         iv_instrument     = iv_instrument,
         iv_matched_strike = iv_matched_k,
@@ -154,12 +140,3 @@ def resolve_params(req: ResolveRequest) -> ResolveResponse:
         interp_method     = interp_method,
     )
 
-
-@router.post("/task")
-def run_task(req: dict) -> dict:
-    """Any task of the numerics library by task_type."""
-    task_type = req.get("task_type")
-    if not isinstance(task_type, str) or not task_type.strip():
-        raise HTTPException(status_code=400, detail="task_type is required")
-    return run_engine_task(task_type, {**req, "contract_version": CONTRACT_VERSION,
-                                       "trace_id": req.get("trace_id") or str(uuid4())})

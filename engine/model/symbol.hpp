@@ -15,7 +15,7 @@
  * portfolio the option is in.
  */
 
-#include "constant.hpp"
+#include "model/constant.hpp"
 #include <chrono>
 #include <optional>
 #include <string>

@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from main import create_app  # noqa: E402
 from optra.tools import ToolError, call_sync  # noqa: E402
-from optra.infra import numerics, run_store  # noqa: E402
+from optra.infra import access, numerics, run_store  # noqa: E402
 from optra.services import market_data  # noqa: E402
 
 APP = create_app(engine=False)  # the server without the live engine
@@ -120,7 +120,9 @@ def test_history_over_http(home):
     with TestClient(APP) as c:
         run = c.post("/api/lab/pricing/run", json=OPTION).json()
         assert c.get(f"/api/runs/{run['run_id']}").json()["result_summary"]["tool"] == "price_option"
-        assert c.delete(f"/api/runs/{run['run_id']}").json() == {"deleted": run["run_id"]}
+        assert c.delete(f"/api/runs/{run['run_id']}").status_code == 403  # the agent's own history stays
+        person = {access.HEADER: access.key()}
+        assert c.delete(f"/api/runs/{run['run_id']}", headers=person).json() == {"deleted": run["run_id"]}
         assert c.get(f"/api/runs/{run['run_id']}").status_code == 404
 
 
@@ -177,3 +179,9 @@ def test_rate_curve_falls_back_when_the_site_fails(home, monkeypatch):
     monkeypatch.setattr(market_data, "_rate", market_data._KeptCurve())
     curve = asyncio.run(market_data._fetch_rate_curve())
     assert curve == market_data._FALLBACK_CURVE and market_data.rate_curve_info()["source"] == "fallback"
+
+
+def test_a_tool_with_a_path_takes_its_arguments_from_a_json_body():
+    with TestClient(APP) as c:
+        r = c.post("/api/strategy_versions/no-such-version/stage", json={"to": "review"})
+    assert r.status_code == 404, r.text  # the version, not the arguments, is what is wrong

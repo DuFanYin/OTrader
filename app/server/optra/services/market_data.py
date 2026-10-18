@@ -9,7 +9,8 @@ Sources
 4. BTC perpetual funding — Binance Futures REST  (→ real-world drift mu)
 5. USD rate term structure— US Treasury FiscalData REST (1M/3M/6M/1Y tenors)
 
-All requests have short timeouts and graceful fallbacks.
+All requests have short timeouts; a value that could not be fetched is a fixed fallback, and says so: each fetch
+returns its value with its source ("live" or "fallback").
 """
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ from typing import Any
 import httpx
 
 from optra import settings
+from optra.data import chains
+from optra.data.chains import expiry_table
 
 log = logging.getLogger(__name__)
 
@@ -77,29 +80,21 @@ def _years_to_expiry(expiry_ts_ms: int) -> float:
 
 # ── 1. Spot ───────────────────────────────────────────────────────────────────
 
-async def _fetch_spot(currency: str = "BTC") -> float:
+async def _fetch_spot(currency: str = "BTC") -> tuple[float, str]:
     url = "https://api.binance.com/api/v3/ticker/price"
     fallback = _FB_SPOT_BY_CCY.get(currency, _FB_SPOT)
     try:
         r = await _http().get(url, params={"symbol": f"{currency}USDT"})
         r.raise_for_status()
-        return float(r.json()["price"])
+        return float(r.json()["price"]), "live"
     except Exception as exc:
         log.warning("%s spot failed (%s), fallback %.0f", currency, exc, fallback)
-        return fallback
-
-
-async def _fetch_btc_spot() -> float:
-    return await _fetch_spot("BTC")
+        return fallback, "fallback"
 
 
 # ── 2. DVOL index ─────────────────────────────────────────────────────────────
 
-async def _fetch_btc_dvol() -> float:
-    return await _fetch_dvol("BTC")
-
-
-async def _fetch_dvol(currency: str = "BTC") -> float:
+async def _fetch_dvol(currency: str = "BTC") -> tuple[float, str]:
     """Deribit DVOL — crypto VIX equivalent (BTC or ETH). Returns annualised decimal."""
     url = "https://www.deribit.com/api/v2/public/get_volatility_index_data"
     now_ms   = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -112,10 +107,10 @@ async def _fetch_dvol(currency: str = "BTC") -> float:
         candles = r.json().get("result", {}).get("data", [])
         if not candles:
             raise ValueError("empty DVOL candles")
-        return float(candles[-1][4]) / 100.0
+        return float(candles[-1][4]) / 100.0, "live"
     except Exception as exc:
         log.warning("DVOL failed (%s), fallback %.2f", exc, _FB_VOL)
-        return _FB_VOL
+        return _FB_VOL, "fallback"
 
 
 # ── 3. Option chain (Deribit) and IV surface ─────────────────────────────────
@@ -148,8 +143,7 @@ class ChainUnavailable(RuntimeError):
 
 
 def _engine_underlyings() -> list[str]:
-    """The trading engine's underlyings with backtest or recorded days (services/chains)."""
-    from optra.services import chains  # here: chains reads this module's expiry_table
+    """The trading engine's underlyings with backtest or recorded days (data/chains)."""
     return chains.symbols()
 
 
@@ -190,7 +184,7 @@ def normalize_deribit_chain(instruments: list[dict], summaries: list[dict],
                             now_ms: float | None = None) -> list[dict]:
     """
     Join Deribit instruments and book summaries into screener chain rows
-    (the ChainOption shape of quant_run_screener_json). All prices are USD per 1 coin.
+    (the ChainOption shape of the screener task). All prices are USD per 1 coin.
 
     - bid / ask are None when that side has no quote (Deribit sends null or 0)
     - iv is 0.0 when mark_iv is missing or outside _IV_VALID_RANGE
@@ -281,22 +275,6 @@ def chain_quality(chain: list[dict]) -> tuple[dict, list[str]]:
     return quality, warnings
 
 
-def expiry_table(chain: list[dict], spot: float) -> list[dict]:
-    """Per-expiry forward and the carry it implies: r_implied = ln(F/S) / T (diagnostic only)."""
-    seen: dict[str, dict] = {}
-    for r in chain:
-        if r["expiry"] not in seen:
-            carry = math.log(r["forward"] / spot) / r["years"] if spot > 0 else None
-            seen[r["expiry"]] = {
-                "expiry": r["expiry"], "years": round(r["years"], 6),
-                "forward": r["forward"],
-                "implied_carry": round(carry, 6) if carry is not None else None,
-                "n_options": 0,
-            }
-        seen[r["expiry"]]["n_options"] += 1
-    return list(seen.values())
-
-
 def _build_chain(currency: str, instruments: list[dict], summaries: list[dict],
                  fetched_at: datetime, source: str) -> dict:
     now_ms = fetched_at.timestamp() * 1000
@@ -338,7 +316,6 @@ def list_chain_snapshots(currency: str | None = None) -> list[dict]:
     """On-disk snapshots, newest first: [{"snapshot_id", "currency", "path"}]. The trading engine's
     underlying's are its days, newest first: [{"snapshot_id": "<UNDERLYING>_<YYYYMMDD>", "currency", "day"}]."""
     if currency and currency.upper() in _engine_underlyings():
-        from optra.services import chains
         cur = currency.upper()
         return [{"snapshot_id": f"{cur}_{day.replace('-', '')}", "currency": cur, "day": day}
                 for day in sorted(chains.days(cur), reverse=True)]
@@ -357,7 +334,6 @@ def load_chain_snapshot(snapshot_id: str, at: str | None = None) -> dict:
         raise ValueError("bad snapshot id")
     underlying, _, day = snapshot_id.partition("_")
     if underlying in _engine_underlyings():
-        from optra.services import chains
         if len(day) != 8 or not day.isdigit():
             raise ValueError("bad snapshot id")
         return chains.load(underlying, f"{day[:4]}-{day[4:6]}-{day[6:]}", at)
@@ -377,48 +353,64 @@ def load_chain_fixture(currency: str = "BTC") -> dict:
     return _build_chain(cur, raw["instruments"], raw["summaries"], fetched_at, "fixture")
 
 
-async def fetch_option_chain(currency: str = "BTC", *, allow_stale: bool = True) -> dict:
-    """
-    Full option chain for BTC or ETH in two HTTP requests.
+async def _chain_from_engine(cur: str) -> dict:
+    """The trading engine's underlying: its newest day's last quotes."""
+    return await asyncio.to_thread(chains.load, cur, None, None)
 
-    Fresh results are memoized for _CHAIN_TTL seconds and written to
-    ~/.optra/chains/ (override with OPTRA_HOME). When Deribit is
-    unreachable and allow_stale is true, falls back to the newest on-disk
-    snapshot, then to the bundled fixture; `source` and `fetched_at` say which.
-    The trading engine's underlying's chain is its newest day's last quotes.
-    """
-    cur = _check_currency(currency)
-    if cur in _engine_underlyings():
-        from optra.services import chains
-        return await asyncio.to_thread(chains.load, cur, None, None)
+
+async def _chain_from_memo(cur: str) -> dict | None:
     memo = _CHAIN_MEMO.get(cur)
-    if memo is not None and time.monotonic() - memo[0] < _CHAIN_TTL:
-        return memo[1]
+    return memo[1] if memo is not None and time.monotonic() - memo[0] < _CHAIN_TTL else None
 
-    try:
-        instruments, summaries = await asyncio.gather(
-            _fetch_options_instruments(cur), _fetch_book_summaries(cur),
-        )
-        if not summaries:
-            raise ValueError("empty book summary")
-        chain = _build_chain(cur, instruments, summaries, datetime.now(timezone.utc), "live")
-        _CHAIN_MEMO[cur] = (time.monotonic(), chain)
-        _write_snapshot(chain)
-        return chain
-    except Exception as exc:
-        log.warning("%s option chain failed (%s)", cur, exc)
-        if not allow_stale:
-            raise ChainUnavailable(f"{cur} option chain unavailable: {exc}") from exc
 
+async def _chain_from_deribit(cur: str) -> dict:
+    instruments, summaries = await asyncio.gather(_fetch_options_instruments(cur), _fetch_book_summaries(cur))
+    if not summaries:
+        raise ValueError("empty book summary")
+    chain = _build_chain(cur, instruments, summaries, datetime.now(timezone.utc), "live")
+    _CHAIN_MEMO[cur] = (time.monotonic(), chain)
+    _write_snapshot(chain)
+    return chain
+
+
+async def _chain_from_snapshot(cur: str) -> dict | None:
     for snap in list_chain_snapshots(cur):
         try:
             return load_chain_snapshot(snap["snapshot_id"])
         except (OSError, ValueError) as exc:
             log.warning("Snapshot %s unreadable (%s)", snap["snapshot_id"], exc)
-    try:
-        return load_chain_fixture(cur)
-    except (OSError, ValueError, KeyError) as exc:
-        raise ChainUnavailable(f"{cur} option chain unavailable and no snapshot/fixture") from exc
+    return None
+
+
+async def _chain_from_fixture(cur: str) -> dict:
+    return load_chain_fixture(cur)
+
+
+async def fetch_option_chain(currency: str = "BTC", *, allow_stale: bool = True) -> dict:
+    """
+    Full option chain for BTC or ETH, from the first of its sources that has one, in order: the trading engine's
+    underlying from its newest day's last quotes; else the last fetch from Deribit (memoized for _CHAIN_TTL
+    seconds), Deribit itself (two HTTP requests, each fetch written to ~/.optra/chains/, override with OPTRA_HOME),
+    and, with allow_stale, the newest snapshot on disk, then the bundled fixture. `source` and `fetched_at` say which.
+    """
+    cur = _check_currency(currency)
+    if cur in _engine_underlyings():
+        sources = [("engine", _chain_from_engine)]
+    else:
+        sources = [("memo", _chain_from_memo), ("live", _chain_from_deribit)]
+        if allow_stale:
+            sources += [("cache", _chain_from_snapshot), ("fixture", _chain_from_fixture)]
+    failed = []
+    for name, source in sources:
+        try:
+            chain = await source(cur)
+        except Exception as exc:
+            log.warning("%s option chain from %s failed (%s)", cur, name, exc)
+            failed.append(f"{name}: {exc}")
+            continue
+        if chain is not None:
+            return chain
+    raise ChainUnavailable(f"{cur} option chain unavailable ({'; '.join(failed) or 'no source has it'})")
 
 
 def surface_rows_from_chain(chain: list[dict], spot: float, strikes_per_expiry: int = 7) -> list[dict]:
@@ -437,7 +429,6 @@ def surface_rows_from_chain(chain: list[dict], spot: float, strikes_per_expiry: 
                 "strike":     row["strike"],
                 "years":      round(row["years"], 4),
                 "iv":         round(row["iv"], 4),
-                "iv_pct":     round(row["iv"] * 100, 2),
             })
     return surface
 
@@ -454,7 +445,7 @@ async def fetch_iv_surface(spot: float, strikes_per_expiry: int = 7,
     {
       "surface": [
         {"expiry": "27JUN25", "instrument": "BTC-27JUN25-65000-C", "strike": 65000,
-         "years": 0.19, "iv": 0.83, "iv_pct": 83.0},
+         "years": 0.19, "iv": 0.83},
         ...  # multiple rows per expiry, spread around ATM, expiries in time order
       ],
       "raw_instruments_count": 412,
@@ -504,35 +495,15 @@ async def fetch_iv_smile_slice(spot: float, target_years: float, center_strike: 
             "years": round(selected_years, 4),
             "log_moneyness": round(math.log(max(r["strike"], 1e-8) / max(spot, 1e-8)), 6),
             "iv": round(r["iv"], 6),
-            "iv_pct": round(r["iv"] * 100, 3),
         }
         for r in chosen if r["iv"] > 0
     ]
     return {"rows": rows, "selected_expiry": selected_expiry, "selected_years": round(selected_years, 4)}
 
 
-def pick_iv(surface: list[dict], target_strike: float, target_years: float) -> dict | None:
-    """
-    Given a surface (list of surface rows) and a desired strike + maturity,
-    return the row whose (strike, years) is nearest in normalised distance.
-    Returns None if surface is empty.
-    """
-    if not surface:
-        return None
-    spot_scale = target_strike if target_strike > 0 else 1.0
-    best = min(
-        surface,
-        key=lambda row: math.hypot(
-            (row["strike"] - target_strike) / spot_scale,
-            (row["years"]  - target_years),
-        ),
-    )
-    return best
-
-
 # ── 4. Funding rate → mu ──────────────────────────────────────────────────────
 
-async def _fetch_funding_rate() -> float:
+async def _fetch_funding_rate() -> tuple[float, str]:
     """
     Binance perpetual funding rate for BTCUSDT.
     Funding is paid every 8 h, so annualised mu ≈ spot_rate * 3 * 365.
@@ -547,10 +518,10 @@ async def _fetch_funding_rate() -> float:
             raise ValueError("missing lastFundingRate")
         rate_8h = float(rate_str)
         # annualise: 3 payments/day × 365 days
-        return rate_8h * 3 * 365
+        return rate_8h * 3 * 365, "live"
     except Exception as exc:
         log.warning("Funding rate failed (%s), fallback %.4f", exc, _FB_FUNDING)
-        return _FB_FUNDING
+        return _FB_FUNDING, "fallback"
 
 
 # ── 5. Rate term structure ────────────────────────────────────────────────────
@@ -715,14 +686,14 @@ def pick_rate(curve: dict[str, float], target_years: float) -> tuple[str, float]
 async def fetch_btc_snapshot() -> dict:
     """
     Fetch all five data sources concurrently.
-    Any individual failure uses its fallback; the call never raises.
+    Any individual failure uses its fallback, named in "fallback"; the call never raises.
     """
-    spot_task     = _fetch_btc_spot()
-    dvol_task     = _fetch_btc_dvol()
+    spot_task     = _fetch_spot("BTC")
+    dvol_task     = _fetch_dvol("BTC")
     funding_task  = _fetch_funding_rate()
     curve_task    = _fetch_rate_curve()
 
-    spot, dvol, funding_ann, curve = await asyncio.gather(
+    (spot, spot_from), (dvol, dvol_from), (funding_ann, funding_from), curve = await asyncio.gather(
         spot_task, dvol_task, funding_task, curve_task,
     )
 
@@ -732,8 +703,8 @@ async def fetch_btc_snapshot() -> dict:
     # Default rate = 3-month tenor
     _, rate_3m = pick_rate(curve, 0.25)
 
-    curve_pct = {k: round(v * 100, 3) for k, v in curve.items()}
-
+    fell_back = [name for name, source in (("spot", spot_from), ("vol", dvol_from), ("mu", funding_from),
+                                           ("rate", rate_curve_info()["source"])) if source == "fallback"]
     return {
         # ── Fields written directly into form inputs ──
         "spot":         round(spot, 2),
@@ -741,15 +712,11 @@ async def fetch_btc_snapshot() -> dict:
         "rate":         round(rate_3m, 4),        # 3-month rate as default
         "mu":           round(funding_ann, 4),    # annualised funding → P-drift
 
-        # ── Convenience display fields ──
-        "vol_pct":      round(dvol * 100, 2),
-        "rate_pct":     round(rate_3m * 100, 3),
-        "mu_pct":       round(funding_ann * 100, 3),
-        "funding_8h_pct": round((funding_ann / (3 * 365)) * 100, 4),
+        "funding_8h":   round(funding_ann / (3 * 365), 6),
 
         # ── Full curve (for tenor-aware rate selection in the UI) ──
         "rate_curve":   curve,
-        "rate_curve_pct": curve_pct,
+        "fallback":     fell_back,                # fixed values in place of what could not be fetched
 
         # ── IV surface (for strike/maturity-aware vol selection) ──
         "iv_surface":   surface_data["surface"],

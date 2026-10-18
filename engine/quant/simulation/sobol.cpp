@@ -50,14 +50,12 @@ SobolEngine::SobolEngine(int dimension)
         dimension = 1;
     dim_ = dimension;
 
-    // Build direction numbers V[d][bit] for d in [0, dim_)
     V_.assign(dim_, std::vector<uint32_t>(SOBOL_BITS, 0));
 
     // Dimension 0: Van der Corput — V[0][bit] = 1 << (31 - bit)
     for (int bit = 0; bit < SOBOL_BITS; ++bit)
         V_[0][bit] = 1u << (SOBOL_BITS - 1 - bit);
 
-    // Dimensions 1..(dim_-1) from JK table
     for (int d = 1; d < dim_; ++d) {
         const auto& row = JK_TABLE[d - 1];
         const int s = row.s;

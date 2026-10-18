@@ -1,58 +1,41 @@
 #pragma once
 
-/** Data structures (from object.py). */
+/** The engine's data: contracts, quotes, orders and fills, positions and holdings. */
 
-#include "constant.hpp"
+#include "model/constant.hpp"
+#include "model/parameters.hpp"
+#include "model/symbol.hpp"
+#include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace model {
 
 using DateTime = std::chrono::system_clock::time_point;
 
-/** Portfolio snapshot (option_apply_order). */
-struct PortfolioSnapshot {
-    std::string portfolio_name;
-    DateTime datetime{};
-    double underlying_bid = 0.0;
-    double underlying_ask = 0.0;
-    double underlying_mark = 0.0;
-    /** The portfolio's hedge instrument, when it is not the underlying (else 0). */
-    double hedge_bid = 0.0;
-    double hedge_ask = 0.0;
-    double hedge_mark = 0.0;
-    /** Option values (option_apply_order): the quotes and their mark (model::mark), then what
-     * pricing makes of them (Greeks per one option, not times its size). */
-    std::vector<double> bid;
-    std::vector<double> ask;
-    std::vector<double> mark;
-    std::vector<double> delta;
-    std::vector<double> gamma;
-    std::vector<double> theta;
-    std::vector<double> vega;
-    std::vector<double> iv;
-    /** PortfolioData::price_snapshot's: each chain's forward (in the portfolio's pricing order),
-     * each expiry's time to it in years (what the next pricing compares against), and whether it
-     * has priced this snapshot's quotes. */
-    std::vector<double> forward;
-    std::vector<double> expiry_years;
-    bool priced = false;
-};
+class Listing;
+struct Order;
 
-// Contract
+// ---- Contracts
 
-struct ContractData {
+struct Contract {
     std::string symbol;
     std::string name;
     Product product = Product::UNKNOWN;
-    double size = 1.0;
-    double pricetick = 0.01;
+    double multiplier = 1.0;
+    double price_tick = 0.01;
 
-    double min_volume = 1;
+    double min_quantity = 1;
     std::optional<int> con_id;
     std::string trading_class; // empty: none
 
@@ -62,82 +45,178 @@ struct ContractData {
     std::optional<DateTime> option_expiry;
 };
 
-// Order / Trade
+// ---- Quotes
+
+/** A portfolio's quotes at one time and their pricing, as views: of a PortfolioSnapshot's values
+ * or of a stored day's. Per option columns follow its listing. */
+struct Frame {
+    const Listing* listing = nullptr;
+    std::string_view portfolio_name;
+    DateTime datetime{};
+    double underlying_bid = 0.0;
+    double underlying_ask = 0.0;
+    double underlying_mark = 0.0;
+    double hedge_bid = 0.0; // the hedge instrument's, when not the underlying (else 0)
+    double hedge_ask = 0.0;
+    double hedge_mark = 0.0;
+    std::span<const double> bid;
+    std::span<const double> ask;
+    std::span<const double> bid_size; // contracts shown; 0: none known
+    std::span<const double> ask_size;
+    // Pricing (price_snapshot): Greeks per option, not times its size (see iv_price_mode); a
+    // forward per chain, a time in years and a rate per expiry.
+    std::span<const double> iv;
+    std::span<const double> delta;
+    std::span<const double> gamma;
+    std::span<const double> theta;
+    std::span<const double> vega;
+    std::span<const double> forward;
+    std::span<const double> expiry_years;
+    std::span<const double> expiry_rate; // per expiry: the risk-free rate to it it was priced with
+    bool priced = false;
+    double greeks_spot = 0.0; // the spot the Greeks stand at
+    // Empty: it holds its Greeks (delta..vega). Else the setting it was priced with, its Greeks
+    // priced from its IVs with it when asked (greeks_at).
+    std::string_view iv_price_mode;
+};
+
+/** A risk-free rate by time to maturity, continuously compounded, a year: a straight line between
+ * its points (by years, increasing), flat before the first and after the last. One point: that
+ * rate at every maturity. */
+struct RateCurve {
+    std::vector<double> years{0.0};
+    std::vector<double> rates{0.05};
+
+    /** The rate to a maturity `t` years away. */
+    [[nodiscard]] double at(double t) const;
+    /** One rate at every maturity. */
+    [[nodiscard]] static RateCurve flat(double rate);
+    bool operator==(const RateCurve&) const = default;
+};
+
+/** An option's Greeks: per option, or times its size where said. */
+struct Greeks {
+    double delta = 0.0;
+    double gamma = 0.0;
+    double theta = 0.0;
+    double vega = 0.0;
+};
+
+/** A frame that owns its values: what live market data fills and the event loop carries. */
+class PortfolioSnapshot : public Frame {
+  public:
+    /** Its per option columns, in the order its values hold them. */
+    static constexpr std::array kOptionColumns{
+        &Frame::bid,   &Frame::ask,   &Frame::bid_size, &Frame::ask_size, &Frame::iv,
+        &Frame::delta, &Frame::gamma, &Frame::theta,    &Frame::vega};
+
+    PortfolioSnapshot() = default;
+    /** Zeros in every column of the listing. */
+    PortfolioSnapshot(std::shared_ptr<const Listing> listing, std::string portfolio_name);
+    PortfolioSnapshot(const PortfolioSnapshot& other);
+    PortfolioSnapshot(PortfolioSnapshot&& other) noexcept;
+    PortfolioSnapshot& operator=(const PortfolioSnapshot& other);
+    PortfolioSnapshot& operator=(PortfolioSnapshot&& other) noexcept;
+    ~PortfolioSnapshot() = default;
+
+    [[nodiscard]] const std::shared_ptr<const Listing>& shared_listing() const { return owner_; }
+    /** A column to write, named as &Frame::bid. */
+    [[nodiscard]] std::span<double> values(std::span<const double> Frame::* column);
+    /** The frame's values, which must be of this listing; a column it lacks is zeros. */
+    void assign(const Frame& frame);
+
+    /** Live: when its first quote arrived (utilities::tsc_now); 0 in a backtest. */
+    std::uint64_t quoted_tsc = 0;
+
+  private:
+    void point(); // the views at values_
+
+    std::shared_ptr<const Listing> owner_;
+    std::string name_;
+    std::vector<double> values_; // the columns one after another
+};
+
+// ---- Orders and fills
 
 struct Leg {
     int con_id = 0;
     int ratio = 0;
-    Direction direction = Direction::LONG;
+    Side side = Side::BUY;
     std::optional<double> price;
     std::string symbol;
     std::string trading_class; // empty: none
 };
 
-/** A fill. datetime is {} when the venue did not say when. */
-struct TradeData {
+struct CancelRequest {
+    std::string order_id;
     std::string symbol;
-    std::string orderid;
-    std::string tradeid;
-    Direction direction = Direction::LONG;
-    double price = 0;
-    double volume = 0;
-    DateTime datetime{};
 };
 
-/** An order as the venue last reported it. datetime is {} when not known; a combo
- * (is_combo) has its legs and its combo_type, a single contract neither. */
-struct OrderData {
-    std::string symbol;
-    std::string orderid;
+/** What a strategy or the engine asks a venue to trade: units of its legs (a contract's own order
+ * is one leg at ratio 1). Built by model::order_request. */
+struct OrderRequest {
+    std::string symbol; // the contract's, or <combo type>_<its legs' symbols>
+    OrderType type = OrderType::LIMIT;
+    double quantity = 0;
+    double price = 0; // net per unit: paid positive, received negative; 0 at market
+    std::string reference;
+    std::string trading_class; // empty: none
+    std::vector<Leg> legs;
+    ComboType combo_type = ComboType::SINGLE_LEG;
+
+    /** More than one leg, or one at a ratio other than 1. */
+    [[nodiscard]] bool is_combo() const;
+    Order create_order(const std::string& order_id) const;
+};
+
+/** An order as the venue last reported it, in units of its legs. datetime {}: not known. */
+struct Order {
+    std::string symbol; // as OrderRequest's
+    std::string order_id;
     std::string trading_class; // empty: none
 
     OrderType type = OrderType::LIMIT;
-    Direction direction = Direction::LONG;
-    double price = 0;
-    double volume = 0;
-    double traded = 0;
+    double price = 0; // as OrderRequest's
+    double quantity = 0;
+    double filled = 0;
     Status status = Status::SUBMITTING;
     DateTime datetime{};
     std::string reference;
 
-    bool is_combo = false;
     std::vector<Leg> legs;
-    ComboType combo_type = ComboType::CUSTOM;
+    ComboType combo_type = ComboType::SINGLE_LEG;
 
     [[nodiscard]] bool is_active() const;
-    struct CancelRequest create_cancel_request() const;
+    /** More than one leg, or one at a ratio other than 1. */
+    [[nodiscard]] bool is_combo() const;
+    CancelRequest create_cancel_request() const;
 };
 
-struct OrderRequest {
+/** A fill. datetime {}: the venue did not say when. */
+struct Fill {
     std::string symbol;
-    Direction direction = Direction::LONG;
-    OrderType type = OrderType::LIMIT;
-    double volume = 0;
+    std::string order_id;
+    std::string fill_id;
+    Side side = Side::BUY;
     double price = 0;
-    std::string reference;
-    std::string trading_class; // empty: none
-    bool is_combo = false;
-    std::vector<Leg> legs;
-    ComboType combo_type = ComboType::CUSTOM;
-
-    OrderData create_order_data(const std::string& orderid) const;
+    double quantity = 0;
+    DateTime datetime{};
 };
 
-struct CancelRequest {
-    std::string orderid;
-    std::string symbol;
-    bool is_combo = false;
-    std::vector<Leg> legs;
-};
+/** A MARKET order of one contract filled at once at `price`, and its fill (fill_id: the
+ * order_id). */
+std::pair<Order, Fill> filled_order(const std::string& order_id, const std::string& symbol,
+                                    Side side, double quantity, double price,
+                                    DateTime at, std::string reference);
 
-// Position Holding
+// ---- Positions and holdings
 
-struct BasePosition {
+struct Position {
     std::string symbol;
     int quantity = 0;
     double avg_cost = 0.0;
-    /// avg_cost * quantity * multiplier, signed like current_value(): negative for a short
-    /// (premium received), so unrealized PnL = current_value() - cost_value for both sides.
+    /** avg_cost * quantity * multiplier, signed as current_value() (a short's negative), so
+     * unrealized P&L is current_value() - cost_value on both sides. */
     double cost_value = 0.0;
     double realized_pnl = 0.0;
     double mid_price = 0.0;
@@ -148,32 +227,30 @@ struct BasePosition {
     double multiplier = 1.0;
 
     [[nodiscard]] double current_value() const;
+    /** Flat: everything but its realized P&L back to zero. */
     void clear_fields();
 };
 
-/** An option position, or a combo position made of its legs. A combo's quantity is computed from
- * its legs (combo_quantity). */
-struct OptionPositionData : BasePosition {
-    std::optional<ComboType> combo_type;
-    std::vector<OptionPositionData> legs;
-    /** For a combo leg: contracts per combo unit, signed (bought +, sold -), with the first leg (by
-     * symbol) positive; 0 otherwise. */
-    int ratio = 0;
+/** One option held, in contracts. Booked by contract; `combo` only says what it was opened in. */
+struct OptionPosition : Position {
+    /** The order that opened it from flat: its legs' symbols sorted and joined by '|' (its own
+     * symbol alone), and its type. What it is shown and closed with. */
+    std::string combo;
+    ComboType combo_type = ComboType::SINGLE_LEG;
+    /** Its symbol read once; of a symbol no option's, none and `expires` never. */
+    OptionId id;
+    DateTime expires = DateTime::max();
 
-    OptionPositionData() { multiplier = 100.0; }
-    OptionPositionData(const std::string& sym) : BasePosition{sym} { multiplier = 100.0; }
-    void clear_fields();
-    /** A combo's quantity: the first non-zero leg's quantity divided by its ratio (0 if none). */
-    [[nodiscard]] int combo_quantity() const;
+    explicit OptionPosition(const std::string& sym);
 };
 
-/** Shares: of the underlying, or of the hedge instrument when the underlying does not trade.
- * symbol is what they are in, named by the first fill (empty before). */
-struct UnderlyingPositionData : BasePosition {
-    UnderlyingPositionData() { delta = 1.0; }
+/** Shares of the underlying, or of the hedge instrument when the underlying does not trade;
+ * symbol: the first fill's (empty before). */
+struct SharePosition : Position {
+    SharePosition() { delta = 1.0; }
 };
 
-struct PortfolioSummary {
+struct HoldingSummary {
     double total_cost = 0.0;
     double current_value = 0.0;
     double unrealized_pnl = 0.0;
@@ -183,12 +260,11 @@ struct PortfolioSummary {
     double gamma = 0.0;
     double theta = 0.0;
     double vega = 0.0;
-    // The change in pnl since the engine first updated the holding, by source, summed over its
-    // updates. Between two updates, what the holding at the first was worth more at the second:
-    // its Greeks then times the underlying's move (delta, gamma), the days passed (theta) and each
-    // option's implied vol change (vega); the rest of that is pnl_other. The rest of the change in
-    // pnl (fills against the mid, settlements) is pnl_fills. In a backtest the first update finds
-    // nothing held, so together they make pnl; live they start again at each start of the engine.
+    // The change in pnl since the engine first updated the holding, by source. Between updates the
+    // holding then is valued at its Greeks times the underlying's move (delta, gamma), the days
+    // passed (theta) and each option's IV change (vega); the rest of that move is pnl_other, the
+    // rest of the change (fills against the mid, settlements) pnl_fills. A backtest starts flat,
+    // so they sum to pnl; live they start again with each engine.
     double pnl_delta = 0.0;
     double pnl_gamma = 0.0;
     double pnl_theta = 0.0;
@@ -198,45 +274,67 @@ struct PortfolioSummary {
 };
 
 struct StrategyHolding {
-    UnderlyingPositionData underlyingPosition;
-    std::unordered_map<std::string, OptionPositionData> optionPositions;
-    PortfolioSummary summary;
+    SharePosition shares;
+    /** By symbol, the options open. */
+    std::unordered_map<std::string, OptionPosition> options;
+    /** Closed ones with their realized P&L, apart so that marking does not grow with every
+     * contract ever traded; one traded again moves back. */
+    std::unordered_map<std::string, OptionPosition> closed_options;
+    double closed_realized_pnl = 0.0; // closed_options', each to the cent
+    /** Its latest order's time as sent, and its latest fill's (a settlement's too): rebooked on
+     * a restart, unlike a strategy's own members. */
+    DateTime last_order{};
+    DateTime last_fill{};
+    HoldingSummary summary;
 
-    /** f(position) for each option held: single options, and combos' legs (a combo holds nothing
-     * beyond its legs). */
     template <typename F> void for_each_open_option(F&& f) const {
-        for (const auto& [key, position] : optionPositions) {
-            if (position.legs.empty()) {
-                if (position.quantity != 0) {
-                    f(position);
-                }
-                continue;
-            }
-            for (const OptionPositionData& leg : position.legs) {
-                if (leg.quantity != 0) {
-                    f(leg);
-                }
+        for (const auto& [symbol, position] : options) {
+            if (position.quantity != 0) {
+                f(position);
             }
         }
     }
 
-    /** Nothing open: no shares, no options, no combo or leg of one. */
-    [[nodiscard]] bool is_flat() const {
-        if (underlyingPosition.quantity != 0) {
-            return false;
-        }
-        for (const auto& [key, position] : optionPositions) {
-            if (position.quantity != 0) {
-                return false;
+    /** The open options `accept` takes, by the combo each was opened in, each group by symbol. */
+    template <typename F>
+    [[nodiscard]] std::map<std::string, std::vector<OptionPosition>>
+    open_options_by_combo(F&& accept) const {
+        std::map<std::string, std::vector<OptionPosition>> out;
+        for_each_open_option([&](const OptionPosition& p) {
+            if (accept(p)) {
+                out[p.combo.empty() ? p.symbol : p.combo].push_back(p);
             }
-            for (const OptionPositionData& leg : position.legs) {
-                if (leg.quantity != 0) {
-                    return false;
-                }
-            }
+        });
+        for (auto& [_, options] : out) {
+            std::ranges::sort(options, {}, &OptionPosition::symbol);
         }
-        return true;
+        return out;
     }
+
+    /**
+     * USD its open options can lose at most, from what they cost: on one expiry, that cost less
+     * the worst of their value at expiry (at zero, at each strike, and past the last when the calls
+     * bought cover those sold); on several, or with a loss that has no bound, what they cost. NaN
+     * when there is no bound to give (no options, or a credit taken with a loss unbounded).
+     */
+    [[nodiscard]] double max_loss() const;
+
+    /** No shares, no options. */
+    [[nodiscard]] bool is_flat() const {
+        bool open = shares.quantity != 0;
+        for_each_open_option([&open](const OptionPosition&) { open = true; });
+        return !open;
+    }
+};
+
+/** A strategy as it is hosted and kept across restarts: enough to make it again as it was. Its
+ * setting is resolved: every parameter its class declares. */
+struct StrategyRecord {
+    std::string name;
+    std::string class_name;
+    std::string portfolio;
+    Values setting;
+    StrategyState state = StrategyState::Added;
 };
 
 } // namespace model

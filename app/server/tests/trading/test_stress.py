@@ -9,8 +9,9 @@ import pytest
 from optra.utils import files
 from optra.infra.numerics import is_engine_available  # noqa: E402
 
-from optra.services import synthetic_days  # noqa: E402
-from optra.services import chains, stress  # noqa: E402
+from optra.data import synthetic_days  # noqa: E402
+from optra.services import stress  # noqa: E402
+from optra.data import chains, days
 
 pytestmark = pytest.mark.skipif(not is_engine_available(), reason="libanalytics_c.so not built")
 
@@ -39,9 +40,8 @@ def test_a_book_under_stress(chain):
         "Long": {"underlying": {"quantity": 0}, "options": {
             _sym(atm, "C"): {"symbol": _sym(atm, "C"), "quantity": 2, "multiplier": 100.0}}},
         "Straddle": {"underlying": {"quantity": -50, "mid_price": 600.0, "multiplier": 1.0}, "options": {
-            "combo": {"symbol": "combo", "quantity": 1, "combo_type": "straddle", "multiplier": 100.0, "legs": [
-                {"symbol": _sym(atm, "C"), "quantity": -1, "multiplier": 100.0},
-                {"symbol": _sym(atm, "P"), "quantity": -1, "multiplier": 100.0}]}}},
+            _sym(atm, k): {"symbol": _sym(atm, k), "quantity": -1, "multiplier": 100.0, "combo_type": "straddle",
+                           "combo": f"{_sym(atm, 'C')}|{_sym(atm, 'P')}"} for k in ("C", "P")}},
         "Junk": {"underlying": {"quantity": 0}, "options": {
             "SPY-20250303-C-1": {"symbol": "SPY-20250303-C-1", "quantity": 1, "multiplier": 100.0}}},
     }
@@ -63,7 +63,7 @@ def test_a_book_under_stress(chain):
     assert r["worst"]["pnl"] == min(r["total"].values())
 
 
-def test_option_key():
-    assert stress.option_key("SPXW-20261016-C-5800") == ("SPXW", "2026-10-16", "C", 5800.0)
-    assert stress.option_key("SPXW-20261016-C-582.5")[3] == 582.5
-    assert stress.option_key("SPY") is None
+def test_parse_option():
+    assert days.parse_option("SPXW-20261016-C-5800") == ("SPXW", date(2026, 10, 16), "C", 5800.0)
+    assert days.parse_option("SPXW-20261016-C-582.5").strike == 582.5
+    assert days.parse_option("SPY") is None

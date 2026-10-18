@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -30,6 +31,18 @@ OptResult nelder_mead(
     int    max_iter = 1000
 );
 
+// Bayesian optimisation's next `batch` points in the box [lower, upper] (integer[d] != 0: whole
+// numbers), to maximise: a Gaussian process fitted to the points tried and their values (NaN: a try
+// that failed, taken as the worst) and expected improvement, the batch by the constant liar; fewer
+// tries than 2 x dims + 1, a Latin hypercube instead. No point tried is proposed again; fewer than
+// `batch` when the box has no more.
+std::vector<std::vector<double>> bayes_next(std::span<const double> lower,
+                                            std::span<const double> upper,
+                                            std::span<const char> integer,
+                                            const std::vector<std::vector<double>>& tried,
+                                            std::span<const double> values, int batch,
+                                            std::uint64_t seed);
+
 // ── Numerics ──────────────────────────────────────────────────────────────────
 
 double clamp_positive   (double x, double eps = 1e-8);
@@ -48,12 +61,72 @@ double stats_mgf(double mu, double sigma, double theta);
 void   stats_normal(double mu, double sigma, double theta, int sample_size,
                     double* out_mgf, double* out_mean, double* out_variance);
 
+// Features of a strategy's data (strategy::Strategy wraps them). The annualised standard deviation
+// of the closes' log returns (NaN with fewer than two); the share of history at or below x (NaN when
+// empty); the IV at |delta| = target, linear between the options either side of it (NaN when none is).
+double realized_vol(std::span<const double> closes, double periods_per_year = 252.0);
+double percentile_rank(std::span<const double> history, double x);
+double iv_at_delta(std::span<const double> deltas, std::span<const double> ivs, double target);
+
+// Selection among trials: `returns` row-major, one row per trial and one column per period (a day), NaN
+// where a trial has no return. A period's Sharpe ratio is mean / sample standard deviation, NaN skipped
+// (0 when it does not vary or has fewer than two).
+double period_sharpe(std::span<const double> returns);
+
+// The best trial (by period Sharpe ratio) against the best of `tries` tries with no skill (Bailey and
+// López de Prado, 2014): dsr is the probability its Sharpe ratio is above expected_max_sharpe, given the
+// spread of all the trials' ratios and the best one's skew and kurtosis. valid is false with fewer than
+// three periods or a distribution too skewed for the test.
+struct DeflatedSharpe {
+    int    best = -1;
+    double sharpe = 0.0;
+    double expected_max_sharpe = 0.0;
+    double skew = 0.0;
+    double kurtosis = 3.0;
+    int    periods = 0;
+    double dsr = 0.0;
+    bool   valid = false;
+};
+DeflatedSharpe deflated_sharpe(std::span<const double> returns, int trials, int periods, int tries);
+
+// The probability of backtest overfitting (Bailey, Borwein, López de Prado and Zhu, 2017) by
+// combinatorially symmetric cross-validation: the periods cut into `blocks` (even) blocks; for each way to
+// take half of them in sample (all, or `max_splits` drawn with `seed`), the trial best in sample is ranked
+// out of sample; pbo is how often it lands in the bottom half. valid is false with one trial or fewer
+// than four blocks' worth of periods.
+struct Overfitting {
+    double pbo = 0.0;
+    int    splits = 0;
+    int    blocks = 0;
+    double logit_median = 0.0;
+    bool   valid = false;
+};
+Overfitting backtest_overfitting(std::span<const double> returns, int trials, int periods, int blocks,
+                                 int max_splits, std::uint64_t seed);
+
+// Walk-forward: the trial best on `train` periods traded on the `test` after them, stepping by `test`.
+struct WalkForwardWindow {
+    int    train_first = 0;
+    int    test_first = 0;
+    int    best = -1;
+    double test_net = 0.0;
+    double test_sharpe = 0.0;
+};
+struct WalkForward {
+    std::vector<WalkForwardWindow> windows;
+    double net = 0.0;      // the test periods strung together
+    double sharpe = 0.0;   // of them, per period
+    int    positive = 0;   // windows with a positive test net
+};
+WalkForward walk_forward(std::span<const double> returns, int trials, int periods, int train, int test);
+
 // Itô checks on f(W) (0: e^{θW − θ²t/2}, 1: W² − t, 2: W³).
 struct ItoCheck {
     double value     = 0.0;   // E[f(W_t)] by Monte Carlo
     double target    = 0.0;   // its exact value
     double std_error = 0.0;   // of value
-    double residual  = 0.0;   // RMS gap of the discretised Itô formula over the paths, relative to f(W_t) − f(0)
+    // RMS gap of the discretised Itô formula over the paths, relative to f(W_t) − f(0).
+    double residual  = 0.0;
     int    paths     = 0;     // paths of n_steps the residual was measured on
 };
 ItoCheck ito_check(int function_code, double theta, double t, int n_steps);
@@ -128,7 +201,8 @@ int measure_compare    (double mu, double r, double sigma, double t,
 
 // ── Pricing ───────────────────────────────────────────────────────────────────
 
-// Black on the forward, discounted at `rate`: the trading engine's Greeks and implied vol.
+// Every European closed form is Black on the forward, discounted at `rate`: the trading engine's
+// Greeks and implied vol, and Black-Scholes on a spot paying a yield, as Black on spot_forward.
 /** Per-unit Greeks; theta per day, vega per 1% vol move (as py_vollib). */
 struct BlackGreeks {
     double delta = 0.0;
@@ -147,46 +221,26 @@ double black_price(bool is_call, double forward, double strike, double maturity,
  * machine precision); 0 when there is none, at most 5. */
 double black_implied_vol(double price, double forward, double strike, double maturity, double rate,
                          bool is_call);
+/** A cash-or-nothing call (1 at expiry above `strike`) under Black on `forward`, discounted at
+ * `rate`. */
+double black_digital_call(double forward, double strike, double maturity, double rate, double vol);
 
-double bs_closed_form_price (double spot, double strike, double rate, double vol, double maturity);
-double bs_closed_form_price (double spot, double strike, double rate, double vol, double maturity, bool is_call);
-double bs_delta             (double spot, double strike, double rate, double vol, double maturity);
-double digital_call_bs_price(double spot, double strike, double rate, double vol,
-                              double maturity, double dividend_yield);
+/** The forward of a spot paying a continuous `dividend_yield`. */
+inline double spot_forward(double spot, double rate, double dividend_yield, double maturity) {
+    return spot * std::exp((rate - dividend_yield) * maturity);
+}
 
-double mc_price            (double spot, double strike, int n_paths);
-double mc_price_full       (double spot, double strike, double rate, double vol,
-                            double maturity, int n_paths);
-double mc_price_full       (double spot, double strike, double rate, double vol,
-                            double maturity, int n_paths, bool is_call);
-double mc_price_full       (double spot, double strike, double rate, double vol,
-                            double maturity, int n_paths, bool is_call, SamplerType sampler);
-double mc_price_with_stderr(double spot, double strike, double rate, double vol,
-                            double maturity, int n_paths, double* out_stderr);
-double mc_price_with_stderr(double spot, double strike, double rate, double vol,
-                            double maturity, int n_paths, double* out_stderr, bool is_call);
-double mc_price_with_stderr(double spot, double strike, double rate, double vol,
-                            double maturity, int n_paths, double* out_stderr, bool is_call,
-                            SamplerType sampler);
-
-double binomial_price         (double spot, double strike, double rate, double vol,
-                               double maturity, int steps);
-double binomial_price         (double spot, double strike, double rate, double vol,
-                               double maturity, int steps, bool is_call);
-double binomial_american_price(double spot, double strike, double rate, double vol,
-                               double maturity, int steps, double dividend_yield = 0.0);
-
-void pricing_greeks     (double spot, double strike, double rate, double vol, double maturity,
-                         double dividend_yield,
-                         double* out_delta_bs, double* out_gamma_bs,
-                         double* out_theta_bs, double* out_vega_bs, double* out_rho_bs);
+/** Black-Scholes Greeks of a call or put on a spot paying `dividend_yield`, from black_greeks on
+ * its forward with the spot held: theta per year, vega per 1.00 of vol, rho at a fixed spot. */
+void pricing_greeks(bool is_call, double spot, double strike, double rate, double dividend_yield,
+                    double vol, double maturity, double* out_delta, double* out_gamma,
+                    double* out_theta, double* out_vega, double* out_rho);
 void greek_surface_grid (double strike, double rate, double vol, double dividend_yield,
                          std::span<const double> spots, std::span<const double> maturities,
                          int greek_code, std::span<double> out_grid);
-void pricing_error_decomp(double mc, double bs, double binomial,
-                          double* out_mc_minus_bs, double* out_binomial_minus_bs);
 void scenario_bs5       (double spot, double strike, double rate, double vol,
                          double maturity, double dividend_yield, bool is_call, double* out_prices_5);
+// Calls: Monte Carlo, Black-Scholes and a European CRR tree of 250 steps a year (at least 10).
 void pricing_batch      (std::span<const double> spots,
                          std::span<const double> strikes,
                          std::span<const double> rates,
@@ -198,6 +252,14 @@ void pricing_batch      (std::span<const double> spots,
                          std::span<double> out_bs,
                          std::span<double> out_binomial);
 
+/** A European option by Monte Carlo on GBM terminal prices (drift rate - dividend_yield),
+ * discounted at rate; seed 42. */
+double mc_price(double spot, double strike, double rate, double dividend_yield, double vol,
+                double maturity, int n_paths, bool is_call,
+                SamplerType sampler = SamplerType::Pseudorandom, double* out_stderr = nullptr);
+
+/** The vol at which Black-Scholes on a spot paying `dividend_yield` gives the call price
+ * `market_price`; -1 when there is none in [1e-4, 5). */
 double bs_implied_vol   (double market_price, double spot, double strike,
                          double rate, double maturity, double dividend_yield);
 void   implied_vol_batch(std::span<const double>  market_prices,
@@ -261,7 +323,8 @@ struct PdeOutcome {
 
 PdeOutcome pde_solve(const PdeSpec& spec);
 
-// Lattices with dividend yield; American = early exercise at every node.
+// Lattices with dividend yield; American = early exercise at every node. NaN for a non-positive
+// spot, strike or vol or a tree that cannot hold the drift; the payoff at maturity 0.
 double trinomial_price   (double spot, double strike, double rate, double dividend_yield, double vol,
                           double maturity, int steps, bool is_call, bool american);
 double binomial_crr_price(double spot, double strike, double rate, double dividend_yield, double vol,
@@ -285,8 +348,9 @@ double vol_surface_interp(std::span<const double> strikes,
 
 // ── Hedging ───────────────────────────────────────────────────────────────────
 
-// One leg of a position to hedge: `quantity` contracts held (negative: sold), priced with Black-Scholes at `vol` on a spot that
-// carries `yield` (the dividend yield, or r - ln(F/S)/T for a leg priced off its own forward F).
+// One leg of a position to hedge: `quantity` contracts held (negative: sold), priced with
+// Black-Scholes at `vol` on a spot that carries `yield` (the dividend yield, or r - ln(F/S)/T for a
+// leg priced off its own forward F).
 struct HedgeLeg {
     bool   is_call  = true;
     double strike   = 0.0;
@@ -306,17 +370,19 @@ struct HedgeStrategy {
     std::vector<double> pnl, turnover, cost;
 };
 
-// The position taken at its Black-Scholes value and delta-hedged with the underlying, on n_paths paths of a GBM (drift
-// rate - dividend_yield, vol path_vol) over the longest leg, rebalanced n_rebalances times; each leg settles in cash at
-// its expiry. Four strategies on the same paths: discrete delta; with transaction costs; rebalancing only when delta has
-// moved by more than the threshold (with costs); deltas from vol × mismatch (with costs). P&L = payoffs + hedge - the
-// position's cost, so costs lower it. Deterministic whatever the number of threads.
+// The position taken at its Black-Scholes value and delta-hedged with the underlying, on n_paths
+// GBM paths (drift rate - dividend_yield, vol path_vol) over the longest leg, rebalanced
+// n_rebalances times; each leg settles in cash at its expiry. Four strategies on the same paths:
+// discrete delta; with costs; rebalance only past the delta threshold (with costs); deltas from
+// vol x mismatch (with costs). P&L = payoffs + hedge - position cost. Deterministic for any
+// thread count.
 std::array<HedgeStrategy, 4> hedge_position(double spot, double rate, double dividend_yield, double path_vol,
                                             std::span<const HedgeLeg> legs, int n_rebalances, int n_paths,
                                             double transaction_cost_bps, double rebalance_threshold,
                                             double vol_mismatch_mult);
 
-// A strategy's P&L over its paths: moments and quantiles, mean shares traded and fees, VaR95 and ES95 as positive losses.
+// A strategy's P&L over its paths: moments, quantiles, mean shares traded and fees, VaR95 and ES95
+// as positive losses.
 struct PnlStats {
     double mean = 0.0, std = 0.0, q05 = 0.0, q50 = 0.0, q95 = 0.0;
     double turnover = 0.0, cost = 0.0, var95 = 0.0, es95 = 0.0;

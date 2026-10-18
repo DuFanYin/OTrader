@@ -31,6 +31,12 @@ export function bytes(n) {
   return `${v.toFixed(i ? 1 : 0)} ${units[i]}`;
 }
 
+/** A day as the engine writes it (YYYYMMDD, a number) as YYYY-MM-DD. */
+export function isoDay(n) {
+  const s = String(n);
+  return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+}
+
 /** The trading day of a backtest file (.../YYYYMMDD.parquet) as YYYY-MM-DD. */
 export function dayOf(path) {
   const m = /(\d{4})(\d{2})(\d{2})\.parquet$/.exec(String(path ?? ""));

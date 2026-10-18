@@ -1,23 +1,26 @@
 // The page: top bar (the brand and the engine's state), the view tabs, the view's inputs on
-// the left with its one primary action, its results on the right; the run history and the log in drawers.
+// the left with its one primary action under them, its results on the right; the run history and the log in drawers.
 import { useEffect } from "preact/hooks";
 import { broker, demo, gatewayName, live, status, watchStatus } from "./lib/engine.js";
 import { connectLogs } from "./lib/logs.js";
 import { fetchLive } from "./lib/market.js";
 import { dropSample, loadSamples, loaded, showSample, shown } from "./lib/samples.js";
-import { params, resetParams, setParam, setSetting, settings } from "./lib/store.js";
-import { GROUPS, VIEWS, byId } from "./views/index.js";
+import { params, resetParams, setParam, setParams, setSetting, settings } from "./lib/store.js";
+import { APART, GROUPS, VIEWS, byId, tabOf } from "./views/index.js";
 import { handOff } from "./views/screener.jsx";
+import { toBacktest } from "./views/experiments.jsx";
 import { HistoryDrawer } from "./ui/history.jsx";
 import { LogDrawer } from "./ui/logs.jsx";
 import { Toasts, toast } from "./ui/toast.jsx";
 
-const current = () => byId[settings.value.tab] ?? VIEWS[0];
+const current = () => byId[tabOf(settings.value.tab)] ?? VIEWS[0];
+/** The view whose inputs, results and sample are shown: the view, or the one it stands for (the Lab's choice). */
+const actual = (view = current()) => view.inner?.() ?? view;
 
 async function run(view = current()) {
   const a = view.action;
   if (a.busy.value) return;
-  dropSample(view.id);
+  dropSample(actual(view).id);
   try {
     await a.run();
   } catch (err) {
@@ -25,9 +28,12 @@ async function run(view = current()) {
   }
 }
 
+/** Opens a view: its tab, or the Lab with it chosen. */
 function select(id) {
-  showSample(byId[id]);  // before the view draws: no empty pane in between
-  setSetting("tab", id);
+  const tab = tabOf(id);
+  if (tab !== id) setSetting("labView", id);
+  showSample(actual(byId[tab]));  // before the view draws: no empty pane in between
+  setSetting("tab", tab);
 }
 
 // The screener hands a chosen position to the multi-leg or the risk view, and runs it there.
@@ -35,6 +41,13 @@ handOff.to = (where, position) => {
   setParam(where === "multileg" ? "multiLegLegs" : "stressLegs", JSON.stringify(position, null, 1));
   select(where);
   run(byId[where]);
+};
+
+// A trial of an experiment opens in Backtest, with its days and setting, and runs there.
+toBacktest.open = (inputs) => {
+  setParams(inputs);
+  select("backtest");
+  run(byId.backtest);
 };
 
 // ── top bar
@@ -73,7 +86,7 @@ function DemoBadge() {
 function Topbar() {
   const s = settings.value, isDemo = demo.value;
   return (
-    <header class={`sticky top-0 z-20 flex h-14 items-center gap-3 border-b border-line bg-surface/95 px-3 backdrop-blur sm:gap-4 sm:px-4 ${isDemo
+    <header class={`sticky top-0 z-20 flex h-14 shrink-0 items-center gap-3 border-b border-line bg-surface/95 px-3 backdrop-blur sm:gap-4 sm:px-4 ${isDemo
       ? "pt-0.5 shadow-[inset_0_2px_0_var(--warn)]" : ""}`}>
       <div class="flex shrink-0 items-center gap-2.5">
         <span class="grid h-8 w-8 place-items-center rounded-md bg-ink font-mono text-lg font-bold text-surface">Δ</span>
@@ -84,8 +97,19 @@ function Topbar() {
       </div>
       <div class="min-w-0 flex-1"><EngineStrip /></div>
       {isDemo && (
+        <a href="https://dufanyin.dev/optra-architecture/" target="_blank" rel="noopener"
+          title="How Optra is built: the engine, the server, the research workers and the page"
+          class="btn-pill flex h-7 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs font-medium">
+          <svg viewBox="0 0 16 16" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+            <rect x="1.5" y="1.5" width="5" height="5" rx="1" /><rect x="9.5" y="1.5" width="5" height="5" rx="1" />
+            <rect x="5.5" y="9.5" width="5" height="5" rx="1" /><path d="M4 6.5v1.5h8V6.5M8 8v1.5" />
+          </svg>
+          <span class="hidden sm:inline">Architecture</span>
+        </a>
+      )}
+      {isDemo && (
         <a href="https://github.com/DuFanYin/optra" target="_blank" rel="noopener" title="Optra's source on GitHub"
-          class="btn-star flex h-7 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs font-medium">
+          class="btn-pill green flex h-7 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs font-medium">
           <svg viewBox="0 0 16 16" class="h-3.5 w-3.5" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" /></svg>
           <span class="hidden sm:inline">Star on GitHub</span>
           <svg viewBox="0 0 16 16" class="h-3 w-3" fill="currentColor" aria-hidden="true"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z" /></svg>
@@ -100,42 +124,48 @@ function Topbar() {
   );
 }
 
-function Tabs() {
-  const tab = current().id;
+function Tab({ view: v }) {
+  const on = v.id === current().id;
   return (
-    <nav class="sticky top-14 z-10 flex h-9 items-end gap-1 overflow-x-auto border-b border-line bg-page px-3" aria-label="Views">
+    <button type="button" onClick={() => select(v.id)} aria-current={on ? "page" : undefined}
+      class={`relative flex h-9 shrink-0 items-center gap-1.5 px-2 text-sm transition-colors `
+        + (on ? "font-medium text-ink after:absolute after:inset-x-2 after:bottom-0 after:h-0.5 after:rounded-full after:bg-accent" : "text-muted hover:text-ink")}>
+      {v.label}
+      {v.action.busy.value && <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />}
+    </button>
+  );
+}
+
+function Tabs() {
+  return (
+    <nav class="sticky top-14 z-10 flex h-9 shrink-0 items-end gap-1 overflow-x-auto border-b border-line bg-page px-3" aria-label="Views">
+      {/* on a wide screen the first group is as wide as the sidebar, so the line after it continues the sidebar's edge */}
       {GROUPS.map(([group, views], i) => (
-        <div class={`flex shrink-0 items-end gap-1 ${i ? "ml-3 border-l border-line pl-3" : ""}`} role="group" aria-label={group}>
+        <div class={`flex shrink-0 items-end gap-1 ${i ? "ml-3 border-l border-line pl-3 lg:ml-0" : "lg:w-[344px] lg:min-w-0 2xl:w-[384px]"}`} role="group" aria-label={group}>
           <span class="flex h-9 items-center pr-1.5">
             <span class="rounded-md bg-surface-3 px-2 py-0.5 text-2xs font-semibold tracking-[0.08em] text-ink uppercase">{group}</span>
           </span>
-          {views.map((v) => (
-            <button type="button" onClick={() => select(v.id)} aria-current={v.id === tab ? "page" : undefined}
-              class={`relative flex h-9 shrink-0 items-center gap-1.5 px-2.5 text-sm transition-colors `
-                + (v.id === tab ? "font-medium text-ink after:absolute after:inset-x-2 after:bottom-0 after:h-0.5 after:rounded-full after:bg-accent" : "text-muted hover:text-ink")}>
-              {v.label}
-              {v.action.busy.value && <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />}
-            </button>
-          ))}
+          {views.map((v) => <Tab view={v} />)}
         </div>
       ))}
+      <div class="ml-auto flex shrink-0 items-end gap-1 pl-3">{APART.map((v) => <Tab view={v} />)}</div>
     </nav>
   );
 }
 
 // ── inputs and results
 
-/** The view's primary button: at the top right of the results on a wide screen, under the inputs on a narrow one. */
+/** The view's primary button, under its inputs. */
 function ActionButton({ class: cls = "" }) {
   const view = current(), a = view.action, busy = a.busy.value;
   return (
     <span class={`gap-2 ${cls}`}>
       {busy && a.stop && (
-        <button type="button" class="h-8 rounded-md border border-line px-3 text-sm text-ink-2 hover:border-down hover:text-down"
+        <button type="button" class="h-7 rounded-full border border-line px-3 text-xs text-ink-2 hover:border-down hover:text-down"
           onClick={() => a.stop().catch((e) => toast(e.message, "Stop"))}>Stop</button>
       )}
       <button type="button" disabled={busy} onClick={() => run()} title={`${a.label} (⌘↵ or Ctrl+Enter)`}
-        class="btn-run flex h-8 flex-1 items-center justify-center gap-2 rounded-md px-3.5 text-sm font-medium">
+        class="btn-run flex h-7 items-center justify-center gap-1.5 rounded-full px-3 text-xs font-medium">
         {busy
           ? <span class="h-3 w-3 animate-spin rounded-full border-[1.5px] border-current border-r-transparent" />
           : <svg viewBox="0 0 10 10" width="9" height="9" fill="currentColor" aria-hidden="true"><path d="M2.5 1.3v7.4a.6.6 0 0 0 .92.5l5.6-3.7a.6.6 0 0 0 0-1L3.42.8a.6.6 0 0 0-.92.5" /></svg>}
@@ -150,17 +180,18 @@ function Sidebar() {
   const reset = () => {
     if (!confirm("Reset every input to its default?")) return;
     resetParams();
-    if (view.research && settings.value.dataMode === "live") fetchLive({ force: true }).catch(() => {});
+    if (actual(view).research && settings.value.dataMode === "live") fetchLive({ force: true }).catch(() => {});
   };
   return (
-    <aside class="flex min-h-0 flex-col border-line bg-surface lg:sticky lg:top-[92px] lg:h-[calc(100vh-92px)] lg:border-r">
-      <div class="min-h-0 flex-1 overflow-y-auto"><view.Params /></div>
-      <div class="sticky bottom-0 flex items-center justify-end gap-2 border-t border-line bg-surface p-3 lg:py-2">
-        <ActionButton class="flex flex-1 lg:hidden" />
-        <button type="button" class="h-8 rounded-sm px-2 text-xs text-muted hover:bg-surface-2 hover:text-ink lg:h-6" title="Put every input back to its default"
+    <aside class="flex min-h-0 flex-col border-line bg-surface lg:border-r">
+      <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain"><view.Params /></div>
+      {/* the inputs end with the view's action, small on the right, as a form's does */}
+      <div class="sticky bottom-0 flex items-center justify-between gap-2 border-t border-line bg-surface px-3 py-2.5">
+        <button type="button" class="h-7 rounded-sm px-1 text-xs text-muted hover:text-ink" title="Put every input back to its default"
           onClick={reset}>
           Reset inputs
         </button>
+        <ActionButton class="flex" />
       </div>
     </aside>
   );
@@ -181,24 +212,23 @@ function Placeholder() {
 
 function ResultsPane() {
   // the demo says so in its header, so its samples go unmarked
-  const view = current(), sample = !demo.value && shown.value[view.id];
+  const view = current(), sample = !demo.value && shown.value[actual(view).id];
+  const status = sample ? `${sample} · run to replace it` : view.status();
   return (
-    <main class="min-w-0 p-3 pb-16 lg:p-4 lg:pb-16">
-      <div class="mb-3 flex min-h-8 items-center justify-between gap-3">
-        <h2 class="flex items-center gap-2 text-lg font-semibold tracking-tight">
-          {view.label}
+    <main class="min-w-0 p-3 pb-16 lg:min-h-0 lg:overflow-y-auto lg:overscroll-contain lg:p-4 lg:pb-16">
+      {/* the tab names the view; only the Lab's choice, a sample and the view's status are said here */}
+      {(view.inner || sample || status) && <div class="mb-3 flex min-h-6 items-center justify-between gap-3">
+        <h2 class="flex items-center gap-2 text-sm font-medium text-ink-2">
+          {view.inner && actual(view).label}
           {sample && <span class="rounded-sm bg-warn-soft px-1.5 py-0.5 text-2xs font-medium tracking-normal text-warn"
             title={`${sample}: a run with the default inputs, shipped with the page`}>Sample</span>}
         </h2>
-        <div class="flex items-center gap-3">
-          <span class="text-xs text-muted">{sample ? `${sample} · run to replace it` : view.status()}</span>
-          <ActionButton class="hidden lg:flex" />
-        </div>
-      </div>
+        <span class="text-xs text-muted">{status}</span>
+      </div>}
       {!view.hasResults() && view.sample && !loaded.value ? <Placeholder /> : !view.hasResults() ? (
         <div class="grid min-h-[40vh] place-items-center rounded-md border border-dashed border-line p-6 text-center">
           <div class="max-w-xl">
-            <p class="text-base leading-relaxed text-ink-2">{view.about}</p>
+            <p class="text-base leading-relaxed text-ink-2">{actual(view).about}</p>
             <p class="mt-3 text-sm text-muted">Set the inputs, then {view.action.label.toLowerCase()} (⌘↵ or Ctrl+Enter).</p>
           </div>
         </div>
@@ -226,23 +256,23 @@ export function App() {
     view.enter().catch((e) => toast(e.message, view.label));
   }, [tab]);
   useEffect(() => {
-    // Every view's data and sample, fetched once in the background, so a switch shows them at once
-    loadSamples(VIEWS).then(() => showSample(current()));
-    for (const v of VIEWS) if (v !== current()) v.enter().catch(() => {});
+    // Every view's sample, loaded once (static files); a view's data is fetched when it is opened
+    loadSamples(VIEWS).then(() => showSample(actual()));
   }, []);
   return (
-    <>
+    <div class="flex min-h-dvh flex-col lg:h-dvh lg:overflow-hidden">
+      {/* the top bar and the tabs stay; on a wide screen the inputs and the results scroll each on its own */}
       <Topbar />
       <Tabs />
-      <div class="grid min-h-[calc(100vh-92px)] lg:grid-cols-[304px_minmax(0,1fr)]">
+      <div class="grid min-h-0 flex-1 lg:grid-cols-[360px_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)] 2xl:grid-cols-[400px_minmax(0,1fr)]">
         <Sidebar />
         <ResultsPane />
       </div>
       <div class="fixed right-4 bottom-4 z-30 flex items-center gap-2">
-        <HistoryDrawer views={byId} />
+        <HistoryDrawer views={byId} select={select} />
         <LogDrawer />
       </div>
       <Toasts />
-    </>
+    </div>
   );
 }

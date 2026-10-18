@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; font-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; font-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
 <title>Optra architecture · dufanyin</title>
 <meta name="description" content="Architecture of Optra, an options trading and research system: one engine for backtest and live trading, one server with one API for the page and for agents, the numerics both share, cut at gRPC into a control plane and a core.">
 <meta name="color-scheme" content="light dark">
@@ -23,6 +23,9 @@
   --infra: #15803d;
   --planned: #a16207;
   --lab: #6d28d9;
+  --side: #f7f7f5;
+  --pill-blue: #3352d6;  /* the Optra page's accent and green: its buttons look the same */
+  --pill-green: #13804b;
   --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
 }
 @media (prefers-color-scheme: dark) {
@@ -39,52 +42,92 @@
     --infra: #6cc28c;
     --planned: #d8b25a;
     --lab: #ae8cf2;
+    --side: #161616;
+    --pill-blue: #7b93ff;
+    --pill-green: #3ccf8e;
   }
 }
 * { box-sizing: border-box; }
 html, body { background: var(--paper); }
 body { margin: 0; color: var(--text); font: 16px/1.6 var(--sans); -webkit-font-smoothing: antialiased; }
-main { max-width: 72rem; margin: 0 auto; padding: 32px 16px 80px; }
-@media (min-width: 640px) { main { padding: 48px 32px 96px; } }
 a { color: inherit; }
 .home { color: var(--dim); text-decoration: none; font-size: 14px; }
 .home:hover { color: var(--text); }
+.links { display: flex; flex-direction: column; gap: 6px; margin-top: auto; }
+.links .pill { justify-content: center; height: 32px; }
 
-header { max-width: 42rem; }
-.eyebrow { margin: 40px 0 4px; color: var(--dim); font-size: 13px; letter-spacing: .08em;
-  text-transform: uppercase; }
-h1 { margin: 0 0 16px; font-size: clamp(32px, 5vw, 44px); font-weight: 600; line-height: 1.1;
-  letter-spacing: -.02em; }
-.lead { margin: 0; color: var(--text-2); font-size: 17px; }
-.lead a { text-underline-offset: 3px; text-decoration-color: var(--line); }
-.lead a:hover { text-decoration-color: var(--text); }
+/* two columns, the whole window: the side picks a diagram and says what it shows, the main shows it, scaled to
+   fit. One at a time, picked with radio buttons (no script: the page allows none). A narrow window stacks them. */
+.page { display: grid; grid-template-columns: minmax(0, 1fr); }
+.side { display: flex; flex-direction: column; gap: 18px; padding: 22px 24px; background: var(--side);
+  border-bottom: 1px solid var(--rule); }
+.main { min-width: 0; padding: 16px; }
+.canvas { position: relative; min-width: 860px; }
+/* a narrow window: each diagram as wide as the page, at least 860, scrolled sideways */
+.view svg { display: block; width: 100%; min-width: 860px; height: auto; }
+.view svg text { font-family: var(--sans); }
+@media (min-width: 1000px) {
+  html, body { height: 100%; overflow: hidden; }
+  .page { grid-template-columns: 340px minmax(0, 1fr); height: 100vh; }
+  .side { overflow: hidden; border-bottom: 0; border-right: 1px solid var(--rule); } /* fixed: it fits */
+  .main { display: flex; flex-direction: column; justify-content: center; height: 100vh; padding: 24px 28px; }
+  .view .diagram, .view .canvas { margin: 0; padding: 0; overflow: visible; min-width: 0; }
+  /* every diagram (each 1100 wide) at one scale, nine tenths of what fits the tallest (1100 x 894) in the
+     window: a box and its text are the same size in each */
+  .view svg { width: min(100%, calc((100vh - 48px) * 0.9 * 1100 / 894)); min-width: 0; margin: 0 auto; }
+  .hint { display: none; }
+}
+.heading { display: flex; flex-direction: column; gap: 6px; }
+.eyebrow { margin: 0; color: var(--dim); font-size: 12px; font-weight: 500; letter-spacing: .12em; text-transform: uppercase; }
+h1 { margin: 0; font-size: 26px; font-weight: 600; line-height: 1.15; letter-spacing: -.02em; }
+.intro { margin: 2px 0 0; color: var(--text-2); font-size: 14px; line-height: 1.45; }
+.views { display: flex; flex-direction: column; gap: 2px; }
+.views label { display: flex; flex-direction: column; gap: 0; padding: 7px 12px; border: 1px solid transparent;
+  border-radius: 8px; cursor: pointer; transition: background-color .12s ease, border-color .12s ease; }
+.views label:hover { background: color-mix(in oklab, var(--text) 4%, transparent); }
+.views .name { font-size: 14px; font-weight: 600; }
+.views .desc { color: var(--dim); font-size: 12.5px; }
+.views code { font-size: 12px; }
+.view-input { position: absolute; opacity: 0; pointer-events: none; }
+#view-overall:checked ~ .page label[for="view-overall"], #view-live:checked ~ .page label[for="view-live"],
+#view-backtest:checked ~ .page label[for="view-backtest"], #view-research:checked ~ .page label[for="view-research"] {
+  background: var(--paper); border-color: var(--rule); box-shadow: 0 1px 2px rgba(0, 0, 0, .04); }
+#view-overall:checked ~ .page label[for="view-overall"] .name, #view-live:checked ~ .page label[for="view-live"] .name,
+#view-backtest:checked ~ .page label[for="view-backtest"] .name,
+#view-research:checked ~ .page label[for="view-research"] .name { color: var(--pill-blue); }
+#view-overall:focus-visible ~ .page label[for="view-overall"], #view-live:focus-visible ~ .page label[for="view-live"],
+#view-backtest:focus-visible ~ .page label[for="view-backtest"],
+#view-research:focus-visible ~ .page label[for="view-research"] { outline: 2px solid var(--pill-blue); outline-offset: 2px; }
+/* the one picked shows, its words in the side and its diagram in the main */
+.about { display: none; flex-direction: column; gap: 10px; padding-top: 16px; border-top: 1px solid var(--rule); }
+.about p { margin: 0; color: var(--text-2); font-size: 13px; line-height: 1.45; }
+.view { display: none; }
+#view-overall:checked ~ .page .about-overall, #view-live:checked ~ .page .about-live,
+#view-backtest:checked ~ .page .about-backtest, #view-research:checked ~ .page .about-research { display: flex; }
+#view-overall:checked ~ .page .view-overall, #view-live:checked ~ .page .view-live,
+#view-backtest:checked ~ .page .view-backtest, #view-research:checked ~ .page .view-research { display: block; }
+.pill { --c: var(--pill-blue); display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px;
+  border: 1px solid color-mix(in oklab, var(--c) 35%, transparent); border-radius: 999px;
+  background: color-mix(in oklab, var(--c) 10%, transparent); color: var(--c);
+  font-size: 12px; font-weight: 500; text-decoration: none; white-space: nowrap;
+  transition: background-color .12s ease, border-color .12s ease; }
+.pill:hover { background: color-mix(in oklab, var(--c) 20%, transparent); border-color: color-mix(in oklab, var(--c) 55%, transparent); }
+.pill.green { --c: var(--pill-green); }
+.pill svg { width: 14px; height: 14px; flex: none; }
 
-.legend { display: flex; flex-wrap: wrap; gap: 4px 22px; margin: 24px 0 0; padding: 0; list-style: none;
-  color: var(--text-2); font-size: 14px; }
+
+.legend { display: flex; flex-direction: column; gap: 3px; margin: 0; padding: 0; list-style: none;
+  color: var(--text-2); font-size: 13px; }
 .legend li { display: inline-flex; align-items: center; gap: 8px; }
 .legend .swatch { width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
 .legend .dash { width: 16px; border-top: 1.5px dashed var(--planned); }
 
-.diagram { margin: 24px -16px 0; padding: 4px 16px 8px; overflow-x: auto; }
-.frame { position: relative; min-width: 860px; }
-svg#arch { display: block; width: 100%; min-width: 860px; height: auto; }
+.diagram { margin: 0 -16px; padding: 4px 16px 8px; overflow-x: auto; }
 .hint { margin: 8px 0 0; color: var(--dim); font-size: 13px; }
-.hint .narrow { display: none; }
-@media (max-width: 924px) { .hint .narrow { display: inline; } }
-.hint .js-only { display: none; }
-.arch-live .hint .js-only { display: inline; }
+@media (min-width: 1300px) { .hint { display: none; } }
 
-.notes { margin: 56px 0 0; padding-top: 32px; border-top: 1px solid var(--rule); }
-.notes h2 { margin: 0 0 20px; color: var(--dim); font-size: 13px; font-weight: 400; letter-spacing: .08em;
-  text-transform: uppercase; }
-.notes ul { display: grid; grid-template-columns: 1fr; gap: 24px 48px; margin: 0; padding: 0;
-  list-style: none; }
-@media (min-width: 720px) { .notes ul { grid-template-columns: 1fr 1fr; } }
-.notes h3 { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
-.notes p { margin: 0; color: var(--text-2); font-size: 15px; }
 
-/* The diagram: thin lines; a group shows only in its boxes' outline and its label. */
-#arch text { font-family: var(--sans); }
+/* The diagrams: thin lines; a group shows only in its boxes' outline and its label. */
 .box { fill: var(--box); stroke: var(--line); stroke-width: 1; }
 .box.control { stroke: var(--control); }
 .box.core { stroke: var(--core); }
@@ -117,246 +160,573 @@ svg#arch { display: block; width: 100%; min-width: 860px; height: auto; }
 .port { fill: var(--paper); stroke: var(--core); stroke-width: 1; }
 .port-text { font-size: 10.5px; fill: var(--core); text-anchor: middle; letter-spacing: .02em; }
 
-/* A box clicked: it and what it touches stay, the rest fades; a card says what it does. */
-.arch-live .node { cursor: pointer; }
-.node { outline: none; }
-.node:focus-visible .title { text-decoration: underline; }
-#arch.focus .node:not(.lit), #arch.focus .edge:not(.lit), #arch.focus .flow:not(.lit),
-#arch.focus .planned-label:not(.lit), #arch.focus .group, #arch.focus .note, #arch.focus .cut,
-#arch.focus .port, #arch.focus .port-text, #arch.focus .cut-label, #arch.focus .cut-note { opacity: .15; }
-.tip { position: absolute; z-index: 2; max-width: 300px; padding: 12px 14px; border-radius: 6px;
-  background: var(--paper); color: var(--text); border: 1px solid var(--rule);
-  box-shadow: 0 6px 20px -8px rgb(0 0 0 / .25); pointer-events: none; }
-.tip b { display: block; margin: 0 0 2px; font-size: 14.5px; font-weight: 600; }
-.tip span { display: block; color: var(--text-2); font-size: 13.5px; line-height: 1.5; }
-.tip i { display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%;
-  vertical-align: 1px; background: var(--accent, var(--core)); }
+.box.todo { stroke: var(--planned); stroke-dasharray: 4 4; }
 </style>
 </head>
 <body>
-<main>
+<input class="view-input" type="radio" name="view" id="view-overall" checked>
+<input class="view-input" type="radio" name="view" id="view-live">
+<input class="view-input" type="radio" name="view" id="view-backtest">
+<input class="view-input" type="radio" name="view" id="view-research">
+<div class="page">
+<aside class="side">
 <a class="home" href="/">&#8592; dufanyin.dev</a>
-<header>
-<p class="eyebrow">Quant options system</p>
+<div class="heading">
+<p class="eyebrow">Optra</p>
 <h1>Architecture</h1>
-<p class="lead">One repository, <a href="https://github.com/DuFanYin/optra">Optra</a>: an options trading engine that runs the same strategies in a backtest and live on Interactive Brokers, one server with one API in front of it for the page and for agents, and one numerics library under both. It is cut in two at gRPC: above, the control plane asks; below, the core owns the trading state and reaches the world through adapters.</p>
-</header>
-
+<p class="intro">An options trading system: one engine for backtest and live, one server for the page and agents, and a research loop that counts every try.</p>
+</div>
+<nav class="views" aria-label="Diagram">
+<label for="view-overall"><span class="name">Overall</span><span class="desc">The processes, and how they talk</span></label>
+<label for="view-live"><span class="name">Live</span><span class="desc">A quote's way to an order and its fill</span></label>
+<label for="view-backtest"><span class="name">Backtest</span><span class="desc">From the data to a trial's result</span></label>
+<label for="view-research"><span class="name">Research</span><span class="desc">From an idea to live trading</span></label>
+</nav>
+<div class="about about-overall">
+<p>Cut at gRPC: the control plane asks, the core owns the trading state and reaches the world through adapters.</p>
 <ul class="legend">
   <li><span class="swatch" style="--c: var(--control)"></span>control plane: asks and shows</li>
   <li><span class="swatch" style="--c: var(--core)"></span>core: owns the trading state</li>
   <li><span class="swatch" style="--c: var(--infra)"></span>adapters: the outside world</li>
   <li><span class="swatch" style="--c: var(--lab)"></span>quant: the numerics</li>
 </ul>
-
+</div>
+<div class="about about-research">
+<p>Every try is registered before it runs, judged against luck and a random-buying control, and promoted only on evidence in the ledger; the person approves anything that trades.</p>
+<ul class="legend">
+  <li><span class="swatch" style="--c: var(--infra)"></span>data: checked, one format</li>
+  <li><span class="swatch" style="--c: var(--control)"></span>control plane: the steps and gates</li>
+  <li><span class="swatch" style="--c: var(--core)"></span>core: the engine</li>
+  <li><span class="swatch" style="--c: var(--lab)"></span>quant: the statistics</li>
+  <li><span class="dash"></span>not built yet</li>
+</ul>
+</div>
+<div class="about about-live">
+<p>One process, the code a backtest runs. Only the event thread changes trading state, one event after another; the network, the disk and the log each have a thread of their own.</p>
+<ul class="legend">
+  <li><span class="swatch" style="--c: var(--infra)"></span>adapters: the threads facing outside</li>
+  <li><span class="swatch" style="--c: var(--core)"></span>core: owns the trading state</li>
+  <li><span class="swatch" style="--c: var(--control)"></span>control plane: the server's commands</li>
+  <li><span class="swatch" style="--c: var(--lab)"></span>quant: the numerics</li>
+</ul>
+</div>
+<div class="about about-backtest">
+<p>The live engine's code, replayed a minute at a time. A day is read and priced once for all its trials, cached as it is read, and every result is summed in one place.</p>
+<ul class="legend">
+  <li><span class="swatch" style="--c: var(--infra)"></span>data: three tiers, nothing lost</li>
+  <li><span class="swatch" style="--c: var(--core)"></span>core: the batch engine</li>
+  <li><span class="swatch" style="--c: var(--control)"></span>control plane: jobs, ledger, the sums</li>
+  <li><span class="swatch" style="--c: var(--lab)"></span>quant: the pricing</li>
+</ul>
+</div>
+<nav class="links">
+<a class="pill" href="/optra-demo/" title="Optra running on a simulated account"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="9" rx="1.5"/><path d="M5.5 14h5M8 11.5V14"/></svg><span class="label">Live demo</span></a>
+<a class="pill green" href="https://github.com/DuFanYin/optra" title="Optra's source on GitHub"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg><span class="label">Star on GitHub</span><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" style="width:12px;height:12px"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/></svg></a>
+</nav>
+</aside>
+<main class="main">
+<section class="view view-overall" aria-label="Overall architecture">
 <div class="diagram">
-<div class="frame">
-<svg id="arch" viewBox="0 0 1100 700" role="group" aria-label="Architecture: who drives the system, the control plane, the cut at gRPC, the core engines and how quotes, orders and fills move between them, the adapters, and the numerics library both sides use">
+<div class="canvas">
+<svg id="arch" role="img" viewBox="0 0 1100 894" role="group">
 <defs>
   <marker id="head" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
     <path class="head" d="M1,1.5 L8.5,5 L1,8.5"/>
   </marker>
 </defs>
-<g class="node outside" id="n-operator" tabindex="0" role="img" aria-label="Operator">
-<desc>Adds, starts and stops strategies, watches the account and the logs, runs backtests, prices and stresses options.</desc>
+<g class="node outside" id="n-operator">
 <rect class="box outside" x="40" y="10" width="150" height="44" rx="6"/>
 <text class="title" x="115" y="29">Operator</text>
 <text class="sub" x="115" y="45">a browser, signed in</text>
 </g>
-<g class="node outside" id="n-scheduler" tabindex="0" role="img" aria-label="Scheduler">
-<desc>systemd: the engine restarted before each day's open, a check every five minutes while the market is open, the day's report after the close; a Telegram message when something changes.</desc>
+<g class="node outside" id="n-scheduler">
 <rect class="box outside" x="230" y="10" width="150" height="44" rx="6"/>
 <text class="title" x="305" y="29">Scheduler</text>
 <text class="sub" x="305" y="45">check, daily report</text>
 </g>
-<g class="node outside" id="n-agents" tabindex="0" role="img" aria-label="Agents">
-<desc>An AI agent prices, calibrates, stresses, screens and backtests with the same tools the page uses: plain HTTP on the server (GET /api/tools lists them). No tool places an order.</desc>
-<rect class="box outside" x="815" y="10" width="245" height="44" rx="6"/>
-<text class="title" x="937.5" y="29">Agents</text>
-<text class="sub" x="937.5" y="45">tools over HTTP, never orders</text>
+<g class="node outside" id="n-agents">
+<rect class="box outside" x="815" y="10" width="200" height="44" rx="6"/>
+<text class="title" x="915" y="29">Agents</text>
+<text class="sub" x="915" y="45">tools over HTTP, never orders</text>
 </g>
-<path class="arrow" id="e-1" data-from="operator" data-to="webui" data-kind="control" d="M115,54 V94" marker-end="url(#head)"/>
-<path class="arrow" id="e-2" data-from="scheduler" data-to="server" data-kind="control" d="M305,54 V94" marker-end="url(#head)"/>
-<path class="arrow" id="e-3" data-from="agents" data-to="server" data-kind="control" d="M937.5,54 V94" marker-end="url(#head)"/>
+<path class="arrow" id="e-1" d="M115,54 V94" marker-end="url(#head)"/>
+<path class="arrow" id="e-2" d="M305,54 V94" marker-end="url(#head)"/>
+<path class="arrow" id="e-3" d="M915,54 V94" marker-end="url(#head)"/>
 <text class="group control end" x="560" y="90"><tspan class="dot">&#9679;</tspan>&#8202; CONTROL PLANE</text>
-<g class="node control" id="n-webui" tabindex="0" role="img" aria-label="Page">
-<desc>One Preact app, served by the server: Trading (Home, the account, orders, data) and Research (backtests, the screener, pricing, risk, numerics, validation). The signed-in owner reaches it at dufanyin.dev/optra/.</desc>
+<g class="node control" id="n-webui">
 <rect class="box control" x="40" y="96" width="150" height="44" rx="6"/>
 <text class="title" x="115" y="115">Page</text>
 <text class="sub" x="115" y="131">Trading and Research</text>
 </g>
-<g class="node control" id="n-server" tabindex="0" role="img" aria-label="Server">
-<desc>One FastAPI app with one API: the trading routes (through gRPC only), backtests (entry_backtest, a process per run), the 36 research tools (through the C ABI), the run history, the day's check and report. It holds no trading state, so it can restart at any time.</desc>
-<rect class="box control" x="230" y="96" width="830" height="44" rx="6"/>
-<text class="title" x="645" y="115">Server</text>
-<text class="sub" x="645" y="131">one API: trading, backtests, research tools, run history, the day</text>
+<g class="node control" id="n-server">
+<rect class="box control frame" x="230" y="96" width="800" height="170" rx="10"/>
+<text class="title" x="630" y="115">Server</text>
+<text class="sub" x="630" y="131">one API for the page and agents; no trading state</text>
 </g>
-<path class="arrow" id="e-5" data-from="webui" data-to="server" data-kind="control" d="M192,118 H228" marker-start="url(#head)" marker-end="url(#head)"/>
-<path class="cut" d="M15,176 H243 M367,176 H428 M552,176 H875 M1000,176 H1060"/>
-<text class="cut-label" x="40" y="168">THE CUT</text>
-<text class="cut-note" x="40" y="196">control plane above, core below</text>
-<path class="arrow" id="e-8" data-from="server" data-to="grpc" data-kind="control" d="M305,140 V161" marker-start="url(#head)" marker-end="url(#head)"/>
-<path class="arrow" id="e-9" data-from="server" data-to="cli" data-kind="control" d="M490,140 V161" marker-end="url(#head)"/>
-<path class="arrow" id="e-10" data-from="server" data-to="cabi" data-kind="lab" d="M937.5,140 V161" marker-end="url(#head)"/>
-<g class="node door-node" id="n-grpc" tabindex="0" role="img" aria-label="gRPC (live)">
-<desc>The control plane's only way into the live engine: each RPC calls one of the engine's operations and translates its result into the API's messages.</desc>
-<rect class="door" x="245" y="163" width="120" height="26" rx="13"/>
-<text class="door-text" x="305" y="180.5">gRPC (live)</text>
+<path class="arrow" id="e-5" d="M192,118 H228" marker-start="url(#head)" marker-end="url(#head)"/>
+<g class="node control" id="n-writing">
+<rect class="box control" x="245" y="146" width="140" height="44" rx="6"/>
+<text class="title" x="315" y="165">Strategies</text>
+<text class="sub" x="315" y="181">write, build, install</text>
 </g>
-<g class="node door-node" id="n-cli" tabindex="0" role="img" aria-label="CLI (backtest)">
-<desc>entry_backtest: a backtest from the command line, one day or many, its result as JSON.</desc>
-<rect class="door" x="430" y="163" width="120" height="26" rx="13"/>
-<text class="door-text" x="490" y="180.5">CLI (backtest)</text>
+<g class="node control" id="n-research">
+<rect class="box control" x="405" y="146" width="180" height="44" rx="6"/>
+<text class="title" x="495" y="165">Research</text>
+<text class="sub" x="495" y="181">experiments, versions</text>
 </g>
-<g class="node door-node" id="n-cabi" tabindex="0" role="img" aria-label="C ABI">
-<desc>libanalytics_c.so, loaded with ctypes: a JSON request in, a JSON response out, per workflow. The engine&#8217;s Black (prices and implied vols in a batch) is one of them: the server&#8217;s chains of the engine&#8217;s days and the holdings&#8217; stress use it.</desc>
-<rect class="door" x="877.5" y="163" width="120" height="26" rx="13"/>
-<text class="door-text" x="937.5" y="180.5">C ABI (ctypes)</text>
+<g class="node control" id="n-trading">
+<rect class="box control" x="605" y="146" width="130" height="44" rx="6"/>
+<text class="title" x="670" y="165">Trading</text>
+<text class="sub" x="670" y="181">gRPC, the day</text>
 </g>
-<path class="arrow" id="e-11" data-from="grpc" data-to="engine" data-kind="core" d="M305,189 V226" marker-end="url(#head)"/>
-<path class="arrow" id="e-12" data-from="cli" data-to="engine" data-kind="core" d="M490,189 V226" marker-end="url(#head)"/>
-<path class="arrow" id="e-13" data-from="cabi" data-to="analytics" data-kind="lab" d="M997.5,176 H1085 V662 H1062" marker-end="url(#head)"/>
-<text class="group core end" x="710" y="222"><tspan class="dot">&#9679;</tspan>&#8202; CORE</text>
-<g class="node core" id="n-engine" tabindex="0" role="img" aria-label="Engine">
-<desc>The engines inside it around five ports: the event loop, the clock, the venue, the storage and the market data. Backtest and live are two assemblies of it; what each event does is written once.</desc>
-<rect class="box core frame" x="30" y="228" width="680" height="376" rx="10"/>
-<text class="title" x="347" y="248">Engine</text>
-<text class="sub" x="347" y="264">one code path, two assemblies; adapters plug into its ports</text>
+<g class="node control" id="n-tools">
+<rect class="box control" x="815" y="146" width="200" height="44" rx="6"/>
+<text class="title" x="915" y="165">Tools</text>
+<text class="sub" x="915" y="181">58, for the page and agents</text>
 </g>
-<g class="node core" id="n-loop" tabindex="0" role="img" aria-label="Event loop">
-<desc>The one writer of the trading state. Live, one thread: fills and commands in one ordered queue, never dropped; the newest snapshot of each portfolio; its own clock for the timer. Logs and socket writes run off it.</desc>
-<rect class="box core" x="44" y="280" width="606" height="52" rx="6"/>
-<text class="title" x="347" y="303">Event loop</text>
-<text class="sub" x="347" y="319">one writer; fills never dropped</text>
+<g class="node control" id="n-ledger">
+<rect class="box control" x="405" y="206" width="180" height="44" rx="6"/>
+<text class="title" x="495" y="225">Ledger</text>
+<text class="sub" x="495" y="241">trials, results, versions</text>
 </g>
-<path class="arrow" id="e-14" data-from="loop" data-to="portfolios" data-kind="quotes" d="M114,332 V358" marker-end="url(#head)"/>
-<text class="flow" data-edge="e-14" x="122" y="350">quotes</text>
-<path class="arrow" id="e-15" data-from="loop" data-to="strategies" data-kind="timer" d="M315,332 V358" marker-end="url(#head)"/>
-<text class="flow" data-edge="e-15" x="323" y="350">timer</text>
-<path class="arrow" id="e-16" data-from="loop" data-to="hedging" data-kind="timer" d="M600,332 V358" marker-end="url(#head)"/>
-<text class="flow" data-edge="e-16" x="608" y="350">timer</text>
-<g class="node core" id="n-portfolios" tabindex="0" role="img" aria-label="Portfolios">
-<desc>Option chains keyed by strike and expiry, with their quotes; each snapshot's implied vol and Greeks, Black on each expiry's put-call-parity forward (from quant).</desc>
-<rect class="box core" x="44" y="360" width="140" height="44" rx="6"/>
-<text class="title" x="114" y="379">Portfolios</text>
-<text class="sub" x="114" y="395">chains, IV, Greeks</text>
+<path class="arrow" id="e-34" d="M495,190 V204" marker-start="url(#head)" marker-end="url(#head)"/>
+<path class="arrow" id="e-35" d="M370,190 V228 H403" marker-end="url(#head)"/>
+<g class="node control" id="n-workers">
+<rect class="box control" x="425" y="286" width="140" height="44" rx="6"/>
+<text class="title" x="495" y="305">Workers</text>
+<text class="sub" x="495" y="321">all backtests</text>
 </g>
-<g class="node core" id="n-strategies" tabindex="0" role="img" aria-label="Strategies">
-<desc>One code for backtest and live: on_timer once a bar, on_order and on_trade; declared parameters; they see the engine through StrategyContext.</desc>
-<rect class="box core" x="240" y="360" width="150" height="44" rx="6"/>
-<text class="title" x="315" y="379">Strategies</text>
-<text class="sub" x="315" y="395">one code, both modes</text>
+<path class="arrow" id="e-36" d="M495,284 V268" marker-start="url(#head)" marker-end="url(#head)"/>
+<text class="flow" x="503" y="280">jobs</text>
+<g class="node control" id="n-code">
+<rect class="box control" x="20" y="286" width="190" height="44" rx="6"/>
+<text class="title" x="115" y="305">strategy/</text>
+<text class="sub" x="115" y="321">demo, research, paper, live</text>
 </g>
-<g class="node core" id="n-hedging" tabindex="0" role="img" aria-label="Hedging">
-<desc>Each strategy's delta back into its range, in whole shares of the underlying or of what trades in its place (SPY for SPX).</desc>
-<rect class="box core" x="470" y="360" width="180" height="44" rx="6"/>
-<text class="title" x="560" y="379">Hedging</text>
-<text class="sub" x="560" y="395">delta per strategy</text>
+<path class="arrow" id="e-37" d="M265,190 V308 H212" marker-end="url(#head)"/>
+<text class="flow" x="273" y="280">writes, builds</text>
+<path class="cut" d="M15,370 H43 M167,370 H433 M557,370 H608 M732,370 H853 M977,370 H1060"/>
+<text class="cut-label" x="190" y="362">THE CUT</text>
+<text class="cut-note" x="190" y="390">control plane above, core below</text>
+<path class="arrow" id="e-8" d="M670,190 V355" marker-start="url(#head)" marker-end="url(#head)"/>
+<path class="arrow" id="e-9" d="M495,330 V355" marker-end="url(#head)"/>
+<path class="arrow" id="e-38" d="M105,330 V355" marker-end="url(#head)"/>
+<path class="arrow" id="e-10" d="M915,190 V355" marker-end="url(#head)"/>
+<g class="node door-node" id="n-grpc">
+<rect class="door" x="610" y="357" width="120" height="26" rx="13"/>
+<text class="door-text" x="670" y="374.5">gRPC (live)</text>
 </g>
-<path class="arrow" id="e-17" data-from="portfolios" data-to="strategies" data-kind="read" d="M184,382 H238" marker-end="url(#head)"/>
-<text class="flow" data-edge="e-17" x="196" y="376">read</text>
-<path class="arrow" id="e-18" data-from="strategies" data-to="risk" data-kind="orders" d="M335,404 V438" marker-end="url(#head)"/>
-<text class="flow" data-edge="e-18" x="343" y="426">orders</text>
-<path class="arrow" id="e-19" data-from="hedging" data-to="risk" data-kind="orders" d="M560,404 V420 H400 V438" marker-end="url(#head)"/>
-<text class="flow" data-edge="e-19" x="568" y="416">orders</text>
-<g class="node core" id="n-risk" tabindex="0" role="img" aria-label="Risk">
-<desc>Every order passes it first, the same in a backtest: size, position, premium, price band, the spread for a market order, no naked shorts, closing 0DTE options settled in shares before the close; the operator's halt lets through only what reduces a holding. Refusals are counted and kept.</desc>
-<rect class="box core" x="280" y="440" width="140" height="44" rx="6"/>
-<text class="title" x="350" y="459">Risk</text>
-<text class="sub" x="350" y="475">limits, the halt</text>
+<g class="node door-node" id="n-cli">
+<rect class="door" x="435" y="357" width="120" height="26" rx="13"/>
+<text class="door-text" x="495" y="374.5">CLI (backtest)</text>
 </g>
-<path class="arrow" id="e-20" data-from="risk" data-to="execution" data-kind="orders" d="M420,462 H478" marker-end="url(#head)"/>
-<g class="node core" id="n-execution" tabindex="0" role="img" aria-label="Execution">
-<desc>An allowed order goes to the venue and is tracked as its strategy&#8217;s until it is done. Each update is merged into the order: a repeat or an older one changes nothing, an end is final, and an end waits until the order&#8217;s fills are booked (10 s at most). A fill IB repeats is dropped, so each is booked once, whatever order they arrive in.</desc>
-<rect class="box core" x="480" y="440" width="170" height="44" rx="6"/>
-<text class="title" x="565" y="459">Execution</text>
-<text class="sub" x="565" y="475">send, merge, dedupe</text>
+<g class="node door-node" id="n-load">
+<rect class="door" x="45" y="357" width="120" height="26" rx="13"/>
+<text class="door-text" x="105" y="374.5">libraries</text>
 </g>
-<path class="arrow" id="e-21" data-from="loop" data-to="execution" data-kind="fills" d="M650,322 H664 V452 H652" marker-end="url(#head)"/>
-<text class="flow end" data-edge="e-21" x="660" y="432">fills</text>
-<path class="arrow" id="e-22" data-from="portfolios" data-to="positions" data-kind="read" d="M114,404 V518" marker-end="url(#head)"/>
-<text class="flow" data-edge="e-22" x="122" y="470">marks</text>
-<path class="arrow" id="e-23" data-from="execution" data-to="positions" data-kind="fills" d="M540,484 V545 H392" marker-end="url(#head)"/>
-<text class="flow" data-edge="e-23" x="548" y="512">fills</text>
-<path class="arrow" id="e-24" data-from="positions" data-to="strategies" data-kind="fills" d="M260,520 V406" marker-end="url(#head)"/>
-<text class="flow" data-edge="e-24" x="268" y="506">holding, fills</text>
-<g class="node core" id="n-positions" tabindex="0" role="img" aria-label="Positions">
-<desc>Holdings, P&amp;L and Greeks per strategy, a combo held as its legs (its quantity from theirs), the P&amp;L split by source (delta, gamma, theta, vega, other, fills against the mid), checked against the broker's positions before a strategy may start; options held past their expiry settled at the close, in cash or in shares.</desc>
-<rect class="box core" x="44" y="520" width="346" height="44" rx="6"/>
-<text class="title" x="217" y="539">Positions</text>
-<text class="sub" x="217" y="555">per strategy, vs broker</text>
+<g class="node door-node" id="n-cabi">
+<rect class="door" x="855" y="357" width="120" height="26" rx="13"/>
+<text class="door-text" x="915" y="374.5">C ABI, isolated</text>
 </g>
-<text class="note" x="44" y="590">A timer tick: settle expired options &#8594; strategies &#8594; position metrics &#8594; hedges.</text>
-<rect class="port" x="676" y="281" width="68" height="18" rx="4"/>
-<text class="port-text" x="710" y="293.5">market data</text>
-<rect class="port" x="676" y="461" width="68" height="18" rx="4"/>
-<text class="port-text" x="710" y="473.5">venue</text>
-<rect class="port" x="676" y="531" width="68" height="18" rx="4"/>
-<text class="port-text" x="710" y="543.5">storage</text>
-<text class="group infra" x="815" y="258"><tspan class="dot">&#9679;</tspan>&#8202; ADAPTERS</text>
-<g class="node infra" id="n-marketdata" tabindex="0" role="img" aria-label="Market data">
-<desc>Live: IB quotes into a quote book, a snapshot of each changed portfolio, each minute recorded for a backtest of the day and the screener&#8217;s chains. Backtest: a day from Parquet, its snapshots computed before the run.</desc>
-<rect class="box infra" x="815" y="268" width="245" height="44" rx="6"/>
-<text class="title" x="937.5" y="287">Market data</text>
-<text class="sub" x="937.5" y="303">IB live, Parquet backtest</text>
+<path class="arrow" id="e-11" d="M670,383 V420" marker-end="url(#head)"/>
+<path class="arrow" id="e-12" d="M495,383 V420" marker-end="url(#head)"/>
+<path class="arrow" id="e-39" d="M105,383 V552" marker-end="url(#head)"/>
+<path class="arrow" id="e-13" d="M975,370 H1045 V856 H1017" marker-end="url(#head)"/>
+<text class="group core end" x="652" y="416"><tspan class="dot">&#9679;</tspan>&#8202; CORE</text>
+<g class="node core" id="n-engine">
+<rect class="box core frame" x="30" y="422" width="720" height="376" rx="10"/>
+<text class="title" x="417" y="442">Engine</text>
+<text class="sub" x="417" y="458">one code path, two assemblies; adapters plug into its ports</text>
 </g>
-<g class="node infra" id="n-broker" tabindex="0" role="img" aria-label="Broker gateway">
-<desc>Live: Interactive Brokers through the TWS API, one named paper account. Backtest: orders fill at the next bar&#8217;s quotes. Either way a fill is one contract&#8217;s: a combo fills as its legs.</desc>
-<rect class="box infra" x="815" y="448" width="245" height="44" rx="6"/>
-<text class="title" x="937.5" y="467">Broker gateway</text>
-<text class="sub" x="937.5" y="483">IB live, simulated backtest</text>
+<g class="node core" id="n-loop">
+<rect class="box core" x="214" y="474" width="406" height="52" rx="6"/>
+<text class="title" x="417" y="497">Event loop</text>
+<text class="sub" x="417" y="513">one writer; fills never dropped</text>
 </g>
-<g class="node infra" id="n-sqlite" tabindex="0" role="img" aria-label="SQLite">
-<desc>Contracts, strategies, orders and fills, written by a thread of its own; a restart replays the orders and fills into the holdings. In memory for a backtest.</desc>
-<rect class="box infra" x="815" y="518" width="245" height="44" rx="6"/>
-<text class="title" x="937.5" y="537">SQLite</text>
-<text class="sub" x="937.5" y="553">orders and fills, replayed</text>
+<path class="arrow" id="e-14" d="M315,526 V552" marker-end="url(#head)"/>
+<text class="flow" x="323" y="544">quotes</text>
+<path class="arrow" id="e-15" d="M214,500 H165 V552" marker-end="url(#head)"/>
+<text class="flow" x="173" y="544">timer</text>
+<g class="node core" id="n-strategies">
+<rect class="box core" x="44" y="554" width="156" height="44" rx="6"/>
+<text class="title" x="122" y="573">Strategies</text>
+<text class="sub" x="122" y="589">libraries; their hedges</text>
 </g>
-<path class="arrow" id="e-25" data-from="marketdata" data-to="loop" data-kind="quotes" d="M815,290 H746" marker-end="url(#head)"/>
-<text class="flow" data-edge="e-25" x="752" y="284">quotes</text>
-<path class="arrow" id="e-26" data-from="marketdata" data-to="loop" data-kind="quotes" d="M676,290 H652" marker-end="url(#head)"/>
-<path class="arrow" id="e-27" data-from="execution" data-to="broker" data-kind="orders" d="M650,470 H674" marker-end="url(#head)"/>
-<path class="arrow" id="e-28" data-from="execution" data-to="broker" data-kind="orders" d="M746,470 H813" marker-start="url(#head)" marker-end="url(#head)"/>
-<text class="flow" data-edge="e-28" x="750" y="463">orders, fills</text>
-<path class="arrow" id="e-29" data-from="broker" data-to="loop" data-kind="fills" d="M700,461 V306 H652" marker-end="url(#head)"/>
-<text class="flow end" data-edge="e-29" x="696" y="392">fills</text>
-<path class="arrow" id="e-30" data-from="execution" data-to="sqlite" data-kind="store" d="M620,484 V540 H674" marker-end="url(#head)"/>
-<path class="arrow" id="e-31" data-from="execution" data-to="sqlite" data-kind="store" d="M746,540 H813" marker-end="url(#head)"/>
-<text class="flow" data-edge="e-31" x="758" y="534">saved</text>
-<text class="group lab end" x="650" y="630"><tspan class="dot">&#9679;</tspan>&#8202; QUANT</text>
-<g class="node lab" id="n-quant" tabindex="0" role="img" aria-label="quant">
-<desc>The numerics, one library for the trading engine and the research tools: Black and Black-Scholes, Greeks, implied vol by LetsBeRational, Monte Carlo, binomial and trinomial trees, finite differences, Longstaff-Schwartz, Heston, the option screener. Parallel with OpenMP, the same result at any thread count.</desc>
-<rect class="box lab" x="44" y="640" width="606" height="44" rx="6"/>
-<text class="title" x="347" y="659">quant</text>
-<text class="sub" x="347" y="675">pricing, IV, Greeks, MC, PDE, Heston</text>
+<g class="node core" id="n-portfolios">
+<rect class="box core" x="240" y="554" width="150" height="44" rx="6"/>
+<text class="title" x="315" y="573">Portfolios</text>
+<text class="sub" x="315" y="589">chains, IV, Greeks</text>
 </g>
-<g class="node lab" id="n-analytics" tabindex="0" role="img" aria-label="quant/analytics">
-<desc>The research workflows on quant (pricing every way at once, scenarios, hedging, validation, calibration, the screener) as JSON requests and responses, behind the C ABI.</desc>
-<rect class="box lab" x="815" y="640" width="245" height="44" rx="6"/>
-<text class="title" x="937.5" y="659">quant/analytics</text>
-<text class="sub" x="937.5" y="675">research workflows, C ABI</text>
+<path class="arrow" id="e-17" d="M240,576 H202" marker-end="url(#head)"/>
+<text class="flow" x="207" y="570">read</text>
+<path class="arrow" id="e-18" d="M160,598 V656 H468" marker-end="url(#head)"/>
+<text class="flow" x="168" y="630">orders, hedges</text>
+<g class="node core" id="n-risk">
+<rect class="box core" x="470" y="634" width="150" height="44" rx="6"/>
+<text class="title" x="545" y="653">Risk</text>
+<text class="sub" x="545" y="669">limits, the halt</text>
 </g>
-<path class="arrow" id="e-32" data-from="quant" data-to="portfolios" data-kind="lab" d="M70,640 V618 H18 V382 H42" marker-end="url(#head)"/>
-<text class="flow" data-edge="e-32" x="78" y="630">IV, Greeks</text>
-<path class="arrow" id="e-33" data-from="analytics" data-to="quant" data-kind="lab" d="M815,662 H652" marker-end="url(#head)"/>
+<path class="arrow" id="e-21" d="M440,526 V650 A6,6 0 0 1 440,662 V712" marker-end="url(#head)"/>
+<text class="flow" x="448" y="704">fills</text>
+<path class="arrow" id="e-22" d="M255,598 V650 A6,6 0 0 1 255,662 V712" marker-end="url(#head)"/>
+<text class="flow" x="200" y="704">marks</text>
+<path class="arrow" id="e-24" d="M80,714 V600" marker-end="url(#head)"/>
+<text class="flow" x="88" y="704">holding, fills</text>
+<g class="node core" id="n-bookkeeping">
+<rect class="box core" x="44" y="714" width="576" height="44" rx="6"/>
+<text class="title" x="332" y="733">Bookkeeping</text>
+<text class="sub" x="332" y="749">orders, fills, holdings per strategy; vs broker</text>
+</g>
+<text class="note" x="44" y="784">A timer tick: settle expired options &#8594; close what settles in shares &#8594; strategies &#8594; marks &#8594; hedges.</text>
+<rect class="port" x="716" y="475" width="68" height="18" rx="4"/>
+<text class="port-text" x="750" y="487.5">market data</text>
+<rect class="port" x="716" y="655" width="68" height="18" rx="4"/>
+<text class="port-text" x="750" y="667.5">venue</text>
+<rect class="port" x="716" y="725" width="68" height="18" rx="4"/>
+<text class="port-text" x="750" y="737.5">storage</text>
+<text class="group infra" x="815" y="452"><tspan class="dot">&#9679;</tspan>&#8202; ADAPTERS</text>
+<g class="node infra" id="n-marketdata">
+<rect class="box infra" x="815" y="462" width="200" height="44" rx="6"/>
+<text class="title" x="915" y="481">Market data</text>
+<text class="sub" x="915" y="497">IB live, a simulated market</text>
+</g>
+<g class="node infra" id="n-broker">
+<rect class="box infra" x="815" y="642" width="200" height="44" rx="6"/>
+<text class="title" x="915" y="661">Broker gateway</text>
+<text class="sub" x="915" y="677">IB, backtest, simulated</text>
+</g>
+<g class="node infra" id="n-sqlite">
+<rect class="box infra" x="815" y="712" width="200" height="44" rx="6"/>
+<text class="title" x="915" y="731">SQLite</text>
+<text class="sub" x="915" y="747">orders and fills, replayed</text>
+</g>
+<path class="arrow" id="e-25" d="M815,484 H786" marker-end="url(#head)"/>
+<path class="arrow" id="e-26" d="M716,484 H622" marker-end="url(#head)"/>
+<path class="arrow" id="e-27" d="M620,664 H714" marker-end="url(#head)"/>
+<path class="arrow" id="e-28" d="M786,664 H813" marker-start="url(#head)" marker-end="url(#head)"/>
+<path class="arrow" id="e-29" d="M740,655 V500 H622" marker-end="url(#head)"/>
+<text class="flow end" x="736" y="586">fills</text>
+<path class="arrow" id="e-30" d="M620,734 H714" marker-end="url(#head)"/>
+<path class="arrow" id="e-31" d="M786,734 H813" marker-end="url(#head)"/>
+<text class="group lab end" x="620" y="824"><tspan class="dot">&#9679;</tspan>&#8202; QUANT</text>
+<g class="node lab" id="n-quant">
+<rect class="box lab" x="44" y="834" width="576" height="44" rx="6"/>
+<text class="title" x="332" y="853">quant</text>
+<text class="sub" x="332" y="869">pricing, IV, Greeks, MC, PDE, Heston</text>
+</g>
+<g class="node lab" id="n-analytics">
+<rect class="box lab" x="815" y="834" width="200" height="44" rx="6"/>
+<text class="title" x="915" y="853">quant/analytics</text>
+<text class="sub" x="915" y="869">research workflows, C ABI</text>
+</g>
+<path class="arrow" id="e-32" d="M347,834 V800" marker-end="url(#head)"/>
+<text class="flow" x="355" y="822">IV, Greeks, pricing</text>
+<path class="arrow" id="e-33" d="M815,856 H622" marker-end="url(#head)"/>
 </svg>
-<div class="tip" id="arch-tip" role="status" aria-live="polite" hidden></div>
 </div>
 </div>
-<p class="hint"><span class="narrow">Scroll sideways for the whole diagram. </span><span class="js-only">Click a box (or tab to it and press Enter) to see what it does and what it touches.</span></p>
-
-<section class="notes">
-<h2>How it holds together</h2>
-<ul>
-  <li><h3>The control plane only asks</h3><p>It holds no trading state and never opens the engine&#8217;s database: every question and every change goes through gRPC.</p></li>
-  <li><h3>One writer</h3><p>One event thread owns strategies, holdings and orders. Fills and commands reach it in order and are never dropped; quotes keep only the newest; logs and socket writes run off it.</p></li>
-  <li><h3>One engine, two assemblies</h3><p>A strategy is written once, and so is the engine: backtest and live differ in the ports only (event loop, clock, venue, storage, and live&#8217;s market data).</p></li>
-  <li><h3>Each fill booked once</h3><p>Execution merges each order update and drops a fill it has seen; an order&#8217;s end waits for its fills, so the holding does not depend on the order IB reports in. Positions update the holding, then the strategy hears of it. Every order and fill is saved; a restart replays them, and a strategy starts only once its positions agree with the broker&#8217;s.</p></li>
-  <li><h3>One set of numerics, one set of data</h3><p>The implied vol and Greeks the engine trades on and the research tools&#8217; pricing are the same code, quant: the engine links it, the server reaches it through a C ABI. The screener reads the engine&#8217;s backtest and recorded days, a pick is backtested as a rule over every day, and the live holdings can be stressed.</p></li>
-  <li><h3>The day runs itself</h3><p>The scheduler restarts the engine before the open, asks the server for a check every five minutes and for the day&#8217;s report after the close; the report replays the recorded day in a backtest and lines the paper fills up against it.</p></li>
-</ul>
+<p class="hint">Scroll sideways for the whole diagram.</p>
+</section>
+<section class="view view-live" aria-label="Live trading">
+<div class="diagram">
+<div class="canvas">
+<svg id="live" role="img" aria-label="Live trading: a quote's way to an order and its fill" viewBox="0 0 1100 610">
+<defs><marker id="head4" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="head" d="M1,1.5 L8.5,5 L1,8.5"/></marker></defs>
+<rect class="box" x="40" y="10" width="470" height="44" rx="6"/>
+<text class="title" x="275" y="29">Interactive Brokers</text>
+<text class="sub" x="275" y="45">IB Gateway: quotes stream in, orders out, fills back</text>
+<rect class="box" x="540" y="10" width="220" height="44" rx="6"/>
+<text class="title" x="650" y="29">SQLite</text>
+<text class="sub" x="650" y="45">orders and fills, replayed on restart</text>
+<rect class="box" x="840" y="10" width="220" height="44" rx="6"/>
+<text class="title" x="950" y="29">Server</text>
+<text class="sub" x="950" y="45">the day's steps, the operator</text>
+<path class="arrow" d="M150,54 V98" marker-end="url(#head4)"/>
+<text class="flow" x="158" y="80">quotes</text>
+<path class="arrow" d="M400,56 V98" marker-start="url(#head4)" marker-end="url(#head4)"/>
+<text class="flow" x="408" y="80">orders, fills</text>
+<path class="arrow" d="M650,98 V56" marker-end="url(#head4)"/>
+<text class="flow" x="658" y="80">saved</text>
+<path class="arrow" d="M950,56 V98" marker-start="url(#head4)" marker-end="url(#head4)"/>
+<text class="flow" x="958" y="80">gRPC</text>
+<text class="group infra" x="40" y="92"><tspan class="dot">&#9679;</tspan>&#8202; ADAPTERS</text>
+<rect class="box infra" x="40" y="100" width="220" height="44" rx="6"/>
+<text class="title" x="150" y="119">Market-data thread</text>
+<text class="sub" x="150" y="135">a batch of quotes, priced at once</text>
+<rect class="box infra" x="290" y="100" width="220" height="44" rx="6"/>
+<text class="title" x="400" y="119">Order thread</text>
+<text class="sub" x="400" y="135">orders out; fills, updates in</text>
+<rect class="box infra" x="540" y="100" width="220" height="44" rx="6"/>
+<text class="title" x="650" y="119">Database thread</text>
+<text class="sub" x="650" y="135">orders and fills, in batches</text>
+<rect class="box control" x="840" y="100" width="220" height="44" rx="6"/>
+<text class="title" x="950" y="119">gRPC threads</text>
+<text class="sub" x="950" y="135">a command, run on the event thread</text>
+<path class="arrow" d="M150,144 V238" marker-end="url(#head4)"/>
+<text class="flow" x="158" y="172">priced snapshots</text>
+<path class="arrow" d="M400,146 V238" marker-start="url(#head4)" marker-end="url(#head4)"/>
+<text class="flow" x="408" y="172">orders out, fills in</text>
+<path class="arrow" d="M650,238 V146" marker-end="url(#head4)"/>
+<text class="flow" x="658" y="172">to save</text>
+<path class="arrow" d="M950,146 V238" marker-start="url(#head4)" marker-end="url(#head4)"/>
+<text class="flow" x="958" y="172">run, answered</text>
+<text class="group core end" x="900" y="186"><tspan class="dot">&#9679;</tspan>&#8202; CORE: THE ENGINE</text>
+<rect class="box core frame" x="30" y="194" width="1040" height="296" rx="10"/>
+<rect class="box core" x="60" y="240" width="980" height="52" rx="6"/>
+<text class="title" x="550" y="263">Event thread</text>
+<text class="sub" x="550" y="279">the only writer of trading state: one event after another, no locks, never waits</text>
+<path class="arrow" d="M170,292 V328" marker-end="url(#head4)"/>
+<text class="flow" x="178" y="314">applied</text>
+<path class="arrow" d="M950,292 V328" marker-end="url(#head4)"/>
+<text class="flow" x="958" y="314">booked</text>
+<rect class="box core" x="60" y="330" width="220" height="44" rx="6"/>
+<text class="title" x="170" y="349">Portfolios</text>
+<text class="sub" x="170" y="365">the snapshot taken over, not copied</text>
+<rect class="box core" x="340" y="330" width="220" height="44" rx="6"/>
+<text class="title" x="450" y="349">Strategies</text>
+<text class="sub" x="450" y="365">on each snapshot and tick: decide</text>
+<rect class="box core" x="630" y="330" width="170" height="44" rx="6"/>
+<text class="title" x="715" y="349">Risk</text>
+<text class="sub" x="715" y="365">every order checked</text>
+<rect class="box core" x="860" y="330" width="180" height="44" rx="6"/>
+<text class="title" x="950" y="349">Bookkeeping</text>
+<text class="sub" x="950" y="365">orders, fills, holdings, P&amp;L</text>
+<path class="arrow" d="M280,352 H338" marker-end="url(#head4)"/>
+<text class="flow" x="292" y="345">read</text>
+<path class="arrow" d="M560,352 H628" marker-end="url(#head4)"/>
+<text class="flow" x="572" y="345">orders</text>
+<path class="arrow" d="M715,330 V294" marker-end="url(#head4)"/>
+<text class="flow" x="723" y="314">sent</text>
+<path class="arrow" d="M950,374 V396 H450 V376" marker-end="url(#head4)"/>
+<text class="flow" x="458" y="390">fills, the holding</text>
+<text class="note" x="60" y="430">The day, New York time: at 8:45 the day's contracts are rolled in; at the close expired options settle and working</text>
+<text class="note" x="60" y="448">orders are cancelled; on connect the holdings are checked against the broker's account.</text>
+<text class="note" x="60" y="474">p50 on a shared laptop, broker stand-in: a tick to a decision 26 µs, to the fill back at the strategy 62 µs.</text>
+<text class="group lab" x="40" y="526"><tspan class="dot">&#9679;</tspan>&#8202; QUANT</text>
+<rect class="box lab" x="40" y="536" width="470" height="44" rx="6"/>
+<text class="title" x="275" y="555">quant</text>
+<text class="sub" x="275" y="571">IV and Greeks, only what moved, on a pool of threads</text>
+<path class="arrow" d="M150,534 V496" marker-end="url(#head4)"/>
+<text class="flow" x="158" y="516">pricing</text>
+</svg>
+</div>
+</div>
+<p class="hint">Scroll sideways for the whole diagram.</p>
+</section>
+<section class="view view-backtest" aria-label="Backtests">
+<div class="diagram">
+<div class="canvas">
+<svg id="backtest" role="img" aria-label="Backtests: from the data to a trial's result" viewBox="0 0 1100 690">
+<defs><marker id="head5" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="head" d="M1,1.5 L8.5,5 L1,8.5"/></marker></defs>
+<text class="group infra" x="40" y="22"><tspan class="dot">&#9679;</tspan>&#8202; DATA, THREE TIERS</text>
+<rect class="box infra" x="40" y="30" width="280" height="44" rx="6"/>
+<text class="title" x="180" y="49">Downloads</text>
+<text class="sub" x="180" y="65">as delivered; read only to convert</text>
+<rect class="box infra" x="410" y="30" width="280" height="44" rx="6"/>
+<text class="title" x="550" y="49">Backtest days</text>
+<text class="sub" x="550" y="65">a Parquet file a day, a row group an expiry</text>
+<rect class="box infra" x="780" y="30" width="280" height="44" rx="6"/>
+<text class="title" x="920" y="49">Day cache</text>
+<text class="sub" x="920" y="65">a day's contracts; each chain priced, as read</text>
+<path class="arrow" d="M320,52 H408" marker-end="url(#head5)"/>
+<text class="flow" x="334" y="45">converted</text>
+<path class="arrow" d="M690,52 H778" marker-end="url(#head5)"/>
+<text class="flow" x="704" y="45">first read</text>
+<text class="note" x="40" y="98">Nothing is lost on the way: each tier reads back bit for bit. SPY, 1,706 days: 36 GB delivered, 22 GB of days; a day's 0DTE chain cached, 3.7 MB.</text>
+<path class="arrow" d="M920,74 V194" marker-end="url(#head5)"/>
+<text class="flow" x="928" y="128">mapped, not copied</text>
+<text class="group core" x="40" y="140"><tspan class="dot">&#9679;</tspan>&#8202; CORE</text>
+<rect class="box core frame" x="30" y="148" width="1040" height="324" rx="10"/>
+<text class="title" x="550" y="168">entry_backtest, a batch</text>
+<text class="sub" x="550" y="184">many trials over the same days: each day read and priced once for all of them</text>
+<rect class="box core" x="780" y="196" width="260" height="44" rx="6"/>
+<text class="title" x="910" y="215">Day loader</text>
+<text class="sub" x="910" y="231">days ahead; chains as they are asked for</text>
+<rect class="box core" x="410" y="196" width="280" height="44" rx="6"/>
+<text class="title" x="550" y="215">A day</text>
+<text class="sub" x="550" y="231">its listing built once; a block a chain</text>
+<rect class="box core" x="60" y="196" width="260" height="44" rx="6"/>
+<text class="title" x="190" y="215">Thread groups</text>
+<text class="sub" x="190" y="231">the trials shared out over the cores</text>
+<path class="arrow" d="M780,218 H692" marker-end="url(#head5)"/>
+<text class="flow" x="716" y="211">ahead</text>
+<path class="arrow" d="M410,218 H322" marker-end="url(#head5)"/>
+<text class="flow" x="344" y="211">shared</text>
+<path class="arrow" d="M190,240 V288" marker-end="url(#head5)"/>
+<rect class="box core" x="60" y="290" width="260" height="44" rx="6"/>
+<text class="title" x="190" y="309">Replay</text>
+<text class="sub" x="190" y="325">a day rolled in once; a minute copied in</text>
+<rect class="box core" x="410" y="290" width="280" height="44" rx="6"/>
+<text class="title" x="550" y="309">Engines</text>
+<text class="sub" x="550" y="325">one a trial: the live code, the same order</text>
+<rect class="box core" x="780" y="290" width="260" height="44" rx="6"/>
+<text class="title" x="910" y="309">Results</text>
+<text class="sub" x="910" y="325">days and round trips, a column each</text>
+<path class="arrow" d="M320,312 H408" marker-end="url(#head5)"/>
+<text class="flow" x="336" y="305">a minute</text>
+<path class="arrow" d="M690,312 H778" marker-end="url(#head5)"/>
+<text class="flow" x="700" y="305">a line a trial</text>
+<rect class="box core" x="460" y="384" width="240" height="44" rx="6"/>
+<text class="title" x="580" y="403">Backtest venue</text>
+<text class="sub" x="580" y="419">fills at the next bar, at its costs</text>
+<path class="arrow" d="M580,336 V382" marker-start="url(#head5)" marker-end="url(#head5)"/>
+<text class="flow" x="588" y="364">orders, fills</text>
+<text class="note" x="60" y="456">SPY, 200 days from the cache, on this laptop: 1 trial 1.2 s, 512 trials 12 s.</text>
+<text class="group lab" x="60" y="376"><tspan class="dot">&#9679;</tspan>&#8202; QUANT</text>
+<rect class="box lab" x="60" y="384" width="260" height="44" rx="6"/>
+<text class="title" x="190" y="403">Pricing</text>
+<text class="sub" x="190" y="419">IV once a minute; Greeks when asked</text>
+<path class="arrow" d="M320,406 H440 V336" marker-end="url(#head5)"/>
+<text class="flow" x="336" y="400">Greeks</text>
+<text class="group control" x="40" y="508"><tspan class="dot">&#9679;</tspan>&#8202; CONTROL PLANE</text>
+<rect class="box control" x="40" y="516" width="280" height="44" rx="6"/>
+<text class="title" x="180" y="535">Jobs</text>
+<text class="sub" x="180" y="551">queued; the same days run as one batch</text>
+<rect class="box control" x="410" y="516" width="280" height="44" rx="6"/>
+<text class="title" x="550" y="535">Workers</text>
+<text class="sub" x="550" y="551">run each batch, memory capped</text>
+<rect class="box control" x="780" y="516" width="280" height="44" rx="6"/>
+<text class="title" x="920" y="535">Ledger</text>
+<text class="sub" x="920" y="551">a row a trial, as the engine wrote it</text>
+<path class="arrow" d="M320,538 H408" marker-end="url(#head5)"/>
+<path class="arrow" d="M480,514 V474" marker-end="url(#head5)"/>
+<text class="flow" x="488" y="496">a batch</text>
+<path class="arrow" d="M910,336 V514" marker-end="url(#head5)"/>
+<text class="flow" x="918" y="496">lines</text>
+<rect class="box control" x="780" y="616" width="280" height="44" rx="6"/>
+<text class="title" x="920" y="635">The sums, once</text>
+<text class="sub" x="920" y="651">net, Sharpe, drawdown: page, research, agents</text>
+<path class="arrow" d="M920,560 V614" marker-end="url(#head5)"/>
+<text class="flow" x="928" y="594">summed in one place</text>
+</svg>
+</div>
+</div>
+<p class="hint">Scroll sideways for the whole diagram.</p>
+</section>
+<section class="view view-research" aria-label="The research loop">
+<div class="diagram">
+<div class="canvas">
+<svg id="research" role="img" aria-label="The research loop" viewBox="0 0 1100 604">
+<defs><marker id="head3" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="head" d="M1,1.5 L8.5,5 L1,8.5"/></marker><marker id="head3p" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="head-planned" d="M1,1.5 L8.5,5 L1,8.5"/></marker></defs>
+<rect class="box outside" x="45" y="10" width="185" height="44" rx="6"/>
+<text class="title" x="137.5" y="29">Agent</text>
+<text class="sub" x="137.5" y="45">tools only, never orders</text>
+<rect class="box todo" x="250" y="10" width="185" height="44" rx="6"/>
+<text class="title" x="342.5" y="29">Research factory</text>
+<text class="sub" x="342.5" y="45">four roles, scheduled, capped</text>
+<rect class="box todo" x="865" y="10" width="185" height="44" rx="6"/>
+<text class="title" x="957.5" y="29">Demotion</text>
+<text class="sub" x="957.5" y="45">automatic, off its forecast</text>
+<path class="arrow" d="M249,32.0 H232" marker-end="url(#head3)"/>
+<text class="group control" x="455" y="86"><tspan class="dot">&#9679;</tspan>&#8202; CONTROL PLANE</text>
+<rect class="box control" x="45" y="96" width="185" height="44" rx="6"/>
+<text class="title" x="137.5" y="115">Strategy card</text>
+<text class="sub" x="137.5" y="131">hypothesis, family budget</text>
+<rect class="box control" x="250" y="96" width="185" height="44" rx="6"/>
+<text class="title" x="342.5" y="115">Write</text>
+<text class="sub" x="342.5" y="131">one .cpp, built alone</text>
+<rect class="box control" x="455" y="96" width="185" height="44" rx="6"/>
+<text class="title" x="547.5" y="115">Experiment</text>
+<text class="sub" x="547.5" y="131">settings, days, costs, fills</text>
+<rect class="box control" x="660" y="96" width="185" height="44" rx="6"/>
+<text class="title" x="752.5" y="115">Ledger</text>
+<text class="sub" x="752.5" y="131">registered before it runs</text>
+<rect class="box control" x="865" y="96" width="185" height="44" rx="6"/>
+<text class="title" x="957.5" y="115">Paper, pilot, live</text>
+<text class="sub" x="957.5" y="131">the person approves each</text>
+<rect class="box control" x="45" y="166" width="185" height="44" rx="6"/>
+<text class="title" x="137.5" y="185">Replay</text>
+<text class="sub" x="137.5" y="201">the trial again: why it lost</text>
+<rect class="box control" x="250" y="166" width="185" height="44" rx="6"/>
+<text class="title" x="342.5" y="185">Version</text>
+<text class="sub" x="342.5" y="201">frozen setting, code, card</text>
+<rect class="box control" x="455" y="166" width="185" height="44" rx="6"/>
+<text class="title" x="547.5" y="185">Review</text>
+<text class="sub" x="547.5" y="201">DSR, PBO, 300 trades, robust</text>
+<rect class="box control" x="865" y="166" width="185" height="44" rx="6"/>
+<text class="title" x="957.5" y="185">Holdout report</text>
+<text class="sub" x="957.5" y="201">once a version, by the system</text>
+<path class="arrow" d="M231,118.0 H248" marker-end="url(#head3)"/>
+<path class="arrow" d="M436,118.0 H453" marker-end="url(#head3)"/>
+<path class="arrow" d="M641,118.0 H658" marker-end="url(#head3)"/>
+<path class="arrow" d="M436,188.0 H453" marker-end="url(#head3)"/>
+<path class="arrow" d="M641,188.0 H863" marker-end="url(#head3)"/>
+<path class="arrow" d="M137.5,55 V94" marker-end="url(#head3)"/>
+<path class="arrow" d="M177.5,165 V142" marker-end="url(#head3)"/>
+<text class="flow" x="185.5" y="157">the next idea</text>
+<path class="arrow" d="M957.5,165 V142" marker-end="url(#head3)"/>
+<text class="flow" x="965.5" y="157">passes</text>
+<path class="planned" d="M957.5,95 V56" marker-end="url(#head3p)"/>
+<text class="group core" x="455" y="364"><tspan class="dot">&#9679;</tspan>&#8202; CORE</text>
+<rect class="box core" x="455" y="374" width="185" height="44" rx="6"/>
+<text class="title" x="547.5" y="393">Control</text>
+<text class="sub" x="547.5" y="409">random buying, same days</text>
+<rect class="box core" x="660" y="374" width="185" height="44" rx="6"/>
+<text class="title" x="752.5" y="393">Batch engine</text>
+<text class="sub" x="752.5" y="409">a day priced once, cached</text>
+<path class="arrow" d="M641,396.0 H658" marker-end="url(#head3)"/>
+<path class="arrow" d="M752.5,141 V372" marker-start="url(#head3)" marker-end="url(#head3)"/>
+<text class="flow" x="760.5" y="334">jobs, results</text>
+<text class="group infra end" x="1050" y="236"><tspan class="dot">&#9679;</tspan>&#8202; DATA</text>
+<rect class="box infra" x="865" y="246" width="185" height="44" rx="6"/>
+<text class="title" x="957.5" y="265">Holdout days</text>
+<text class="sub" x="957.5" y="281">2026-04 on, sealed</text>
+<rect class="box infra" x="865" y="310" width="185" height="44" rx="6"/>
+<text class="title" x="957.5" y="329">Downloads</text>
+<text class="sub" x="957.5" y="345">checked, one format</text>
+<rect class="box infra" x="865" y="374" width="185" height="44" rx="6"/>
+<text class="title" x="957.5" y="393">Research days</text>
+<text class="sub" x="957.5" y="409">2020-01 to 2026-03</text>
+<path class="arrow" d="M957.5,309 V292" marker-end="url(#head3)"/>
+<path class="arrow" d="M957.5,355 V372" marker-end="url(#head3)"/>
+<path class="arrow" d="M957.5,245 V212" marker-end="url(#head3)"/>
+<text class="flow end" x="949.5" y="234">the sealed days</text>
+<path class="arrow" d="M864,396.0 H847" marker-end="url(#head3)"/>
+<text class="group lab" x="40" y="450"><tspan class="dot">&#9679;</tspan>&#8202; QUANT</text>
+<rect class="box lab" x="45" y="474" width="185" height="44" rx="6"/>
+<text class="title" x="137.5" y="493">DSR</text>
+<text class="sub" x="137.5" y="509">luck of N tries removed: &gt; 0.95</text>
+<rect class="box lab" x="250" y="474" width="185" height="44" rx="6"/>
+<text class="title" x="342.5" y="493">PBO</text>
+<text class="sub" x="342.5" y="509">best in sample, out? &lt; 0.2</text>
+<rect class="box lab" x="455" y="474" width="185" height="44" rx="6"/>
+<text class="title" x="547.5" y="493">Walk-forward</text>
+<text class="sub" x="547.5" y="509">pick on 1/3, trade the next 1/6</text>
+<rect class="box lab" x="660" y="474" width="185" height="44" rx="6"/>
+<text class="title" x="752.5" y="493">Against the control</text>
+<text class="sub" x="752.5" y="509">R a trade above random</text>
+<rect class="box lab" x="865" y="474" width="185" height="44" rx="6"/>
+<text class="title" x="957.5" y="493">Describe</text>
+<text class="sub" x="957.5" y="509">0DTE implied vs realized move</text>
+<rect class="box lab" x="45" y="544" width="595" height="44" rx="6"/>
+<text class="title" x="342.5" y="563">More than luck?</text>
+<text class="sub" x="342.5" y="579">and with costs ×2, parameters ±20%, late fills</text>
+<rect class="box lab" x="660" y="544" width="185" height="44" rx="6"/>
+<text class="title" x="752.5" y="563">Exam</text>
+<text class="sub" x="752.5" y="579">noise fails, an edge passes</text>
+<rect class="box todo" x="865" y="544" width="185" height="44" rx="6"/>
+<text class="title" x="957.5" y="563">Dealer gamma</text>
+<text class="sub" x="957.5" y="579">from open interest, next</text>
+<path class="arrow" d="M957.5,419 V472" marker-end="url(#head3)"/>
+<path class="planned" d="M957.5,543 V520" marker-end="url(#head3p)"/>
+<path class="arrow" d="M752.5,419 V460 H137.5 V472" marker-end="url(#head3)"/>
+<path class="arrow" d="M342.5,460 V472" marker-end="url(#head3)"/>
+<path class="arrow" d="M547.5,460 V472" marker-end="url(#head3)"/>
+<path class="arrow" d="M752.5,460 V472" marker-end="url(#head3)"/>
+<text class="flow" x="760.5" y="440">trials × days</text>
+<path class="arrow" d="M137.5,519 V531 H752.5 V519 M342.5,519 V531 M547.5,519 V531"/>
+<path class="arrow" d="M342.5,531 V542" marker-end="url(#head3)"/>
+<path class="arrow" d="M659,566.0 H642" marker-end="url(#head3)"/>
+<path class="arrow" d="M44,558 H28 V230 H342.5 V212" marker-end="url(#head3)"/>
+<text class="flow" x="36" y="226">yes</text>
+<path class="arrow" d="M44,574 H14 V188.0 H43" marker-end="url(#head3)"/>
+<text class="flow" x="18" y="182.0">no</text>
+</svg>
+</div>
+</div>
+<p class="hint">Scroll sideways for the whole diagram.</p>
 </section>
 </main>
-<script src="architecture.js"></script>
+</div>
 </body>
 </html>

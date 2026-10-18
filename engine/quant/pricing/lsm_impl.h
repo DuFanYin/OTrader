@@ -1,8 +1,8 @@
 #pragma once
 
 // Executor-generic Longstaff-Schwartz core. The engine instantiates it with an
-// OpenMP executor (lsm_american.cpp); bench/concurrency instantiates the same
-// code with serial and thread-pool executors to compare scheduling strategies.
+// OpenMP executor (lsm_american.cpp); a serial or a thread-pool executor runs the
+// same code.
 //
 // Every parallel region is a loop over fixed-size path chunks, and each chunk
 // owns its RNG stream and its partial sums, so the result is bit-identical for

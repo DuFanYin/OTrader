@@ -1,32 +1,36 @@
-# core: the engine (core::Engine, engine_main) and its event loop (engine_event), with the
-# engines it holds (engines/: execution, positions, hedging, risk, strategies, the log); the
-# ports it reaches the world through are adapters/. Its two assemblies are built by their own
-# option, so a backtest build pulls in no IB and no gRPC:
-#   core_backtest  core::backtest::MainEngine and its run over one day or many (BUILD_BACKTEST)
-#   core_live      core::live::MainEngine: IB with BUILD_GATEWAY, else no broker
-add_library(core
-  engines/execution.cpp
-  engines/position.cpp
-  engines/hedge.cpp
-  engines/risk.cpp
-  engines/option_strategy.cpp
-  engines/log.cpp
-  engine_main.cpp
-  engine_event.cpp
-)
-target_include_directories(core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
-target_link_libraries(core PUBLIC model strategies gateway db_sqlite marketdata_live)
+# core: one library per engine, and Main; the ports are declared here and implemented in adapters/.
+# The assemblies (assembly/) put Main together with its adapters.
+find_package(Threads REQUIRED)
 
-if(BUILD_BACKTEST)
-  add_library(core_backtest engine_backtest.cpp)
-  target_link_libraries(core_backtest PUBLIC core gateway_backtest marketdata_backtest)
-endif()
+# The ports. MarketData is declared with MarketDataEngine, which its adapters write quotes into.
+add_library(gateway gateway/gateway.cpp)
+target_link_libraries(gateway PUBLIC model)
 
-if(BUILD_GATEWAY OR BUILD_MARKETDATA OR BUILD_LIVE_GRPC)
-  find_package(Threads REQUIRED)
-  add_library(core_live engine_live.cpp)
-  target_link_libraries(core_live PUBLIC core gateway_core Threads::Threads)
-  if(BUILD_GATEWAY)
-    target_link_libraries(core_live PUBLIC ib_feed)
-  endif()
-endif()
+add_library(database INTERFACE)
+target_link_libraries(database INTERFACE model)
+
+# State-only engines: no I/O.
+add_library(bookkeeping_engine bookkeeping/bookkeeping_engine.cpp)
+target_link_libraries(bookkeeping_engine PUBLIC model)
+
+add_library(risk_engine risk/risk_engine.cpp)
+target_link_libraries(risk_engine PUBLIC bookkeeping_engine strategies)
+
+add_library(strategy_engine strategy/strategy_engine.cpp)
+target_link_libraries(strategy_engine PUBLIC bookkeeping_engine market_data_engine strategies)
+
+# I/O engines, each on its own thread.
+add_library(log_engine log/log_engine.cpp)
+target_link_libraries(log_engine PUBLIC model PRIVATE Threads::Threads)
+
+add_library(market_data_engine market_data/market_data_engine.cpp)
+target_link_libraries(market_data_engine PUBLIC model PRIVATE Threads::Threads)
+
+# The event thread: hands events to the handler it is given (Main::process_event).
+add_library(event_loop event_loop.cpp)
+target_link_libraries(event_loop PUBLIC model PRIVATE Threads::Threads)
+
+add_library(core main.cpp)
+target_link_libraries(core PUBLIC
+  event_loop bookkeeping_engine risk_engine strategy_engine
+  log_engine market_data_engine database gateway)

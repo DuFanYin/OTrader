@@ -1,5 +1,1 @@
-"""Backend src: api, services, infra, utils."""
-
-from optra.infra.state import AppState
-
-__all__ = ["AppState"]
+"""Optra's server: the API (api), the live engine's link and the numerics (infra), research, services, tools."""

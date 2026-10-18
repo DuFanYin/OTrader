@@ -12,8 +12,8 @@ from optra.schemas.tools import (
     PricingRequest,
 )
 from optra.services.analytics import convergence_summary, rank_benchmark_rows
-from optra.infra.numerics import pde_solve, pricing_bundle, run_convergence_steps, run_engine_task
-from optra.tools.base import Result, Tool, ToolError, engine_task
+from optra.infra.numerics import lattice_prices, pde_solve, pricing_bundle, run_convergence_steps
+from optra.tools.base import Result, Tool, engine_task
 
 OPTION = {"spot": 100.0, "strike": 105.0, "rate": 0.03, "vol": 0.2, "maturity": 0.5}
 
@@ -23,11 +23,8 @@ def price_option(req: PricingRequest) -> Result:
 
 
 def price_batch(req: PricingBatchRequest) -> Result:
-    payload = {"n_jobs": len(req.jobs)}
-    for i, job in enumerate(req.jobs):
-        for key in ("spot", "strike", "rate", "vol", "maturity", "n_paths", "dividend_yield"):
-            payload[f"job_{i}_{key}"] = getattr(job, key)
-    return engine_task("pricing_batch", payload)
+    keys = ("spot", "strike", "rate", "vol", "maturity", "n_paths", "dividend_yield")
+    return engine_task("pricing_batch", {"jobs": [{k: getattr(job, k) for k in keys} for job in req.jobs]})
 
 
 def price_grid(req: PricingBatchGridRequest) -> Result:
@@ -42,24 +39,18 @@ def scenario_sweep(req: PricingRequest) -> Result:
 
 
 def pde_price(req: PdeRequest) -> Result:
-    try:
-        pde = pde_solve(req.spot, req.strike, req.rate, req.vol, req.maturity, req.dividend_yield,
-                        int(req.s_steps), int(req.t_steps), req.method, req.option_type, req.is_american)
-    except ValueError as exc:
-        raise ToolError(str(exc)) from exc
+    pde = pde_solve(req.spot, req.strike, req.rate, req.vol, req.maturity, req.dividend_yield,
+                    int(req.s_steps), int(req.t_steps), req.method, req.option_type, req.is_american)
     # Reference: Black-Scholes for European; a 1000-step binomial tree for American.
-    ref = run_engine_task("pricing", {
-        "spot": req.spot, "strike": req.strike, "rate": req.rate, "vol": req.vol,
-        "maturity": req.maturity, "dividend_yield": req.dividend_yield, "n_paths": 100,
-        "n_steps": 1000, "option_type": req.option_type, "is_american": req.is_american, "lsm_paths": 1000,
-    }).get("result_summary", {})
+    ref = lattice_prices(req.spot, req.strike, req.rate, req.vol, req.maturity, req.dividend_yield, [1000],
+                         req.option_type, req.is_american)
     ref_name = "binomial_american" if req.is_american else "bs"
-    ref_price = (ref.get("american_methods") or {}).get("binomial") if req.is_american else ref.get("bs")
-    price = pde.get("price", 0.0)
-    t_used = pde.get("t_steps_used", req.t_steps)
+    ref_price = ref["binomial"][0] if req.is_american else ref["bs"]
+    price = pde["price"]
+    t_used = pde["t_steps_used"]
     grid_points = req.s_steps * t_used
     notes = ["pde_cpp"]
-    if pde.get("stability_refined"):
+    if pde["stability_refined"]:
         notes.append(f"explicit scheme refined to {t_used} time steps for stability")
     return Result(summary={
         "price": price,
@@ -69,8 +60,8 @@ def pde_price(req: PdeRequest) -> Result:
         "s_steps": req.s_steps,
         "t_steps": req.t_steps,
         "t_steps_used": t_used,
-        "stability_refined": pde.get("stability_refined", False),
-        "psor_iterations": pde.get("psor_iterations", 0),
+        "stability_refined": pde["stability_refined"],
+        "psor_iterations": pde["psor_iterations"],
         "grid_points": grid_points,
         "s_t_aspect_ratio": req.s_steps / max(t_used, 1),
         "grid_density_per_maturity": grid_points / max(req.maturity, 1e-12),
@@ -113,7 +104,7 @@ def benchmark_methods(req: BenchmarkRequest) -> Result:
         {"method": "bs",        "price": bundle["bs"],        "runtime_ms": 0.0},
         {"method": "binomial",  "price": bundle["binomial"],  "runtime_ms": 0.0},
         {"method": "trinomial", "price": bundle["trinomial"], "runtime_ms": 0.0},
-        {"method": "pde",       "price": pde.get("price", 0.0), "runtime_ms": pde_ms},
+        {"method": "pde",       "price": pde["price"],       "runtime_ms": pde_ms},
     ]
     baseline = next(r["price"] for r in rows if r["method"] == req.benchmark_baseline)
     for r in rows:

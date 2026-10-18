@@ -19,12 +19,9 @@ ValueDelta bs_value_delta(double s, double k, double r, double y, double vol, do
         const double in = is_call ? s - k : k - s;
         return {std::max(in, 0.0), in > 0.0 ? (is_call ? 1.0 : -1.0) : 0.0};
     }
-    const double sq  = vol * std::sqrt(tau);
-    const double d1  = (std::log(s / k) + (r - y + 0.5 * vol * vol) * tau) / sq;
-    const double d2  = d1 - sq;
-    const double dfq = std::exp(-y * tau), dfr = std::exp(-r * tau);
-    if (is_call) return {s * dfq * norm_cdf(d1) - k * dfr * norm_cdf(d2), dfq * norm_cdf(d1)};
-    return {k * dfr * norm_cdf(-d2) - s * dfq * norm_cdf(-d1), dfq * (norm_cdf(d1) - 1.0)};
+    const double forward = spot_forward(s, r, y, tau);
+    return {black_price(is_call, forward, k, tau, r, vol),
+            black_greeks(is_call, s, forward, k, tau, r, vol).delta};
 }
 
 double payoff(const HedgeLeg& leg, double s) {

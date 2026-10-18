@@ -17,14 +17,10 @@ export const anyCheck = (p) => p.pickStats || p.pickIto || p.pickSimulation || p
 export const validationGate = (p) => ({
   pick_stats: p.pickStats, pick_ito: p.pickIto, pick_simulation: p.pickSimulation, pick_lattice: p.pickLattice,
   compute_block_on_validation: p.blockOnFail,
-  spot: p.spot, strike: p.strike, rate: p.rate, vol: p.vol, maturity: p.maturity, n_paths: p.nPaths,
-  dividend_yield: p.dividendYield, mu: p.mu,
+  spot: p.spot, strike: p.strike, rate: p.rate, vol: p.vol, maturity: p.maturity, mu: p.mu,
   stats_theta: p.statsTheta, stats_n: p.statsN,
   ito_function_type: p.itoFunction, ito_theta: p.itoTheta, ito_t: p.itoT, ito_n: p.itoN,
-  model: p.simModel, sim_steps: p.simSteps, sim_dt: p.simDt, sim_kappa: p.simKappa, sim_theta: p.simTheta,
-  measure_n: p.measureN, cmp_steps: p.cmpSteps, cmp_paths: p.cmpPaths, conv_steps: ladder(p),
-  pde_s_steps: p.pdeSSteps, pde_t_steps: p.pdeTSteps, pde_method: p.pdeMethod,
-  n_rebalances: p.nReb, hedge_paths: p.hedgePaths, batch_jobs: p.batchJobs, batch_spot_shock: p.batchSpotShock,
+  sim_steps: p.simSteps, n_rebalances: p.nReb, hedge_paths: p.hedgePaths,
 });
 
 export const greekSurface = (p, greek) => ({

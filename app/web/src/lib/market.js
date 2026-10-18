@@ -7,6 +7,13 @@ import { params, setParams, settings } from "./store.js";
 export const market = signal({ state: "idle" });
 const patch = (m) => { market.value = { ...market.value, ...m }; };
 
+/** A fraction as a percent, rounded to `digits`. */
+const pct = (x, digits) => Number((100 * x).toFixed(digits));
+/** A value the server could not fetch and gave a fixed one for: named in market.fallback. */
+const noteFallback = (name, source) => {
+  if (source === "fallback") patch({ fallback: [...(market.value.fallback ?? []), name] });
+};
+
 let snap = null;          // the last fetch: spot, rates, surface (for re-resolving without fetching again)
 let strikeEdited = false; // the strike follows spot until the user types one
 export const markStrikeEdited = () => { strikeEdited = true; };
@@ -20,7 +27,7 @@ export async function fetchLive({ force = false } = {}) {
   if (!live()) return;
   if (!force && snap && Date.now() - fetchedAt < FRESH_MS) return;
   fetchedAt = Date.now();
-  const s = { rate_curve: {}, rate_curve_pct: {}, iv_surface: [] };
+  const s = { rate_curve: {}, iv_surface: [] };
   snap = s;
   const current = () => live() && snap === s;  // a newer fetch or a switch to Sim makes this one moot
   patch({ state: "loading", error: null });
@@ -29,20 +36,23 @@ export async function fetchLive({ force = false } = {}) {
     s.spot = d.spot;
     if (current()) {
       setParams(strikeEdited ? { spot: d.spot } : { spot: d.spot, strike: d.spot });
-      patch({ spot: d.spot });
+      patch({ spot: d.spot, fallback: d.source === "fallback" ? ["spot"] : [] });
     }
     return d.spot;
   });
   get("api/lab/market/dvol").then((d) => {
     s.vol = d.vol;
-    if (current()) { setParams({ vol: d.vol }); patch({ ivPct: d.vol_pct }); }
+    if (current()) { setParams({ vol: d.vol }); patch({ ivPct: pct(d.vol, 2) }); noteFallback("σ", d.source); }
   }).catch(() => {});
   get("api/lab/market/funding").then((d) => {
-    if (current()) { setParams({ mu: d.mu }); patch({ muPct: d.mu_pct, funding8h: d.funding_8h_pct }); }
+    if (current()) { setParams({ mu: d.mu }); patch({ muPct: pct(d.mu, 3), funding8h: pct(d.funding_8h, 4) }); noteFallback("μ", d.source); }
   }).catch(() => {});
   const rates = get("api/lab/market/rates").then((d) => {
-    Object.assign(s, { rate: d.rate, rate_curve: d.rate_curve, rate_curve_pct: d.rate_curve_pct });
-    if (current()) patch({ ratePct: d.rate_pct, curve: d.rate_curve_pct });
+    Object.assign(s, { rate: d.rate, rate_curve: d.rate_curve });
+    if (current()) {
+      patch({ ratePct: pct(d.rate, 3), curve: Object.fromEntries(Object.entries(d.rate_curve).map(([k, v]) => [k, pct(v, 3)])) });
+      noteFallback("r", d.source);
+    }
   }).catch(() => {});
   const surface = spot.then((x) => get(`api/lab/market/surface?spot=${encodeURIComponent(x)}`))
     .then((d) => { s.iv_surface = d.iv_surface; }).catch(() => {});
@@ -74,7 +84,7 @@ async function resolve(s = snap) {
   }
   setParams({ vol: r.vol, rate: r.rate });
   patch({
-    ratePct: r.rate_pct, rateTenor: `${r.rate_tenor} → ${r.rate_pct}%`,
+    ratePct: pct(r.rate, 4), rateTenor: `${r.rate_tenor} → ${pct(r.rate, 4)}%`,
     ivSource: r.iv_instrument || "DVOL index (no surface)",
     ivMatch: r.iv_instrument ? `K ${Number(r.iv_matched_strike).toLocaleString()} · T ${r.iv_matched_years}y · ${r.interp_method}` : "fallback",
   });

@@ -9,7 +9,7 @@ import * as P from "../lib/payloads.js";
 import { begin, fill } from "../lib/runner.js";
 import { params, results, setParam } from "../lib/store.js";
 import { Badge, Bad, Good, Kv, Note, Slot, Sub, Table } from "../ui/blocks.jsx";
-import { Chips, Group, Num, Seg, Select, SmallButton, Text, Toggle } from "../ui/controls.jsx";
+import { Chips, Group, Num, NumInput, Seg, Select, SmallButton, Text, Toggle } from "../ui/controls.jsx";
 import { Button, Dialog, DialogGroup, Summary } from "../ui/dialog.jsx";
 import { LineChart } from "../charts/LineChart.jsx";
 import { ComboBacktest, canBacktest } from "./combo_backtest.jsx";
@@ -83,8 +83,8 @@ function StrategyFilter() {
           {FILTERS.map(([k, label, hint]) => (
             <>
               <span class="pb-1 text-sm text-ink-2" title={hint}>{label}</span>
-              <Num k={`${k}Lo`} label="" />
-              <Num k={`${k}Hi`} label="" />
+              <NumInput k={`${k}Lo`} />
+              <NumInput k={`${k}Hi`} />
             </>
           ))}
         </div>
@@ -100,8 +100,8 @@ function Params() {
     <>
       <Group title="Data" action={<SmallButton onClick={loadSnapshots} title="Reload the list of cached chain snapshots">Snapshots ↻</SmallButton>}>
         <Seg k="scrView" label="View" options={[["strategies", "Strategies"], ["chain", "Option chain"]]} />
-        <Seg k="scrCurrency" label="Underlying" options={underlyings.value.map((u) => [u, u])} wide={false} onChange={pickUnderlying} />
-        <Select k="scrSnapshot" label={isDeribit(p.scrCurrency) ? "Chain" : "Day"} wide={false}
+        <Seg k="scrCurrency" label="Underlying" options={underlyings.value.map((u) => [u, u])} onChange={pickUnderlying} />
+        <Select k="scrSnapshot" label={isDeribit(p.scrCurrency) ? "Chain" : "Day"}
           options={[["", isDeribit(p.scrCurrency) ? "Live (Deribit)" : "Newest"], ...snapshots.value]} />
         {!isDeribit(p.scrCurrency) && p.scrSnapshot && (
           <Text k="scrAt" label="Time (New York)" placeholder="HH:MM, empty: the close" wide={false}

@@ -4,7 +4,6 @@ import { signal } from "@preact/signals";
 import { useState } from "preact/hooks";
 import { fmt, pct } from "../lib/format.js";
 import { clearHistory, compare, forget, history, load } from "../lib/history.js";
-import { setSetting } from "../lib/store.js";
 import { Dialog, Button } from "./dialog.jsx";
 import { Table } from "./blocks.jsx";
 import { toast } from "./toast.jsx";
@@ -35,13 +34,13 @@ async function startCompare() {
   }
 }
 
-export function HistoryDrawer({ views }) {
+export function HistoryDrawer({ views, select }) {
   const [loading, setLoading] = useState(null);
   const list = history.value;
   const label = (id) => views[id]?.label ?? id;
   async function show(entry) {
     setLoading(entry.id);
-    setSetting("tab", entry.mode);
+    select(entry.mode);
     await load(entry);
     setLoading(null);
     open.value = false;

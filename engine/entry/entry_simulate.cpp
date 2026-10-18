@@ -1,33 +1,25 @@
 /**
- * entry_simulate: the live engine on a simulated market, served over gRPC as entry_live serves it.
- * No broker: recorded days (the backtest's Parquet) are replayed as the market from their first
- * minute at the wall clock's pace (adapters::ReplayFeed), and orders fill at their quotes in a
- * simulated account (adapters::SimulatedGateway). The engine itself is the live one, unchanged:
- * this file only chooses its venue, its quotes and its clock. Used by the public demo.
+ * entry_simulate: the unchanged live engine on a simulated market (the public demo): recorded
+ * Parquet days replayed at wall-clock pace, orders filled at their quotes in a simulated account.
  */
 
-#include "adapters/backtest/simulation.hpp"
-#include "adapters/db/engine_db_sqlite.hpp"
-#include "core/engine_live.hpp"
-#include "core/engines/log.hpp"
+#include "adapters/market_data/data_loader.hpp"
+#include "adapters/gateway/simulated_gateway.hpp"
+#include "adapters/market_data/simulated_market_data.hpp"
+#include "assembly/live.hpp"
 #include "entry/engine_grpc.hpp"
+#include "strategy/strategy_registry.hpp"
 
 #include <chrono>
-#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <memory>
-#include <mutex>
 #include <print>
-#include <pthread.h>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <utility>
 #include <vector>
-
-#include <grpcpp/grpcpp.h>
 
 namespace {
 
@@ -35,19 +27,18 @@ namespace {
 constexpr const char* kDefaultListenAddress = "localhost:50051";
 /** After the last quote, the engine keeps serving this long, then stops. */
 constexpr auto kAfterSession = std::chrono::minutes(15);
-constexpr double kFeeRate = 0.35;     // USD a contract, as the backtest's default
-constexpr double kSlippageBps = 5.0;
+constexpr double kFeeRate = 1.2; // USD a contract, as the backtest's default
 
 struct SimulateOptions {
     std::string listen_address = kDefaultListenAddress;
-    /** Once serving: connect, start the market data and the strategies that were running. */
+    /** Start the strategies that were running, once the days' contracts are in. */
     bool resume = false;
     std::vector<std::string> days;
 };
 
 void print_usage(std::FILE* out) {
     std::print(out,
-               "Usage: entry_simulate [--listen ADDRESS] [--resume] DAY.parquet...\n"
+               "Usage: entry_simulate [--listen ADDRESS] [--resume] [--strategies DIR]... DAY.parquet...\n"
                "  Runs the live engine on a simulated market, served like entry_live: the days\n"
                "  (the backtest's Parquet, under data/<PORTFOLIO>/; one per portfolio) replayed\n"
                "  from their first minute at the wall clock's pace, orders filled at their quotes.\n"
@@ -55,26 +46,11 @@ void print_usage(std::FILE* out) {
                "  Stops on SIGINT / SIGTERM, or 15 minutes after the last quote.\n"
                "\n"
                "  --listen ADDRESS  gRPC address (default {}; env LIVE_GRPC_ADDRESS)\n"
-               "  --resume          once serving: connect, start the market data and the\n"
-               "                    strategies that were running\n"
+               "  --resume          start the strategies that were running, once the days'\n"
+               "                    contracts are in (the market data starts either way)\n"
+               "  --strategies DIR  the strategy libraries there too, beside the system's\n"
                "  -h, --help        this help\n",
                kDefaultListenAddress);
-}
-
-/** The days' contracts into the database, as a sync from a broker would put them. */
-auto sync_contracts(const std::vector<std::string>& days) -> bool {
-    try {
-        core::LogEngine log;
-        adapters::DatabaseEngine db(&log);
-        for (const std::string& portfolio : adapters::simulated_portfolios(days)) {
-            db.save_contracts(adapters::simulated_contracts(days, portfolio));
-        }
-        db.close();
-        return true;
-    } catch (const std::exception& e) {
-        std::println(stderr, "The days' contracts: {}", e.what());
-        return false;
-    }
 }
 
 auto account_file() -> std::string {
@@ -82,120 +58,62 @@ auto account_file() -> std::string {
     return std::string(db != nullptr && *db != '\0' ? db : "data/optra.db") + ".account.json";
 }
 
-/** Serves the gRPC EngineService until SIGINT / SIGTERM or the session's end, then closes the
- * engine. */
+/** Serves the engine (entry::serve) until SIGINT / SIGTERM or kAfterSession past the session's
+ * end. The days' contracts come in as a broker's would (SimulatedGateway::sync_contracts). */
 auto run(const SimulateOptions& options) -> int {
-    // As entry_live: the stop signals are blocked in every thread and taken by the stopper, which
-    // here also stops the run once the session is over.
-    sigset_t stop_signals;
-    sigemptyset(&stop_signals);
-    sigaddset(&stop_signals, SIGINT);
-    sigaddset(&stop_signals, SIGTERM);
-    pthread_sigmask(SIG_BLOCK, &stop_signals, nullptr);
-
     std::pair<model::DateTime, model::DateTime> session;
     try {
-        session = adapters::simulated_session(options.days);
+        session = adapters::time_range_of_files(options.days);
     } catch (const std::exception& e) {
         std::println(stderr, "The days: {}", e.what());
         return 1;
     }
-    const auto lasts = session.second - session.first + kAfterSession;
-
-    static std::mutex serving_mutex;
-    static grpc::Server* serving = nullptr;
-    std::thread stopper([stop_signals, lasts] {
-        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(lasts).count();
-        const timespec timeout{.tv_sec = static_cast<time_t>(seconds), .tv_nsec = 0};
-        const int signal = sigtimedwait(&stop_signals, nullptr, &timeout);
-        const std::lock_guard lock(serving_mutex);
-        if (serving == nullptr) {
-            std::println("Stopping before the engine serves");
-            std::fflush(stdout);
-            std::_Exit(signal > 0 ? 128 + signal : 0);
-        }
-        if (signal > 0) {
-            std::println("Signal {}: stopping", signal);
-        } else {
-            std::println("The simulated session is over: stopping");
-        }
-        std::fflush(stdout);
-        serving->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(2));
-    });
-
-    if (!sync_contracts(options.days)) {
-        stopper.detach();
-        return 1;
-    }
-
-    // The clock starts at the days' first quote and keeps the wall clock's pace; the venue and the
-    // replay read the same clock as the engine.
+    // Starts at the days' first quote at wall-clock pace; venue, replay and engine share it.
     const auto offset = std::chrono::system_clock::now() - session.first;
-    const core::live::MainEngine::Clock clock = [offset] {
+    const live::Clock clock = [offset] {
         return std::chrono::system_clock::now() - offset;
     };
     adapters::SimulatedGateway* venue = nullptr;
-    core::live::MainEngine* engine = nullptr; // set before the replay can start (resume, or a call)
-    // After each minute's quotes: the orders they fill, on the event thread like every booking.
-    auto feed = std::make_unique<adapters::ReplayFeed>(options.days, clock, [&venue, &engine] {
-        try {
-            engine->on_event_thread([&venue] { venue->on_minute(); });
-        } catch (const std::exception&) { // the engine is stopping
-        }
-    });
-    std::unique_ptr<core::live::MainEngine> main_engine;
-    try {
-        main_engine = std::make_unique<core::live::MainEngine>(
-            [&](const model::PortfolioStructure& portfolios) {
+    core::Main* engine = nullptr; // set before the replay starts (with the run)
+    const auto make = [&]() -> std::unique_ptr<core::Main> {
+        // After each minute's quotes: the orders they fill, on the event thread like every booking.
+        auto market_data =
+            std::make_unique<adapters::SimulatedMarketData>(options.days, clock, [&venue, &engine] {
+                try {
+                    engine->event_loop()->on_event_thread([&venue] { venue->on_minute(); });
+                } catch (const std::exception&) { // the engine is stopping
+                }
+            });
+        auto made = live::make_main(
+            [&](utilities::Logger*, const model::Portfolios& portfolios) {
                 auto gateway = std::make_unique<adapters::SimulatedGateway>(
-                    portfolios, options.days, account_file(), clock, kFeeRate, kSlippageBps);
+                    portfolios, options.days, account_file(), clock, kFeeRate);
                 venue = gateway.get();
                 return gateway;
             },
-            std::move(feed), clock);
-    } catch (const std::exception& e) {
-        std::println(stderr, "The engine did not start: {}", e.what());
-        stopper.detach();
-        return 1;
+            std::move(market_data), clock);
+        engine = made.get();
+        engine->write_log("Simulated market: no broker; quotes replayed, orders filled at them",
+                          utilities::WARNING);
+        return made;
+    };
+    std::vector<live::Synced> portfolios;
+    for (const std::string& portfolio : adapters::portfolios_of_files(options.days)) {
+        portfolios.emplace_back(portfolio, 0); // the days' contracts, whatever their expiry
     }
-    engine = main_engine.get();
-    engine->write_log("Simulated market: no broker; quotes replayed, orders filled at them",
-                      utilities::WARNING);
-
-    entry::GrpcLiveEngineService service(*engine);
-    grpc::ServerBuilder builder;
-    builder.AddListeningPort(options.listen_address, grpc::InsecureServerCredentials());
-    builder.RegisterService(&service);
-    std::unique_ptr<grpc::Server> server(builder.BuildAndStart());
-    if (!server) {
-        std::println(stderr, "Failed to start gRPC server on {}", options.listen_address);
-        stopper.detach();
-        return 1;
-    }
-    {
-        const std::lock_guard lock(serving_mutex);
-        serving = server.get();
-    }
-
-    std::println("Simulated engine listening on {}", options.listen_address);
-    std::fflush(stdout);
-    if (options.resume) {
-        engine->resume();
-    }
-    server->Wait();
-    stopper.join();
-
-    try {
-        engine->disconnect();
-        engine->close();
-    } catch (...) {
-    }
-    return 0;
+    const auto lasts = std::chrono::ceil<std::chrono::seconds>(session.second - session.first +
+                                                               kAfterSession);
+    return entry::serve(make, options.listen_address, std::move(portfolios), options.resume,
+                        lasts);
 }
 
 } // namespace
 
 int main(int argc, char* argv[]) {
+    // The system's strategies; those installed for the account it trades come with --strategies
+    // (strategies/paper or strategies/live), never the research ones. Listing the classes loads
+    // those built since.
+    strategy::StrategyRegistry::load(strategy::StrategyRegistry::beside_executable());
     SimulateOptions options;
     const char* env_address = std::getenv("LIVE_GRPC_ADDRESS");
     if (env_address != nullptr && *env_address != '\0') {
@@ -213,6 +131,10 @@ int main(int argc, char* argv[]) {
         }
         if (arg == "--resume") {
             options.resume = true;
+            continue;
+        }
+        if (arg == "--strategies" && i + 1 < argc) {
+            strategy::StrategyRegistry::load(argv[++i]);
             continue;
         }
         if (arg.starts_with("-")) {

@@ -105,7 +105,7 @@ function Hedge({ data }) {
   if (data.skipped) return <Note>{data.skipped}</Note>;
   const s = data.result_summary || data.summary || {}, d = data.result_details || data.details || {};
   const cmp = Object.entries(d.strategy_compare || {}).map(([name, x]) => ({ strategy: name, ...x }));
-  const best = d.best_strategy || data.strategy_recommendation || {}, cfg = d.compare_config || {};
+  const best = d.best_strategy || {}, cfg = d.compare_config || {};
   return (
     <>
       <Kv rows={[["Strategy", s.strategy], ["Rebalances", s.n_rebalances], ["Paths", s.n_paths], ["P&L mean", s.pnl_mean], ["P&L std", s.pnl_std],

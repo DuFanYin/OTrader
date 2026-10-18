@@ -9,8 +9,8 @@
  * jitter). The contended MPSC case uses per-thread PER_OP timing since pushes are µs-scale there.
  */
 
-#include "bench_util.hpp"
-#include "mpsc_ring.hpp"
+#include "tests/bench/bench_util.hpp"
+#include "utilities/mpsc_ring.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -22,7 +22,7 @@ using bench::keep;
 
 namespace {
 
-constexpr size_t kMainCap = 512;     // matches live EventEngine queue_ring_
+constexpr size_t kMainCap = 512;     // matches live EventLoop queue_ring_
 
 int g_dummy = 0;
 int* const kPtr = &g_dummy;

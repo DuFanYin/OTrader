@@ -16,9 +16,10 @@ from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any, Awaitable, Callable, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from optra.infra import numerics, run_store
+from optra.infra import access, numerics, run_store
+from optra.research.ledger import Costs
 from optra.version import CONTRACT_VERSION
 
 SIGNIFICANT_DIGITS = 12  # floats in a response keep this many significant digits (drops 0.30000000000000004 noise)
@@ -30,6 +31,11 @@ class ToolError(Exception):
     def __init__(self, message: str, status: int = 400):
         super().__init__(message)
         self.message, self.status = message, status
+
+
+COSTS = Field(default_factory=Costs, description=(
+    "What trading costs the run, each left out at its default: fees, where in its spread each leg fills, how orders "
+    "fill, the risk limits."))
 
 
 @dataclass
@@ -56,6 +62,7 @@ class Tool:
     network: bool = False    # fetches market data (falls back to cached or fixed data offline)
     live: bool = False       # asks the running live engine (gRPC): fails without one
     record: bool = True      # kept in the run history (data lookups and the history's own tools are not)
+    person: bool = False     # the person's decision, not the agent's (infra/access.py)
     example: dict = field(default_factory=dict)  # arguments that run it
 
     def schema(self) -> dict:
@@ -78,7 +85,7 @@ def norm(value):
 
 def envelope(tool: Tool, params: BaseModel, result: Result, ms: float) -> dict:
     """The one shape every tool's result comes in."""
-    return _envelope(tool.name, params.model_dump(), result, ms)
+    return _envelope(tool.name, params.model_dump(mode="json"), result, ms)
 
 
 def _envelope(tool: str, inputs: dict, result: Result, ms: float) -> dict:
@@ -105,8 +112,13 @@ def _envelope(tool: str, inputs: dict, result: Result, ms: float) -> dict:
 async def run_tool(tool: Tool, params: BaseModel) -> dict:
     """Runs a tool on its validated input and returns the envelope, kept in the run history (services/run_store.py).
     A synchronous tool runs in a worker thread, so a long computation never holds up the event loop."""
+    if tool.person:
+        try:
+            access.require(f"{tool.name}")
+        except access.NotTheAgents as exc:
+            raise ToolError(str(exc), 403) from exc
     if tool.engine and not numerics.is_engine_available():
-        raise ToolError(numerics.ENGINE_PROBLEM, 503)
+        raise ToolError(numerics.engine_problem(), 503)
     t0 = perf_counter()
     if inspect.iscoroutinefunction(tool.run):
         result = await tool.run(params)
@@ -118,14 +130,10 @@ async def run_tool(tool: Tool, params: BaseModel) -> dict:
     return out
 
 
-def engine_task(task_type: str, payload: dict, trace_prefix: str | None = None) -> Result:
+def engine_task(task_type: str, payload: dict) -> Result:
     """One engine task as a Result; an engine error becomes a ToolError."""
-    request = {**payload, "contract_version": CONTRACT_VERSION}
-    request.setdefault("trace_id", f"{trace_prefix or task_type}-{uuid.uuid4().hex[:12]}")
-    r = numerics.run_engine_task(task_type, request)
-    if r.get("status") != "ok":
-        err = r.get("error") or {}
-        raise ToolError(f"{task_type} failed: {err.get('message') or err.get('code') or 'engine error'}",
-                        503 if err.get("code") == "engine_unavailable" else 400)
-    diag = {k: v for k, v in (r.get("diagnostics") or {}).items() if k in ("runtime_ms", "compute_path")}
-    return Result(summary=r.get("result_summary", {}), details=r.get("result_details", {}), diagnostics=diag)
+    try:
+        r = numerics.checked_task(task_type, payload)
+    except numerics.EngineError as exc:
+        raise ToolError(str(exc), exc.status) from exc
+    return Result(summary=r["result_summary"], details=r["result_details"], diagnostics={"runtime_ms": r["runtime_ms"]})

@@ -29,12 +29,10 @@ function Params() {
         <Num k="itoN" label="Steps" step="500" wide />
         <Seg k="itoFunction" label="Function" options={ITO_FUNCTIONS} />
       </DialogGroup>
-      <DialogGroup title="Simulation" summary={`${p.simModel === "vasicek" ? `Vasicek κ ${p.simKappa} θ ${p.simTheta}` : "Brownian"} · ${p.simSteps} steps of ${p.simDt}`}>
-        <Seg k="simModel" label="Model" options={[["brownian", "Brownian"], ["vasicek", "Vasicek"]]} />
+      <DialogGroup title="Simulation" summary={`GBM · ${p.simSteps} steps · hedged ${p.nReb} times on ${p.hedgePaths} paths`}>
         <Num k="simSteps" label="Steps" step="50" />
-        <Num k="simDt" label="dt" step="0.01" />
-        <Num k="simKappa" label="κ" step="0.1" />
-        <Num k="simTheta" label="θ" step="0.01" />
+        <Num k="nReb" label="Rebalances" step="1" />
+        <Num k="hedgePaths" label="Paths" step="100" wide />
       </DialogGroup>
       <MarketGroup drift />
     </>
@@ -58,7 +56,7 @@ async function run() {
 }
 
 const show = (v) => (v == null ? "–" : typeof v === "object" ? Object.entries(v).map(([k, x]) => (Array.isArray(v) ? x : `${k} ${x}`)).join(Array.isArray(v) ? "," : ", ") : fmt(v));
-const decision = (g) => <Badge kind={g === "go" || g === "pass" ? "good" : g === "fail" || g === "block" ? "bad" : "warn"}>{g ?? "–"}</Badge>;
+const decision = (g) => <Badge kind={g === "go" || g === "pass" ? "good" : g === "fail" || g === "blocked" ? "bad" : "warn"}>{g ?? "–"}</Badge>;
 
 /** A check's value as a share of its threshold: a bar to twice the threshold, with a tick at the threshold. */
 function Used({ row }) {
@@ -78,7 +76,7 @@ function Used({ row }) {
 export function Report({ data, compact }) {
   if (data.empty) return <Note>No check picked: Stats, Itô, Simulation or Lattice.</Note>;
   const s = data.result_summary || {}, d = data.result_details || {};
-  const rows = d.rows || [], qa = d.explainable_qa;
+  const rows = d.rows || [];
   const failing = rows.filter((r) => r.status === "fail"), failed = s.checks_failed ?? failing.length;
   const head = (
     <div class="flex flex-wrap items-center gap-2 text-sm">
@@ -96,13 +94,12 @@ export function Report({ data, compact }) {
         { key: "threshold", label: "Threshold" },
         { key: "excess", label: "Of the threshold", fmt: (v, r) => <Used row={r} /> },
       ]} />
-      {failed > 0 && qa && (qa.decision_reasoning || qa.actions_ranked?.length > 0) && (
+      {failing.length > 0 && (
         <>
           <Sub>What to change</Sub>
-          {qa.decision_reasoning && <Note>{qa.decision_reasoning}</Note>}
           <ol class="m-0 flex list-decimal flex-col gap-1 pl-5 text-sm">
-            {(qa.actions_ranked || []).slice(0, 5).map((a) => (
-              <li>{a.rationale ?? a.action_id}{a.param && a.proposed_value != null ? <span class="text-muted"> · {a.param} {show(a.current_value)} → {show(a.proposed_value)}</span> : null}</li>
+            {failing.map((r) => (
+              <li><span class="font-medium">{r.metric}</span>: {r.action}{r.param && r.proposed_value != null ? <span class="text-muted"> · {r.param} {show(r.current_value)} → {show(r.proposed_value)}</span> : null}</li>
             ))}
           </ol>
         </>

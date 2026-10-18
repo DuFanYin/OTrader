@@ -1,6 +1,6 @@
 # analytics: the research tools' workflows on quant (pricing, scenarios, hedging, validation,
 # calibration, the screener), their JSON requests and responses, and libanalytics_c.so, the C ABI
-# the Python server (app/analytics/server) loads with ctypes.
+# the Python server (app/server) loads with ctypes.
 add_library(analytics STATIC
   pricing_engine.cpp
   scenario_engine.cpp
@@ -9,7 +9,6 @@ add_library(analytics STATIC
   utility_engine.cpp
   calibration_engine.cpp
   screener_engine.cpp
-  parser.cpp
 )
 set_target_properties(analytics PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(analytics PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

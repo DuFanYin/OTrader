@@ -1,33 +1,58 @@
 #pragma once
 
-/** The portfolios the live engine trades. Each is named after its options' trading class (SPXW
- * for SPX's weeklies), is on one underlying, and is delta-hedged with one instrument: the
- * underlying itself when it trades, else one that moves with it (SPX, an index, does not trade;
- * SPY does, at a tenth of it). Its options settle at expiry in shares (SPY's) or in cash (SPXW's):
- * PositionEngine::settle_expiry. */
+/** Portfolios: the portfolios an engine trades, for backtest and live. */
 
-#include <algorithm>
-#include <array>
+#include "model/object.hpp"
+#include "model/portfolio.hpp"
+#include <memory>
+#include <span>
+#include <string>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace model {
 
-struct PortfolioSpec {
-    std::string_view name;
-    std::string_view underlying; // its symbol, the first field of its contract's symbol
-    std::string_view hedge;      // the symbol the HedgeEngine trades for it
-    bool physical = false;       // its options settle in shares of the underlying (else in cash)
-};
+/** The portfolios by name, and which one a contract is in: an option in its root's, an underlying
+ * in the one it underlies or hedges (SPY is SPY's underlying and SPXW's hedge instrument). */
+class Portfolios {
+  public:
+    Portfolios() = default;
 
-inline constexpr std::array kPortfolios{
-    PortfolioSpec{.name = "SPY", .underlying = "SPY", .hedge = "SPY", .physical = true},
-    PortfolioSpec{.name = "SPXW", .underlying = "SPX", .hedge = "SPY", .physical = false},
-};
+    /** The portfolios of model::kPortfolios, each as it settles and hedges. */
+    void ensure_portfolios_created();
+    void ensure_portfolio(const std::string& portfolio_name);
+    void clear();
+    /** Contracts added to the portfolios they are in: an option to its root's, an underlying to
+     * the one it underlies (else the one named after it) and those hedged with it. A portfolio not
+     * created yet takes none. */
+    void load_contracts(std::span<const Contract> contracts);
+    /** A trading day's contracts in place of the portfolio's (Portfolio::replace_options): an
+     * option not in them goes unless `keep` names it. Returns the chains dropped. */
+    std::vector<std::string> replace_contracts(const std::string& portfolio_name,
+                                               std::span<const Contract> contracts,
+                                               const std::unordered_set<std::string>& keep);
+    /** The same, the day's options listed already, and its underlying. */
+    std::vector<std::string> replace_contracts(const std::string& portfolio_name,
+                                               const Contract& underlying,
+                                               std::shared_ptr<const Listing> listing);
 
-/** The portfolio named `name`, or nullptr. */
-constexpr auto find_portfolio(std::string_view name) -> const PortfolioSpec* {
-    const auto it = std::ranges::find(kPortfolios, name, &PortfolioSpec::name);
-    return it != kPortfolios.end() ? &*it : nullptr;
-}
+    Portfolio* find_portfolio(const std::string& portfolio_name);
+    const Portfolio* find_portfolio(const std::string& portfolio_name) const;
+    std::vector<std::string> portfolio_names() const;
+    /** One of a portfolio's options, its underlying or its hedge instrument. */
+    [[nodiscard]] bool trades_contract(std::string_view symbol) const;
+    /** An option's root's, else the one whose underlying or hedge instrument it is; null: none. */
+    const Portfolio* portfolio_of(std::string_view symbol) const;
+    /** Valid until the portfolio's next roll. */
+    const Contract* find_contract(std::string_view symbol) const;
+
+  private:
+    /** Into the portfolio it underlies and those hedged with it. */
+    void load_underlying(const Contract& contract);
+
+    std::unordered_map<std::string, std::unique_ptr<Portfolio>> portfolios_;
+};
 
 } // namespace model

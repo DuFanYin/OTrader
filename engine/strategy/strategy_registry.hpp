@@ -1,12 +1,13 @@
 #pragma once
 
 /**
- * Strategy registry: strategy class name → factory and declared parameters.
- * A strategy registers itself: REGISTER_STRATEGY(YourClassName) in its own .cpp under factory/
- * (CMake picks the file up and links every strategy in; see strategy/CMakeLists.txt).
+ * Strategy registry: class name to factory and parameters. Each strategy .cpp is its own library
+ * whose REGISTER_STRATEGY runs as the program loads it.
  */
 
-#include "strategy_param.hpp"
+#include "strategy_api.hpp"
+#include "model/parameters.hpp"
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <span>
@@ -16,48 +17,73 @@
 
 namespace strategy {
 
-class OptionStrategyTemplate;
+/** Hash of the headers strategies compile against, embedded in every strategy library; load()
+ * reads it from the file before loading and refuses a mismatch. */
+[[gnu::used]] inline constexpr char kStrategyApi[] = "optra-strategy-api:" OPTRA_STRATEGY_API;
+
+class Strategy;
 class StrategyContext;
 
-using StrategyFactory = std::function<std::unique_ptr<OptionStrategyTemplate>(
-    StrategyContext* context, const std::string& strategy_name, const std::string& portfolio_name,
-    const std::unordered_map<std::string, double>& setting)>;
+/** Its Setting's parameters; empty when the class has none. */
+template <typename Class> std::vector<model::Parameter> parameters_of_class() {
+    if constexpr (requires { typename Class::Setting; }) {
+        return model::parameters_of<typename Class::Setting>();
+    } else {
+        return {};
+    }
+}
+
+/** One of a class, acting through `context` (bound to its record). */
+using StrategyFactory = std::function<std::unique_ptr<Strategy>(StrategyContext& context)>;
 
 class StrategyRegistry {
   public:
-    /** Register a class (REGISTER_STRATEGY does); returns true. */
+    /** A strategy library that was not loaded (or not all its classes), and why. */
+    struct Refusal {
+        std::string library;
+        std::string why;
+    };
+
+    /** Returns whether the class was registered. A same-named class is replaced only by a new
+     * build of the same library; another library's is kept and the newcomer refused (false). */
     static bool add(const std::string& class_name, StrategyFactory factory,
-                    std::span<const StrategyParam> parameters);
+                    std::span<const model::Parameter> parameters, std::string source = {});
+
+    /** Loads *.so in `directory` new or changed since last tried; remembers it for reload().
+     * Never unloads: running strategies may use the old build, which a new one loads beside. */
+    static void load(const std::filesystem::path& directory);
+    /** load() again on every directory loaded before. */
+    static void reload();
+    /** <directory of the running program>/strategies. */
+    static std::filesystem::path beside_executable();
+    static std::vector<Refusal> refused();
+    /** Empty for a class built into the program. Throws on an unknown class. */
+    static std::string library(const std::string& class_name);
     static bool has(const std::string& class_name);
-    /** Registered class names, sorted. */
+    /** Sorted. */
     static std::vector<std::string> get_all_strategy_class_names();
-    /** The class's parameters: the template's, then its own. Throws on an unknown class. */
-    static std::vector<StrategyParam> parameters(const std::string& class_name);
-    /** The declared defaults, overridden by `setting`. Throws std::invalid_argument on an unknown
-     * class, an undeclared name, a value out of range or a fraction for an integer. */
-    static std::unordered_map<std::string, double>
-    resolve_setting(const std::string& class_name,
-                    const std::unordered_map<std::string, double>& setting);
-    /** A new instance; `setting` comes from resolve_setting. Throws on an unknown class. */
-    static std::unique_ptr<OptionStrategyTemplate>
-    create(const std::string& class_name, StrategyContext* context,
-           const std::string& strategy_name, const std::string& portfolio_name,
-           const std::unordered_map<std::string, double>& setting);
+    /** The template's, then the class's. Throws on an unknown class. */
+    static std::vector<model::Parameter> parameters(const std::string& class_name);
+    /** Source file the class registered from; research results are keyed by it. Throws on an
+     * unknown class. */
+    static std::string source(const std::string& class_name);
+    /** Defaults overridden by `setting` (model::resolve). Throws std::invalid_argument on an
+     * unknown class or name, an out-of-range value or a fraction for an integer. */
+    static model::Values resolve_setting(const std::string& class_name,
+                                         const model::Values& setting);
+    /** One of its record's class, acting through `context`; the record's setting resolved. Throws
+     * on an unknown class. */
+    static std::unique_ptr<Strategy> create(StrategyContext& context);
 };
 
-/** In a strategy's .cpp, inside namespace strategy: REGISTER_STRATEGY(IvMeanRevertStrategy).
- * The class declares a static parameters() (the template's empty one if it has none). */
+/** Use in a strategy's .cpp inside namespace strategy; parameters come from its Setting. */
 #define REGISTER_STRATEGY(ClassName)                                                               \
     [[maybe_unused]] static const bool registered_##ClassName =                                    \
-        strategy::StrategyRegistry::add(                                                       \
+        ::strategy::StrategyRegistry::add(                                                         \
             #ClassName,                                                                            \
-            [](strategy::StrategyContext* context, const std::string& strategy_name,           \
-               const std::string& portfolio_name,                                                  \
-               const std::unordered_map<std::string, double>& setting)                             \
-                -> std::unique_ptr<strategy::OptionStrategyTemplate> {                         \
-                return std::make_unique<ClassName>(context, strategy_name, portfolio_name,         \
-                                                   setting);                                       \
+            [](::strategy::StrategyContext& context) -> std::unique_ptr<::strategy::Strategy> {    \
+                return std::make_unique<ClassName>(context);                                       \
             },                                                                                     \
-            ClassName::parameters())
+            ::strategy::parameters_of_class<ClassName>(), __FILE__)
 
 } // namespace strategy

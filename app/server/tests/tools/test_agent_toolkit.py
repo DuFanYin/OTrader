@@ -5,9 +5,11 @@ data is faked to fail."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import tempfile
+from datetime import date
 
 
 import httpx  # noqa: E402
@@ -16,9 +18,14 @@ from fastapi.testclient import TestClient  # noqa: E402
 from pydantic import BaseModel, ValidationError  # noqa: E402
 
 from main import create_app  # noqa: E402
-from optra.infra import numerics  # noqa: E402
+from optra.infra import access, numerics  # noqa: E402
 from optra.services import market_data  # noqa: E402
+from optra.data import synthetic_days
+from optra.utils import files  # noqa: E402
 from optra.tools import TOOLS, ToolError, call, call_sync  # noqa: E402
+from optra.research import jobs, ledger, store  # noqa: E402
+from optra.tools.experiments import EXAMPLE_ID, EXAMPLE_TRIAL  # noqa: E402
+from optra.tools.promotion import EXAMPLE_VERSION  # noqa: E402
 from optra.tools.runs import RUN  # noqa: E402
 from optra.version import CONTRACT_VERSION  # noqa: E402
 
@@ -68,16 +75,42 @@ def test_every_tool_is_documented_for_a_model():
         assert t.schema()["examples"] == [t.example]
 
 
-def test_every_example_runs_and_returns_the_envelope(offline):
-    made = asyncio.run(call("price_option", TOOLS["price_option"].example))["run_id"]
-    for t in TOOLS.values():  # the history's examples stand in for a run: use a real one
-        example = {k: made if v == RUN else v for k, v in t.example.items()}
+GATED = {"holdout_report", "approve_strategy_version"}
+
+
+def test_every_example_runs_and_returns_the_envelope(offline, own_strategy_dirs, tmp_path, monkeypatch):
+    # The examples' week (2025-03-03 to 03-07) of synthetic SPXW and SPY days: the examples run, not the full data.
+    for symbol in ("SPXW", "SPY"):
+        synthetic_days.generate(synthetic_days.Model(), date(2025, 3, 3), date(2025, 3, 7), tmp_path / "data", symbol,
+                                False)
+    monkeypatch.setattr(files, "data_root", lambda: tmp_path / "data")
+    monkeypatch.setattr(store, "db_path", lambda: tmp_path / "experiments.db")  # a ledger of its own
+    monkeypatch.setattr(store, "_db", None)
+    made = {RUN: asyncio.run(call("price_option", TOOLS["price_option"].example))["run_id"]}
+    for t in TOOLS.values():  # the examples' stand-ins for a run, an experiment, a trial: real ones
+        example = {k: made.get(v, v) if isinstance(v, str) else v for k, v in t.example.items()}
         if t.live:  # no live engine here: it says so
-            with pytest.raises(ToolError, match="live engine"):
+            with pytest.raises(ToolError, match="engine is not reachable"):
                 asyncio.run(call(t.name, example))
             continue
-        r = asyncio.run(call(t.name, example))
+        if t.person:  # the person's: refused to the agent, run as the person
+            with pytest.raises(ToolError) as e:
+                asyncio.run(call(t.name, example))
+            assert e.value.status == 403, t.name
+        if t.name in GATED:  # its gates, or the holdout, are not there for the example
+            with access.system(), pytest.raises(ToolError) as e:
+                asyncio.run(call(t.name, example))
+            assert e.value.status == 409, (t.name, e.value.message)
+            continue
+        with access.system() if t.person else contextlib.nullcontext():
+            r = asyncio.run(call(t.name, example))
         assert set(r) == ENVELOPE and r["status"] == "ok" and r["tool"] == t.name, t.name
+        if t.name == "submit_experiment":  # run it, as a worker would
+            jobs.wait(ref=r["result_summary"]["experiment_id"])
+            made[EXAMPLE_ID] = r["result_summary"]["experiment_id"]
+            made[EXAMPLE_TRIAL] = ledger.trial_ids(made[EXAMPLE_ID])[0]
+        if t.name == "register_strategy_version":
+            made[EXAMPLE_VERSION] = r["result_summary"]["id"]
         assert r["contract_version"] == CONTRACT_VERSION
         json.dumps(r, allow_nan=False)  # no NaN or infinity reaches a client
     chain = asyncio.run(call("option_chain", {"currency": "BTC"}))
@@ -98,7 +131,7 @@ def test_errors_say_what_is_wrong():
 
 
 def test_the_engine_speaks_the_same_contract():
-    assert numerics.is_engine_available() and numerics.ENGINE_PROBLEM == ""
+    assert numerics.is_engine_available() and numerics.engine_problem() == ""
     r = numerics.run_engine_task("pricing", {"spot": 100, "strike": 100, "rate": 0.03, "vol": 0.2, "maturity": 1})
     assert r["contract_version"] == CONTRACT_VERSION
 

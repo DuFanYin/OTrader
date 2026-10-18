@@ -48,8 +48,8 @@ def test_default_gate_passes_and_coarse_ito_fails_with_the_right_fix():
     assert ok["result_summary"]["gate_decision"] == "go", ok["result_details"]["rows"]
     rows = {row["metric"]: row for row in coarse["result_details"]["rows"]}
     assert rows["formula_residual"]["status"] == "fail" and rows["expectation_gap"]["status"] == "pass"
-    actions = [a["action_id"] for a in coarse["result_details"]["explainable_qa"]["minimal_fix_set"]]
-    assert actions == ["increase_ito_steps"]
+    fixes = [(row["param"], row["proposed_value"]) for row in rows.values() if row["status"] == "fail"]
+    assert fixes == [("ito_n", 4000)]
 
 
 if __name__ == "__main__":

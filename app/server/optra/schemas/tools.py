@@ -190,8 +190,6 @@ class ValidationGateRequest(Input):
     rate: float = Field(..., ge=-1.0, le=1.0, description=RATE)
     vol: float = Field(..., gt=0, le=5.0, description=VOL)
     maturity: float = Field(..., gt=0, le=100.0, description=MATURITY)
-    n_paths: int = Field(10000, ge=100, le=20_000_000, description=MC_PATHS)
-    dividend_yield: float = Field(0.0, ge=-1.0, le=1.0, description=DIVIDEND)
 
     mu: float = Field(0.0, description="Stats check: mean of the normal distribution.")
     stats_theta: float = Field(1.0, description="Stats check: argument of the moment-generating function.")
@@ -202,28 +200,10 @@ class ValidationGateRequest(Input):
     ito_t: float = Field(1.0, gt=0, le=100.0, description="Itô check: horizon, in years.")
     ito_n: int = Field(2000, ge=100, le=2_000_000, description="Itô check: steps of the discrete paths.")
 
-    model: Literal["brownian", "vasicek"] = Field("brownian", description="Simulation check: the process.")
-    sim_steps: int = Field(100, ge=1, le=500_000, description="Simulation check: steps.")
-    sim_dt: float = Field(0.01, gt=0, le=10.0, description="Simulation check: step length, in years.")
-    sim_kappa: float = Field(1.2, ge=0, le=100.0, description="Simulation check: Vasicek mean reversion.")
-    sim_theta: float = Field(0.03, ge=-10.0, le=10.0, description="Simulation check: Vasicek long-run mean.")
-
-    measure_n: int = Field(200, ge=20, le=2_000_000, description="Steps of the density path (used by the fix suggestions).")
-    cmp_steps: int = Field(400, ge=40, le=200_000, description="P vs Q comparison: steps (used by the fix suggestions).")
-    cmp_paths: int = Field(2000, ge=100, le=200_000, description="P vs Q comparison: paths (used by the fix suggestions).")
-
-    conv_steps: list[int] = Field(default_factory=lambda: [10, 20, 40, 80, 120, 200, 320, 500], min_length=2, max_length=30, description=LADDER)
-
-    pde_s_steps: int = Field(200, ge=40, le=2000, description="Finite-difference grid points in price.")
-    pde_t_steps: int = Field(200, ge=40, le=4000, description="Finite-difference grid points in time.")
-    pde_method: Literal["crank_nicolson", "implicit", "explicit"] = Field("crank_nicolson", description="Finite-difference scheme.")
+    sim_steps: int = Field(100, ge=1, le=500_000, description="Simulation check: steps of the GBM path (dt 0.01).")
 
     n_rebalances: int = Field(52, ge=1, le=10_000, description="Hedging check: rebalances until expiry.")
     hedge_paths: int = Field(500, ge=50, le=200_000, description="Hedging check: paths.")
-
-    batch_jobs: int = Field(7, ge=1, le=500, description="Batch check: grid points.")
-    batch_spot_shock: float = Field(0.02, ge=0.0, le=1.0, description="Batch check: spot step, as a fraction of spot.")
-
 
 GREEK = "delta, gamma, vega, theta or rho (Black-Scholes)."
 

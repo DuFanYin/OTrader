@@ -4,17 +4,14 @@
 
 namespace quant {
 
-// The vol at which bs_closed_form_price (at r - q: its drift and its discount) gives market_price: Black on the
-// forward S e^{(r-q)T}, discounted at r - q, solved by LetsBeRational. -1.0 when there is none in [1e-4, 5].
 double bs_implied_vol(
     double market_price, double spot, double strike,
     double rate, double maturity, double dividend_yield
 ) {
     if (market_price <= 0.0 || spot <= 0.0 || strike <= 0.0 || maturity <= 0.0)
         return -1.0;
-    const double r_eff = rate - dividend_yield;
-    const double forward = spot * std::exp(r_eff * maturity);
-    const double iv = black_implied_vol(market_price, forward, strike, maturity, r_eff, true);
+    const double forward = spot_forward(spot, rate, dividend_yield, maturity);
+    const double iv = black_implied_vol(market_price, forward, strike, maturity, rate, true);
     return (iv >= 1e-4 && iv < 5.0) ? iv : -1.0;
 }
 

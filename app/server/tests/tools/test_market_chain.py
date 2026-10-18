@@ -215,7 +215,7 @@ def test_iv_surface_keeps_contract_and_needs_two_requests():
         assert len(fake.requests) == 2
     surface = out["surface"]
     assert out["raw_instruments_count"] == len(raw_fixture()["instruments"])
-    assert surface and all(set(r) == {"expiry", "instrument", "strike", "years", "iv", "iv_pct"} for r in surface)
+    assert surface and all(set(r) == {"expiry", "instrument", "strike", "years", "iv"} for r in surface)
     per_expiry: dict[str, int] = {}
     for r in surface:
         per_expiry[r["expiry"]] = per_expiry.get(r["expiry"], 0) + 1

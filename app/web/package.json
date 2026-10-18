@@ -1,6 +1,5 @@
 {
   "name": "optra-web",
-  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Optra's page: the trading and research views, Preact + Tailwind, built by Vite into dist/ for the server",

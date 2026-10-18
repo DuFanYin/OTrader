@@ -1,5 +1,5 @@
 // Data: the days there are to backtest on, and the live engine's database: its contracts, syncing them from IB,
-// and clearing them or its record of orders and trades.
+// and clearing them or its record of orders and fills.
 import { signal } from "@preact/signals";
 import { get, post } from "../lib/api.js";
 import { bytes, count } from "../lib/format.js";
@@ -17,9 +17,9 @@ const syncing = signal(false);
 const synced = signal(null);  // the last sync: { portfolio, options, expiries }
 
 const CLEAR = {
-  trading: ["Clear orders and trades", "Delete every recorded order and trade, and the holdings saved from them? This cannot be undone."],
-  contracts: ["Clear contracts", "Delete every contract? A running engine keeps the ones it loaded; its next start "
-    + "needs them synced again (above)."],
+  trading: ["Clear orders and fills", "Delete every recorded order and fill, and the holdings saved from them? This cannot be undone."],
+  contracts: ["Clear contracts", "Delete every contract saved? A running engine keeps the ones it trades; the next "
+    + "sync (above, or the engine's own each morning) saves them again."],
 };
 
 async function sync() {
@@ -73,28 +73,28 @@ function Params() {
     <>
       <Group title="Backtest data">
         <Line>One Parquet file per trading day, under data/&lt;SYMBOL&gt;/&lt;SYMBOL&gt;-YYYY-MM/YYYYMMDD.parquet (see doc/data.md).</Line>
-        <Line>No recorded data? POST /api/data/synthetic writes days from a model whose answers are known.</Line>
+        <Line>No recorded data? POST /api/data/synthetic writes days from a model whose answers are known, to data/synthetic (out: "data" makes them the underlying's days).</Line>
       </Group>
       <Group title={`Contracts from ${broker()}`}>
-        <Line>A portfolio's underlying and its options expiring within the days, from the connected {gatewayName()}. The
-          engine trades them from its next start.</Line>
+        <Line>A portfolio's underlying and its options expiring within the days, from the connected {gatewayName()},
+          rolled into the running engine at once, as it does itself each trading morning.</Line>
         <Select k="syncPortfolio" label="Portfolio" wide={false} options={portfolios.value.map((x) => [x, x])}
           placeholder={portfolios.value.length ? undefined : "Engine not running"} />
         <Num k="syncMaxDte" label="Days to expiry" wide={false} step={1} min={0} max={60} />
-        <div class="col-span-2">
+        <div class="col-span-full">
           <Action disabled={syncing.value || !params.value.syncPortfolio} onClick={sync}>
             {syncing.value ? "Syncing…" : "Sync contracts"}
           </Action>
         </div>
         {synced.value && (
-          <Line>Saved {count(synced.value.options)} {synced.value.portfolio} options
-            {synced.value.expiries.length ? `, expiring ${synced.value.expiries[0]} to ${synced.value.expiries.at(-1)}` : ""}.
-            Restart the engine to trade them.</Line>
+          <Line>Rolled in {count(synced.value.options)} {synced.value.portfolio} options
+            {synced.value.expiries.length ? `, expiring ${synced.value.expiries[0]} to ${synced.value.expiries.at(-1)}` : ""}:
+            the engine trades them now.</Line>
         )}
       </Group>
       <Group title="Database">
-        <Line>The live engine's contracts, orders and trades, in data/optra.db.</Line>
-        <div class="col-span-2 flex flex-wrap gap-2">
+        <Line>The live engine's contracts, orders and fills, in data/optra.db.</Line>
+        <div class="col-span-full flex flex-wrap gap-2">
           {Object.entries(CLEAR).map(([what, [label]]) => <Action danger onClick={() => clear(what)}>{label}</Action>)}
         </div>
         {emptied.value && (
@@ -137,8 +137,8 @@ function Contracts() {
         <Table compact maxHeight="420px" rows={c.equity?.rows} empty="No underlyings in the database." cols={[
           { key: "symbol", label: "Symbol", align: "left", cls: "font-medium" },
           { key: "product", label: "Product", align: "left" },
-          { key: "size", label: "Size" },
-          { key: "pricetick", label: "Tick" },
+          { key: "multiplier", label: "Multiplier" },
+          { key: "price_tick", label: "Tick" },
         ]} />
       </Card>
       <Card title="Option chains" meta={`${count(c.option?.chains)} chains · ${count(c.option?.total)} options`}>

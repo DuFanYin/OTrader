@@ -1,5 +1,6 @@
 // Building blocks of the results: cards, key-value lists, tables, buttons, run states, notes, warnings.
 import { toast } from "./toast.jsx";
+import { ENGINE_DOWN } from "../lib/api.js";
 import { fmt, ms } from "../lib/format.js";
 import { results } from "../lib/store.js";
 
@@ -7,11 +8,11 @@ import { results } from "../lib/store.js";
 export function Card({ title, meta, wide, children, actions }) {
   return (
     <section class={`flex min-w-0 flex-col rounded-md border border-line bg-surface shadow-[var(--shadow)] ${wide ? "col-span-full" : ""}`}>
-      <header class="flex min-h-9 flex-wrap items-center justify-between gap-x-3 gap-y-1.5 border-b border-line px-3 py-1.5">
+      <header class="flex min-h-9 flex-wrap items-center justify-between gap-x-3 gap-y-1.5 px-3 pt-2">
         <h2 class="min-w-0 truncate text-sm font-semibold">{title}</h2>
         <div class="flex flex-wrap items-center justify-end gap-2 text-xs text-muted">{meta}{actions}</div>
       </header>
-      <div class="flex min-w-0 flex-col gap-3 p-3">{children}</div>
+      <div class="flex min-w-0 flex-col gap-3 px-3 pt-1 pb-3">{children}</div>
     </section>
   );
 }
@@ -47,7 +48,7 @@ export function Kv({ rows, cols = 2 }) {
   const items = rows.filter(Boolean);
   if (!items.length) return <Empty />;
   return (
-    <dl class={`grid gap-x-6 ${{ 1: "", 2: "sm:grid-cols-2", 4: "sm:grid-cols-2 xl:grid-cols-4" }[cols]}`}>
+    <dl class={`grid gap-x-6 ${{ 1: "", 2: "sm:grid-cols-2", 3: "sm:grid-cols-3", 4: "sm:grid-cols-2 xl:grid-cols-4" }[cols]}`}>
       {items.map(([k, v]) => (
         <div class="flex min-w-0 items-baseline justify-between gap-3 border-b border-line/70 py-[3px] text-sm">
           <dt class="max-w-[60%] shrink-0 truncate text-ink-2">{k}</dt>
@@ -60,14 +61,14 @@ export function Kv({ rows, cols = 2 }) {
 
 const isNode = (v) => v !== null && typeof v === "object" && ("type" in v || Array.isArray(v));
 
-/** A table. cols: [{ key, label, fmt?, align?, cls? }]; rows: objects. */
+/** A table, its rows ruled and no box of its own (the card is the box). cols: [{ key, label, fmt?, align?, cls? }]; rows: objects. */
 export function Table({ cols, rows, onRow, selected, compact, maxHeight, empty }) {
   if (!rows?.length) return <Empty>{empty}</Empty>;
   return (
-    <div class="min-w-0 overflow-auto rounded-sm border border-line" style={maxHeight ? { maxHeight } : undefined}>
+    <div class="min-w-0 overflow-auto" style={maxHeight ? { maxHeight } : undefined}>
       <table class="w-full border-collapse text-sm">
-        <thead class="sticky top-0 z-[1] bg-surface-2">
-          <tr>{cols.map((c) => <th class={`whitespace-nowrap px-2 py-1 text-xs font-medium text-muted ${c.align === "left" ? "text-left" : "text-right"}`}>{c.label ?? c.key}</th>)}</tr>
+        <thead class="sticky top-0 z-[1] border-b border-line-strong bg-surface">
+          <tr>{cols.map((c) => <th class={`whitespace-nowrap px-2 py-1 text-xs font-medium text-muted first:pl-0 last:pr-0 ${c.align === "left" ? "text-left" : "text-right"}`}>{c.label ?? c.key}</th>)}</tr>
         </thead>
         <tbody>
           {rows.map((r, i) => (
@@ -75,7 +76,8 @@ export function Table({ cols, rows, onRow, selected, compact, maxHeight, empty }
               class={`border-t border-line ${onRow ? "cursor-pointer hover:bg-surface-2" : ""} ${selected === i ? "bg-accent-soft" : ""}`}>
               {cols.map((c) => {
                 const v = c.fmt ? c.fmt(r[c.key], r) : r[c.key];
-                return <td class={`whitespace-nowrap px-2 ${compact ? "py-0.5" : "py-1"} ${c.align === "left" ? "text-left" : "text-right"} ${c.cls ?? ""}`}>{isNode(v) ? v : fmt(v)}</td>;
+                const wrap = c.cls?.includes("whitespace-") ? "" : "whitespace-nowrap";  // a column may wrap
+                return <td class={`${wrap} px-2 first:pl-0 last:pr-0 ${compact ? "py-0.5" : "py-1"} ${c.align === "left" ? "text-left" : "text-right"} ${c.cls ?? ""}`}>{isNode(v) ? v : fmt(v)}</td>;
               })}
             </tr>
           ))}
@@ -89,10 +91,10 @@ export const Empty = ({ children = "No data" }) => <p class="text-sm text-muted"
 export const Note = ({ children }) => <p class="text-xs leading-relaxed text-muted">{children}</p>;
 
 /** A plain button for a panel's header. */
-export function Button({ children, onClick, primary, title, type = "button" }) {
+export function Button({ children, onClick, primary, title, disabled, type = "button" }) {
   return (
-    <button type={type} title={title} onClick={onClick}
-      class={`h-8 rounded-sm px-3 text-sm transition-colors ${primary
+    <button type={type} title={title} onClick={onClick} disabled={disabled}
+      class={`h-8 rounded-sm px-3 text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${primary
         ? "bg-accent font-semibold text-accent-ink hover:opacity-90" : "border border-line text-ink-2 hover:border-line-strong hover:text-ink"}`}>
       {children}
     </button>
@@ -155,6 +157,11 @@ export const Running = () => (
   </div>
 );
 
-export const ErrorText = ({ children }) => (
+/** A failure, in red; the engine not answering is a state, shown as one. */
+export const ErrorText = ({ children }) => (children === ENGINE_DOWN ? (
+  <p class="flex items-center gap-2 py-1 text-sm text-muted">
+    <span class="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-warn" />{children}
+  </p>
+) : (
   <p class="rounded-sm bg-down-soft px-2 py-1.5 font-mono text-xs leading-relaxed break-words text-down">{children}</p>
-);
+));

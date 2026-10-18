@@ -9,14 +9,8 @@ def greek_surface(req: GreekSurfaceRequest) -> Result:
     result = engine_greek_surface(strike=req.strike, rate=req.rate, vol=req.vol, dividend_yield=req.dividend_yield,
                                   spot_min=req.spot_min, spot_max=req.spot_max, mat_min=req.mat_min, mat_max=req.mat_max,
                                   n_spots=req.n_spots, n_mats=req.n_mats, greek=req.greek)
-    summary = {
-        "greek":    result.get("greek", req.greek),
-        "n_spots":  result.get("n_spots", req.n_spots),
-        "n_mats":   result.get("n_mats", req.n_mats),
-        "grid_min": result.get("grid_min", 0.0),
-        "grid_max": result.get("grid_max", 1.0),
-    }
-    details = {"spots": result.get("spots", []), "maturities": result.get("maturities", []), "grid": result.get("grid", [])}
+    summary = {k: result[k] for k in ("greek", "n_spots", "n_mats", "grid_min", "grid_max")}
+    details = {k: result[k] for k in ("spots", "maturities", "grid")}
     return Result(summary=summary, details=details)
 
 

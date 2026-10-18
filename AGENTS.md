@@ -1,99 +1,52 @@
 # AGENTS.md
 
-How to work in this repository, for coding agents. Read it before a task; the design documents under `doc/` go deeper.
+A map of this repository for coding agents: where each thing is, which document explains it, how to build and check, and the few hard rules. The explanations live in `doc/`; read the one for the part you touch.
 
-## What Optra is
+## Where things are
 
-One options trading and research system, in one repository:
-
-| Part | Where | What it is |
+| Path | What it is | Read |
 |---|---|---|
-| Engine | `engine/` | C++23, event-driven. Strategies take events (timer, snapshot, order, fill) and emit intents (order, cancel). One `core::Engine` runs a backtest (Parquet days, simulated fills) and live trading on Interactive Brokers (one process: IB market data, IB orders, SQLite, a gRPC service). |
-| Numerics | `engine/quant/` | Pricing, Greeks, implied vol, Monte Carlo, trees, PDE, Heston, the screener: the engine links it; the server loads it through a C ABI (`engine/quant/analytics`, `libanalytics_c.so`). |
-| Server | `app/server/` | One FastAPI app, one API under `/api`: the live engine through gRPC only, backtests through `entry_backtest`, the research tools (`/api/lab/...`) and the engine's (`/api/backtest/...`), each also at `/api/tools/{name}`, the run history (`/api/runs`), the daily check and report. |
-| Page | `app/web/` | One Preact page, served by the server: Trading (Home, Account, Orders, Data) and Research (Backtest, Screener, Pricing, Multi-Leg, Risk, Numerics, Validation). |
+| `engine/core/` | the trading engine: `Main` (`main.*`), its event loop, and the engines, a folder each (`bookkeeping`, `risk`, `strategy`, `market_data`, `log`) beside the ports (`gateway`, `database`) | [doc/engine.md](doc/engine.md) |
+| `engine/assembly/` | `Main` put together with its adapters: the live one (`live.*`, with the trading days) and the backtest (`backtest.*`: the replay, a day, many trials over many days) | [doc/engine.md](doc/engine.md) |
+| `engine/adapters/` | the ports' implementations: IB, the backtest's venue, the simulated market, the Parquet days, SQLite | [doc/engine.md](doc/engine.md#how-the-engine-is-organised) |
+| `engine/strategy/` | what a strategy is written against: the base class, its context (what it reads and does), the registry that loads strategy libraries | [doc/engine.md](doc/engine.md#writing-a-strategy) |
+| `engine/model/`, `engine/utilities/` | the data model (contracts, orders, fills, combos, the portfolio: `Listing`, `Portfolio`, `PortfolioSnapshot`; a strategy's record, parameters declared with `Param`, values by day); generic pieces (queues, rings, pools, the thread pool, logging) | [doc/engine.md](doc/engine.md#how-the-engine-is-organised) |
+| `engine/quant/` | the numerics (pricing, Greeks, implied vol, Monte Carlo, trees, PDE, Heston, the screener, the selection statistics: DSR, PBO, walk-forward) and its C ABI (`analytics/`) | [doc/research.md](doc/research.md#the-methods) |
+| `engine/entry/` | the programs (`entry_backtest`, `entry_live`, `entry_simulate`) and the gRPC API (`optra_engine.proto`) | |
+| `engine/tests/` | `unit/` mirrors `engine/`; `integration/` (IB paper); `checks/` (on data); `bench/` | [doc/latency.md](doc/latency.md) |
+| `strategy/` | strategies, a library per `.cpp`: `demo/` the repository's (the only one in git); `research/`, `paper/`, `live/`, `configs/` the owner's and the agents' | [doc/engine.md](doc/engine.md#writing-a-strategy) |
+| `app/server/optra/` | the server: `api/` routes, `tools/` the declared tools, `research/` experiments, ledger and jobs, `services/`, `infra/` (gRPC client, backtest runner, C ABI) | [doc/server.md](doc/server.md) |
+| `app/web/src/` | the page: `app.jsx` the shell, `views/` one per tab, `ui/`, `charts/`, `lib/` | [doc/server.md](doc/server.md#the-page) |
+| `scripts/` | `bench.sh` (latency benchmarks, a fixed clock), `dev.sh` (the stack for development), `fetch.sh` (third-party code), `test_sanitize.sh`, `backtest_sample.py` and `page_samples.py` (the pages' samples, made again); `data/` (an example conversion into backtest days, the live engine's quote recorder) | [doc/data.md](doc/data.md) |
+| `doc/` | for people: architecture, engine, latency, backtesting, server, research, data; the Chinese README; `architecture.html` (the diagrams) | |
+| `data/`, `local/` | backtest days and databases; the owner's notes (neither in git) | |
 
-Three ways across process boundaries, each for one kind of thing; a new feature uses the one that fits, never a fourth:
-- **gRPC** to the live engine: it holds the trading state and must outlive the control plane.
-- **C ABI** (`libanalytics_c.so`) for stateless numerics: JSON in, JSON out.
-- **A subprocess** (`entry_backtest`, its stdout is the result JSON and nothing else) for backtests: parallel, killable, isolated.
-
-Outside, a capability is a **tool**: declared once (name, a description written for a model, an input model whose every field is described, an example), reached over HTTP (its own route and `POST /api/tools/{name}`; `GET /api/tools` lists them) or from Python (`optra.tools.call`); its result comes in one envelope and is kept in the run history. Design the tool first; the page only calls it. No MCP, no separate CLI: the API is the interface for agents.
-
-## Commands
+## Build, run, check
 
 ```bash
-./build.sh r                 # engine/build: entry_backtest, entry_live, entry_simulate, libanalytics_c.so (Release)
-./build.sh r 0 g             # clean reconfigure, with the IB gateway (first time: fetches the TWS API)
-ctest --test-dir engine/build                      # C++ tests (GoogleTest); no network, no database
-(cd app/server && uv run --group dev --group databento pytest -q)   # ~15 min: real-data backtests
-scripts/test_sanitize.sh address|thread            # ASan / TSan builds of the concurrency tests
-run-clang-tidy -p engine/build -quiet engine/      # before finishing a C++ change
-scripts/gen_proto.sh                               # after editing engine/entry/optra_engine.proto
-(cd app/web && npm run build)                      # the page the server serves (app/web/dist)
-./scripts/dev.sh                                   # server + page for development (PORT=8010 beside a deployed one)
-
-./engine/build/entry_backtest --list-strategies    # every strategy and its parameters (JSON)
-./engine/build/entry_backtest --files data/SPY/SPY-2025-03/*.parquet ComboStrategy leg1_ratio=1 leg2_ratio=1 leg2_right=1
+./build.sh r                      # engine/build: the programs, libanalytics_c.so (Release); g adds the IB gateway
+./build.sh s                      # the strategy libraries only
+./build.sh p                      # the server's Python stubs, after editing engine/entry/optra_engine.proto
+ctest --test-dir engine/build     # C++ tests
+(cd app/server && uv run --group dev pytest -q)   # server tests, minutes: in the background
+(cd app/web && npm run build)     # the page the server serves
+./scripts/dev.sh                  # engine, server and page together for development
+./engine/build/entry_backtest --list-strategies
 ```
 
-Linux only, GCC 14 or newer, the Ubuntu packages (the apt line is in the README); `engine/CMakePresets.json` pins the toolchain and `build.sh` picks a preset. No data ships with the repository: synthetic days come from `scripts/data/synthetic_to_parquet.py` or `POST /api/data/synthetic` ([doc/data.md](doc/data.md)).
+Linux, GCC 14 or newer (the apt line is in the README). No data ships with the repository: `python -m optra.data.synthetic_days` (in `app/server`) makes days; `scripts/data/example_to_parquet.py` shows how to convert your own ([doc/data.md](doc/data.md)).
 
-The IB paper-account tests (`engine/tests/integration`, label `ib_paper`) trade at market: only during market hours, only when asked, with `OPTRA_IB_PAPER_TESTS=1` (and `OPTRA_IB_PAPER_FILLS=1` for the ones that fill).
+## Where a change goes
 
-## Layout
+- **A strategy**: first a setting of `ComboStrategy` (legs as rules); a new class in `strategy/research/` only for what its parameters cannot say.
+- **An experiment**: a config in `strategy/configs/`, run by the `backtest` tool; counted in the ledger before it runs ([doc/server.md](doc/server.md#experiments)).
+- **Something the page or an agent needs**: a tool in `app/server/optra/tools/` first, the page only calls it; from the live engine, an RPC in the proto ([doc/research.md](doc/research.md#for-agents)).
+- **Another broker, data vendor or database**: an adapter behind `core::Gateway`, `core::MarketData` or `core::Database`.
+- **A research question**: read what the engine already reports (per-trade attribution, the ledger's days, `replay_trial`) before writing a script; a question that comes back becomes a parameter or an engine feature.
 
-```
-engine/
-  entry/       entry_backtest, entry_live; the gRPC API (optra_engine.proto, engine_grpc: GrpcLiveEngineService)
-  core/        Engine (engine_main: the engines, the ports, what each event does) · the event loop · the two assemblies
-    engines/   execution · position · hedge · risk · option strategy · log: no I/O
-  strategy/    the template, the registry, factory/ (one .hpp/.cpp per strategy)
-  model/       the data model: orders, fills, contracts, events, portfolios, symbols, combos
-  adapters/    one folder per outside system: the venue port, ib/, backtest/, marketdata/, db/ (SQLite)
-  utilities/   generic: base engine, logging, rings, pools, thread pool
-  quant/       the numerics, and analytics/ (the research workflows and the C ABI)
-  tests/       unit/, integration/ (IB paper), checks/ (by hand on data), bench/
-app/server/    main.py; optra/api (routes), tools/ (the declared tools), services/ (domain, backtest days), infra/ (gRPC
-               client, backtest runner, C ABI, run store), schemas/, proto/; tests/ (trading/, tools/, evals/)
-app/web/       src/app.jsx (the shell), views/ (one per tab), ui/, charts/, lib/ (API client, store, history)
-doc/           five documents for people: architecture, engine, server, research, data; README.zh.md (the Chinese
-               README), architecture.html (the interactive diagram), images/
-scripts/       build and development tools; data/ (Databento conversions, synthetic and recorded days, Deribit fixtures)
-data/          backtest days, recordings, the live database (not in git)
-```
+## Rules
 
-## How the engine works
-
-- **Events in, intents out.** `Engine::process_event` (`core/engine_main.cpp`) does what each event does, once for both modes: a snapshot updates its portfolio, then strategies' `on_snapshot`; the timer runs settlement, strategies, position metrics, hedges, in that order; an order update or a fill is booked (`book_order`, `book_trade`), then the strategy hears.
-- **One writer.** Live, one event thread owns the trading state; the gateway, the market data and the log run on their own threads and only put events (fills and commands in an ordered queue, never dropped; a portfolio's newest snapshot). The event thread never waits on the outside: the database writer thread commits in batches.
-- **The ports.** The core reaches out only through `RuntimeAPI` (`core/runtime_api.hpp`): orders and cancels to the venue, chain subscriptions, strategy updates, name checks. `core::backtest::MainEngine` and `core::live::MainEngine` only set the ports (event loop, clock, venue, storage, market data); booking, timer order, settlement and restore are written once.
-- **A fill is one contract's.** A combo fills as its legs (the venue's port contract, `adapters/engine_gateway.hpp`); a combo position is keyed by its legs and its quantity comes from theirs. IB's own shapes (the BAG's execution, a one-leg combo) stay inside the IB gateway: [doc/engine.md](doc/engine.md#what-interactive-brokers-sends-back).
-- **Deterministic booking.** `ExecutionEngine` merges each order update (a repeat or an out-of-date one changes nothing; an end is final) and holds an order's end until its fills are booked, so the holding never depends on arrival order.
-- **Live restarts resume.** Every order and fill is saved; a restart rebooks them, checks the holdings against the broker before any strategy starts, and resumes the strategies that were running. Closing the engine does not stop strategies (`on_stop` may close positions); only the operator stops one.
-
-## Common changes
-
-- **A strategy**: a subclass of `strategy::OptionStrategyTemplate` in its own `.hpp/.cpp` under `strategy/factory/`, with a static `parameters()` (name, default, min, max, integer) read by `param<T>()`, and one `REGISTER_STRATEGY(Name)`. `on_timer_logic` runs once per bar in both modes: read the clock with `now()`, never by counting calls.
-- **Something the page or a tool needs from the live engine**: a `MainEngine` operation (plain data), an RPC in the proto, `scripts/gen_proto.sh`, the server's client (`optra/infra`). The server never opens the engine's database.
-- **A research capability**: a tool in `app/server/optra/tools/` (the engine's in `tools/engine.py`), its domain code in `services/`; a view in `app/web/src/views/` if a person needs it. No tool places an order.
-- **Another broker or data vendor**: a subclass of `adapters::Gateway` (picked in `core::live::make_gateway`) or a `MarketDataFeed`.
-- **A document**: one of the five under `doc/`, written for a person to read (what and why first, then how); a new topic goes into the document it belongs to, not a new file. Update values where they are.
-
-## Conventions
-
-- C++23, 4 spaces, at most 100 columns, no formatter (there is no `.clang-format`): write in the file's style.
-- Names say literally what a thing is or does, in the style already there; no figures of speech in names, comments or logs. English in code, CMake, scripts and CI.
-- Namespaces follow the folders: `utilities`, `model`, `quant` (`quant::analytics`), `core` (`core::live`, `core::backtest`), `strategy`, `adapters`, `entry`.
-- `core/` holds engines only and no I/O; data structures go to `model/`, generic tools to `utilities/`. Add a method to the engine that owns the state rather than a new small type or file.
-- Engines log through `write_log`, never `printf` or `std::cout`.
-- Every library a target calls into is in its `target_link_libraries` (GNU ld resolves static libraries in link order).
-- The proto is generated at build time: include `optra_engine.pb.h` by its bare name; edit the `.proto`, never the generated files.
-
-## Guardrails
-
-- **Paper only.** The engine trades the one account in `IB_ACCOUNT` and refuses a live one unless root names it in `/etc/optra/live-account`. Never weaken that, connect a gateway on your own, or loosen a risk limit unless asked.
-- **No commit or push unless asked**, and no attribution trailers.
-- **`python-mvp` stays hand-written**: no generated code goes into that branch.
-- **Vendored code is fetched, not committed**: `engine/thirdparty/` (TWS API, Intel decimal library, LetsBeRational) comes from `scripts/fetch_ibjts.sh` and `scripts/fetch_lets_be_rational.sh`; don't assume it is there.
-- **Verify before saying done**: the C++ tests in both builds (with and without IB), the server's tests, the page's build, and for engine changes the example strategies' backtest P&L against the last run.
+- **What approves, installs or changes what trades is a person's**, never an agent tool's (`optra/infra/access.py`).
+- **Code**: C++23, 4 spaces, 100 columns, no formatter; names say literally what a thing does; English in code; minimal comments (why, not what); engines log through `write_log`.
+- **Third-party code is fetched, not committed** (`scripts/fetch.sh`, into `engine/thirdparty/`).
+- **Done means checked**: the C++ tests, the server's tests, the page's build; for an engine change, the example strategies' backtests against the last run.

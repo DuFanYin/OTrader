@@ -2,6 +2,7 @@
 // gateway and market data.
 import { computed, signal } from "@preact/signals";
 import { get } from "./api.js";
+import { poll } from "./poll.js";
 
 export const status = signal({ state: "loading" });  // { state: "ok", live } | { state: "down", error }
 /** A public demo: a simulated account on synthetic days (the server's OPTRA_DEMO). */
@@ -31,8 +32,9 @@ export const live = computed(() => {
   };
 });
 
-let timer = null;
+let watching = false;
 export function watchStatus(ms = 3000) {
-  refreshStatus();
-  timer ??= setInterval(refreshStatus, ms);
+  if (watching) return;
+  watching = true;
+  poll(refreshStatus, ms, () => status.value.state === "down");
 }

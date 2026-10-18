@@ -6,7 +6,7 @@ import * as P from "../lib/payloads.js";
 import { begin, fill } from "../lib/runner.js";
 import { params } from "../lib/store.js";
 import { Badge, Kv, Note, Slot, Sub, Table, tone } from "../ui/blocks.jsx";
-import { Group, Num, Seg, Slider, Segmented } from "../ui/controls.jsx";
+import { Dropdown, Group, Num, Seg, Slider, Segmented } from "../ui/controls.jsx";
 import { DialogGroup } from "../ui/dialog.jsx";
 import { Columns, HBars } from "../charts/Bars.jsx";
 import { Heatmap } from "../charts/Heatmap.jsx";
@@ -158,7 +158,7 @@ function Iv({ data }) {
   return (
     <>
       <Kv rows={[
-        ["Interpolated IV", s.interp_iv_pct != null ? `${Number(s.interp_iv_pct).toFixed(2)}%` : "–"], ["Method", s.interp_method],
+        ["Interpolated IV", s.interp_iv != null ? `${(100 * s.interp_iv).toFixed(2)}%` : "–"], ["Method", s.interp_method],
         ["Skew slope", s.local_skew_slope], ["Curvature", s.local_curvature],
         ["Confidence", s.confidence_label ? `${s.confidence_label} (${fmt(s.confidence_score)})` : "–"], ["Smile expiry", s.smile_selected_expiry],
       ]} />
@@ -172,9 +172,7 @@ function Iv({ data }) {
           <div class="flex items-center justify-between gap-2">
             <Sub>Smile</Sub>
             {expiries.length > 1 && (
-              <select class="h-6 rounded-sm border border-line bg-surface px-1.5 text-xs" value={expiry} onChange={(e) => setExpiry(e.currentTarget.value)}>
-                {expiries.map((k) => <option value={k}>{k}</option>)}
-              </select>
+              <span class="w-32"><Dropdown size="xs" value={expiry} onChange={setExpiry} options={expiries.map((k) => [k, k])} /></span>
             )}
           </div>
           <LineChart height={190} series={[{ label: "IV", points: [...smile].sort((a, b) => a.log_moneyness - b.log_moneyness)

@@ -1,5 +1,5 @@
 # Checks run by hand or by a script (tests/checks), and the GTest suites
-if(TARGET core_backtest)
+if(TARGET backtest)
   add_subdirectory(checks)
 endif()
 
@@ -8,7 +8,7 @@ if(BUILD_TESTS)
   find_package(GTest QUIET)
   if(GTest_FOUND)
     add_subdirectory(unit)
-    if(TARGET core_live AND TARGET ib_common) # the IB gateway build
+    if(TARGET live AND TARGET ib_api) # the IB gateway build
       add_subdirectory(integration)
     endif()
   else()

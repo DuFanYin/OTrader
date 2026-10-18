@@ -11,6 +11,8 @@ message EngineStatus {
   bool connected = 2;  // Connected to IB/TWS
   string detail  = 3;  // Text description, e.g. "live main engine"
   bool halted    = 4;  // trading halted by the operator (RiskState says why)
+  string code    = 5;  // the trading core it was built from: "engine" of <program>.code
+  reserved 6;  // version, until 2026-10-18
 }
 
 // Strategy summary.
@@ -36,54 +38,55 @@ message StrategyNameRequest {
 message AddStrategyRequest {
   string strategy_class = 1;
   string portfolio_name = 2;
-  string setting_json = 3;  // JSON string for strategy params
+  reserved 3;  // setting_json, a JSON string, until 2026-10-17
   string strategy_name = 4;  // instance name; empty = <strategy_class>_<portfolio_name>
+  map<string, double> setting = 5;  // the strategy's parameters by name
 }
 
 // Order record (DB orders table).
 message OrderRecord {
   string timestamp = 1;
   string strategy_name = 2;
-  string orderid = 3;
+  string order_id = 3;
   string symbol = 4;
   reserved 5;  // exchange
   string trading_class = 6;
   string type = 7;
-  string direction = 8;
-  double price = 9;
-  double volume = 10;
-  double traded = 11;
+  string side = 8;      // a contract's own order's side; empty for a combo (its legs carry theirs)
+  double price = 9;      // the net a unit: paid positive, received negative
+  double quantity = 10;
+  double filled = 11;
   string status = 12;
   string datetime = 13;
   string reference = 14;
-  bool is_combo = 15;
+  bool is_combo = 15;    // more than one leg, or one at a ratio other than 1
   reserved 16;  // legs_info
 }
 
-// Trade record (DB trades table).
-message TradeRecord {
+// Fill record (DB fills table).
+message FillRecord {
   string timestamp = 1;
   string strategy_name = 2;
-  string tradeid = 3;
+  string fill_id = 3;
   string symbol = 4;
   reserved 5;  // exchange
-  string orderid = 6;
-  string direction = 7;
+  string order_id = 6;
+  string side = 7;
   double price = 8;
-  double volume = 9;
+  double quantity = 9;
   string datetime = 10;
 }
 
-// The orders and the trades saved, of one strategy (empty: all), the latest `limit` of each (0: all).
-message OrdersAndTradesRequest {
+// The orders and the fills saved, of one strategy (empty: all), the latest `limit` of each (0: all).
+message OrdersAndFillsRequest {
   string strategy_name = 1;
   int32 limit = 2;
 }
 
-message OrdersAndTradesResponse {
+message OrdersAndFillsResponse {
   repeated OrderRecord orders = 1;
-  repeated TradeRecord trades = 2;
-  repeated string strategies = 3;  // every strategy name orders or trades are saved under
+  repeated FillRecord fills = 2;
+  repeated string strategies = 3;  // every strategy name orders or fills are saved under
 }
 
 // A contract saved (contract_option, contract_equity): what the engine trades from its next start.
@@ -91,8 +94,8 @@ message ContractMsg {
   string symbol = 1;
   reserved 2, 6;  // exchange, gateway_name
   string product = 3;
-  double size = 4;
-  double pricetick = 5;
+  double multiplier = 4;
+  double price_tick = 5;
   string option_type = 7;        // CALL or PUT; empty for the rest
   double option_strike = 8;
   string option_expiry = 9;      // YYYY-MM-DD, New York
@@ -104,7 +107,7 @@ message SavedContractsResponse {
 }
 
 message WipeDatabaseRequest {
-  string what = 1;  // "trading" (orders, trades, holdings) or "contracts"
+  string what = 1;  // "trading" (orders, fills, holdings) or "contracts"
 }
 
 message WipeDatabaseResponse {
@@ -113,6 +116,25 @@ message WipeDatabaseResponse {
 
 message ListPortfoliosResponse {
   repeated string portfolios = 1;
+}
+
+// A portfolio's quotes as the engine has them now (the latest snapshot applied): what
+// scripts/data/record_quotes.py records a minute at a time.
+message QuotesRequest {
+  string portfolio = 1;
+}
+
+message OptionQuote {
+  string symbol = 1;  // its OCC code, as the backtest data names the option
+  double bid = 2;
+  double ask = 3;
+}
+
+message QuotesResponse {
+  int64 time_ns = 1;          // the latest quotes' time (UTC); 0: none yet
+  double underlying_bid = 2;  // an index quotes a last price only: it stands for both sides
+  double underlying_ask = 3;
+  repeated OptionQuote options = 4;  // the ones quoted (a bid or an ask)
 }
 
 // Contracts from IB for one portfolio: its underlying and the options expiring within max_dte days.
@@ -128,14 +150,7 @@ message SyncContractsResponse {
 
 message ListStrategyClassesResponse {
   repeated string classes = 1;
-}
-
-message GetStrategyClassDefaultsRequest {
-  string strategy_class = 1;
-}
-
-message GetStrategyClassDefaultsResponse {
-  map<string, double> settings = 1;
+  repeated string refused = 2;  // the strategy libraries not loaded: "<library>: <why>"
 }
 
 message AddStrategyResponse {
@@ -159,7 +174,7 @@ message StrategyHoldingsResponse {
 }
 
 // -------- A strategy's holding on the wire --------
-message BasePositionMsg {
+message PositionMsg {
   string symbol = 1;
   int32 quantity = 2;
   double avg_cost = 3;
@@ -173,7 +188,7 @@ message BasePositionMsg {
   double multiplier = 11;  // shares per contract (0 in snapshots saved before it was kept)
 }
 
-// Unified option position: single-leg (legs empty) or multi-leg (combo_type + legs set).
+// One option contract held (holdings are by contract), with the combo it was opened in.
 message OptionPositionMsg {
   string symbol = 1;
   int32 quantity = 2;
@@ -185,12 +200,13 @@ message OptionPositionMsg {
   double gamma = 8;
   double theta = 9;
   double vega = 10;
-  string combo_type = 11;  // set for multi-leg; empty for single-leg
-  repeated BasePositionMsg legs = 12;
+  string combo_type = 11;  // the opening order's type; single_leg when opened alone
+  reserved 12;             // legs, when a combo was held as one position
   double multiplier = 13;  // shares per contract (0 in snapshots saved before it was kept)
+  string combo = 14;       // the opening order's legs, sorted and joined by '|'; else the symbol
 }
 
-message PortfolioSummaryMsg {
+message HoldingSummaryMsg {
   double total_cost = 1;
   double current_value = 2;
   double unrealized_pnl = 3;
@@ -200,7 +216,7 @@ message PortfolioSummaryMsg {
   double gamma = 7;
   double theta = 8;
   double vega = 9;
-  // the change in pnl by source since the engine started (model::PortfolioSummary)
+  // the change in pnl by source since the engine started (model::HoldingSummary)
   double pnl_delta = 10;
   double pnl_gamma = 11;
   double pnl_theta = 12;
@@ -210,9 +226,9 @@ message PortfolioSummaryMsg {
 }
 
 message StrategyHoldingMsg {
-  BasePositionMsg underlying = 1;
-  map<string, OptionPositionMsg> options = 2;  // key=symbol (single) or combo_sig (multi)
-  PortfolioSummaryMsg summary = 4;
+  PositionMsg shares = 1;
+  map<string, OptionPositionMsg> options = 2;  // by contract symbol
+  HoldingSummaryMsg summary = 4;
 }
 
 // The account's positions against the strategies' holdings, by contract.
@@ -222,7 +238,7 @@ message PositionDiffMsg {
   double broker = 3;  // the account's, at IB
 }
 
-message ReconcileResponse {
+message BrokerCheckResponse {
   bool agree = 1;
   repeated PositionDiffMsg mismatches = 2;
   repeated PositionDiffMsg external = 3;  // the account's, in contracts no portfolio trades
@@ -244,7 +260,7 @@ message AccountPositionMsg {
   double average_cost = 6;     // per share or per option
   double unrealized_pnl = 7;
   double realized_pnl = 8;
-  bool traded_here = 9;        // a contract the engine's portfolios trade (reconciled)
+  bool traded_here = 9;        // a contract the engine's portfolios trade (checked)
   bool mismatch = 10;          // traded here, and the two quantities differ
 }
 
@@ -260,8 +276,8 @@ message AccountResponse {
   string updated = 4;  // IB's time of the values (HH:MM)
   repeated AccountValueMsg values = 5;
   repeated AccountPositionMsg positions = 6;
-  string positions_check = 7;  // not yet | agree | disagree | failed
-  string positions_problem = 8;
+  string broker_check = 7;  // not yet | agree | disagree | failed
+  string broker_check_problem = 8;
   repeated UnsettledMsg unsettled = 9;
 }
 
@@ -293,6 +309,7 @@ message RiskState {
   repeated RiskLimit limits = 4;
   uint64 refused = 5;                   // orders refused since the engine started
   repeated string recent_refusals = 6;  // oldest first: "HH:MM:SS strategy symbol: reason"
+  map<string, string> day_stops = 7;    // strategy -> why it trades only to close until tomorrow
 }
 
 message SetRiskLimitsRequest {
@@ -306,14 +323,14 @@ message HaltRequest {
 message BookManuallyRequest {
   string strategy = 1;
   string symbol = 2;
-  string direction = 3;  // LONG / SHORT
-  double volume = 4;
+  string side = 3;      // BUY / SELL
+  double quantity = 4;
   double price = 5;
   string reason = 6;     // kept on the order: why it is booked by hand
 }
 
 message BookManuallyResponse {
-  string orderid = 1;
+  string order_id = 1;
 }
 
 // Live engine control / query service.
@@ -335,16 +352,16 @@ service EngineService {
   // The log stream
   rpc StreamLogs(Empty) returns (stream LogLine);
 
-  // The database: orders/trades, contracts, emptying; portfolio list
-  rpc GetOrdersAndTrades(OrdersAndTradesRequest) returns (OrdersAndTradesResponse);
+  // The database: orders/fills, contracts, emptying; portfolio list
+  rpc GetOrdersAndFills(OrdersAndFillsRequest) returns (OrdersAndFillsResponse);
   rpc ListSavedContracts(Empty) returns (SavedContractsResponse);
   rpc WipeDatabase(WipeDatabaseRequest) returns (WipeDatabaseResponse);  // refused while a strategy holds positions
   rpc ListPortfolios(Empty) returns (ListPortfoliosResponse);
-  rpc SyncContracts(SyncContractsRequest) returns (SyncContractsResponse);  // saved for the next start
+  rpc GetQuotes(QuotesRequest) returns (QuotesResponse);
+  rpc SyncContracts(SyncContractsRequest) returns (SyncContractsResponse);  // rolled into the running engine at once
 
   // Strategy: class list, removed strategies, defaults
   rpc ListStrategyClasses(Empty) returns (ListStrategyClassesResponse);
-  rpc GetStrategyClassDefaults(GetStrategyClassDefaultsRequest) returns (GetStrategyClassDefaultsResponse);
   rpc GetRemovedStrategies(Empty) returns (GetRemovedStrategiesResponse);
 
   // Strategy lifecycle
@@ -359,7 +376,7 @@ service EngineService {
 
   // The account against the holdings, and expiry
   rpc GetAccount(Empty) returns (AccountResponse);
-  rpc ReconcilePositions(Empty) returns (ReconcileResponse);
+  rpc CheckWithBroker(Empty) returns (BrokerCheckResponse);
   rpc SettleExpired(SettleExpiredRequest) returns (SettleExpiredResponse);
   rpc BookManually(BookManuallyRequest) returns (BookManuallyResponse);  // a fill the engine missed
 

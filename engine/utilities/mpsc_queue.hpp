@@ -21,7 +21,6 @@ template <typename Node> class MpscQueue {
     MpscQueue(const MpscQueue&) = delete;
     MpscQueue& operator=(const MpscQueue&) = delete;
 
-    /** Any thread. */
     void push(Node* node) {
         node->next.store(nullptr, std::memory_order_relaxed);
         Node* prev = head_.exchange(node, std::memory_order_acq_rel);

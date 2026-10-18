@@ -1,28 +1,27 @@
 #pragma once
 
-/**
- * C++23 equivalent of utilities/constant.py
- * General constant enums and mappings used in the trading platform.
- */
+/** The enums the engine trades with (side, order type and status, product, option type,
+ * combo type, a strategy's state), and their text. */
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 
 namespace model {
 
-enum class Direction {
-    LONG,
-    SHORT,
+enum class Side {
+    BUY,
+    SELL,
 };
 
 enum class Status {
     SUBMITTING,
-    NOTTRADED,
-    PARTTRADED,
-    ALLTRADED,
+    WORKING,
+    PARTLY_FILLED,
+    FILLED,
     CANCELLED,
     REJECTED,
 };
@@ -61,28 +60,48 @@ enum class ComboType {
     BOX_SPREAD,
 };
 
+/** Where a strategy is, or removed: a restart brings it back to that; one in error stays in error
+ * until inited again. */
+enum class StrategyState : std::uint8_t { Added, Inited, Running, Error, Removed };
+
 
 // String conversion for enums
-inline std::string to_string(Direction d) {
-    switch (d) {
-    case Direction::LONG:
-        return "LONG";
-    case Direction::SHORT:
-        return "SHORT";
+inline std::string to_string(StrategyState state) {
+    switch (state) {
+    case StrategyState::Added:
+        return "added";
+    case StrategyState::Inited:
+        return "inited";
+    case StrategyState::Running:
+        return "running";
+    case StrategyState::Error:
+        return "error";
+    case StrategyState::Removed:
+        return "removed";
     }
-    return "LONG";
+    return "added";
+}
+
+inline std::string to_string(Side d) {
+    switch (d) {
+    case Side::BUY:
+        return "BUY";
+    case Side::SELL:
+        return "SELL";
+    }
+    return "BUY";
 }
 
 inline std::string to_string(Status s) {
     switch (s) {
     case Status::SUBMITTING:
         return "SUBMITTING";
-    case Status::NOTTRADED:
-        return "NOTTRADED";
-    case Status::PARTTRADED:
-        return "PARTTRADED";
-    case Status::ALLTRADED:
-        return "ALLTRADED";
+    case Status::WORKING:
+        return "WORKING";
+    case Status::PARTLY_FILLED:
+        return "PARTLY_FILLED";
+    case Status::FILLED:
+        return "FILLED";
     case Status::CANCELLED:
         return "CANCELLED";
     case Status::REJECTED:
@@ -160,18 +179,18 @@ inline std::string to_string(ComboType t) {
 }
 
 // from_string for JSON deserialization
-inline Direction from_string_direction(const std::string& s) {
-    if (s == "SHORT")
-        return Direction::SHORT;
-    return Direction::LONG;
+inline Side from_string_side(const std::string& s) {
+    if (s == "SELL")
+        return Side::SELL;
+    return Side::BUY;
 }
 inline Status from_string_status(const std::string& s) {
-    if (s == "NOTTRADED")
-        return Status::NOTTRADED;
-    if (s == "PARTTRADED")
-        return Status::PARTTRADED;
-    if (s == "ALLTRADED")
-        return Status::ALLTRADED;
+    if (s == "WORKING")
+        return Status::WORKING;
+    if (s == "PARTLY_FILLED")
+        return Status::PARTLY_FILLED;
+    if (s == "FILLED")
+        return Status::FILLED;
     if (s == "CANCELLED")
         return Status::CANCELLED;
     if (s == "REJECTED")
@@ -209,7 +228,7 @@ inline ComboType from_string_combo(std::string_view s) {
 
 // Active statuses (order still in progress)
 inline bool is_active_status(Status s) {
-    return s == Status::SUBMITTING || s == Status::NOTTRADED || s == Status::PARTTRADED;
+    return s == Status::SUBMITTING || s == Status::WORKING || s == Status::PARTLY_FILLED;
 }
 
 } // namespace model

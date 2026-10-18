@@ -50,7 +50,6 @@ template <typename T> class ObjectPool {
     ObjectPool& operator=(const ObjectPool&) = delete;
 
     void close() { closed_.store(true, std::memory_order_release); }
-    bool is_closed() const { return closed_.load(std::memory_order_acquire); }
 
     /** An object set to T{}; null once closed. */
     T* acquire() { return emplace(); }
@@ -83,24 +82,11 @@ template <typename T> class ObjectPool {
         }
         Slot* s = slot_of(p);
         assert(s != nullptr && "release: pointer not from this pool");
-        if (s == nullptr || !s->out.exchange(false, std::memory_order_acq_rel)) {
-            return; // released already
-        }
-        push(s);
+        release_slot(s); // released already: ignored
     }
 
     /** False when p is not one of this pool's objects handed out. */
-    bool release_checked(T* p) {
-        if (p == nullptr) {
-            return true;
-        }
-        Slot* s = slot_of(p);
-        if (s == nullptr || !s->out.exchange(false, std::memory_order_acq_rel)) {
-            return false;
-        }
-        push(s);
-        return true;
-    }
+    bool release_checked(T* p) { return p == nullptr || release_slot(slot_of(p)); }
 
     /** The objects free now (a count for tests; approximate while other threads use the pool). */
     size_t size() const {
@@ -179,6 +165,15 @@ template <typename T> class ObjectPool {
     }
 
     void push(Slot* s) { push_chain(s, s); }
+
+    /** Onto the free list if handed out; false for null or one released already. */
+    bool release_slot(Slot* s) noexcept {
+        if (s == nullptr || !s->out.exchange(false, std::memory_order_acq_rel)) {
+            return false;
+        }
+        push(s);
+        return true;
+    }
 
     /** Push the chain first..last (linked through next) in one go. */
     void push_chain(Slot* first, Slot* last) {

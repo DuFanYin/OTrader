@@ -1,6 +1,6 @@
 // Longstaff-Schwartz least-squares Monte Carlo for American options.
 // Reworked from Option-Pricing (monteCarlo/monteCarlo*.cpp); the algorithm lives
-// in lsm_impl.h so bench/concurrency can run the same code under other executors.
+// in lsm_impl.h, generic over the executor that runs its loops.
 
 #include "../kernel.h"
 #include "lsm_impl.h"

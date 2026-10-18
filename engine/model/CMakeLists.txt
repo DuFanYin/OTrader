@@ -1,4 +1,4 @@
-# model: the trading data model, not engines: orders, trades, contracts, events, portfolios and
+# model: the trading data model, not engines: orders, fills, contracts, events, portfolios and
 # their structure, option symbols, combos; Greeks and implied vol from quant/.
 
 add_library(model
@@ -6,8 +6,10 @@ add_library(model
   symbol.cpp
   utility.cpp
   portfolio.cpp
-  portfolio_structure.cpp
-  combo_builder.cpp
+  portfolios.cpp
+  order_builder.cpp
+  daily_table.cpp
+  parameters.cpp
 )
 target_include_directories(model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(model PUBLIC utilities_cpp quant)

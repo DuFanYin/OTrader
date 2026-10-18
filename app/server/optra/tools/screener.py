@@ -4,10 +4,9 @@ itself, its snapshots or days, and strategies built from it."""
 import asyncio
 
 from optra.schemas.tools import ChainRequest, ScreenerRequest, SnapshotsRequest
-from optra.infra.numerics import heston_calibrate, pricing_batch
+from optra.infra.numerics import black_batch, heston_calibrate
 from optra.infra.numerics import screener as run_screener_engine
 from optra.services.market_data import (
-    _FB_VOL,
     SUPPORTED_CURRENCIES,
     ChainUnavailable,
     _fetch_dvol,
@@ -60,8 +59,8 @@ def _calibrate_heston(data: dict) -> tuple[dict, str]:
     if len(rows) < 6:
         raise ToolError("too few quotes with an implied vol to calibrate Heston on this chain; give heston explicitly", 422)
     spot = data["spot"]
-    prices = [p["bs"] for p in pricing_batch([{"spot": spot, "strike": r["strike"], "rate": 0.0, "vol": r["iv"],
-                                               "maturity": r["years"], "n_paths": 100} for r in rows])]
+    prices = black_batch([True] * len(rows), [spot] * len(rows), [r["strike"] for r in rows],
+                         [r["years"] for r in rows], 0.0, vols=[r["iv"] for r in rows])["prices"]
     atm = min(rows, key=lambda r: abs(r["strike"] - spot))["iv"]
     fit = heston_calibrate(spot=spot, rate=0.0, market_strikes=[r["strike"] for r in rows],
                            market_maturities=[r["years"] for r in rows], market_prices=prices,
@@ -84,9 +83,9 @@ async def screen_strategies(req: ScreenerRequest) -> Result:
     if model_vol == "dvol" and req.currency not in SUPPORTED_CURRENCIES:
         raise ToolError(f"DVOL is Deribit's index: there is none for {req.currency}; use mark, surface or heston", 422)
     if model_vol == "dvol":
-        dvol = await _fetch_dvol(req.currency)
+        dvol, source = await _fetch_dvol(req.currency)
         model_vol, extra = "flat", {"model_vol_flat": dvol}
-        if dvol == _FB_VOL:
+        if source == "fallback":
             warnings.append(f"model vol: {req.currency} DVOL unavailable, using the fallback {dvol:.2f}")
         else:
             notes.append(f"model vol: {req.currency} DVOL {dvol:.4f}")

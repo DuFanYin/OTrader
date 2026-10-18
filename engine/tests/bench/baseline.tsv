@@ -1,0 +1,10 @@
+# section	row	p50 ns	p99 ns: the median of three runs on the ThinkPad at 1.9 GHz, boost off (scripts/bench.sh clock on); scripts/bench.sh baseline
+two quotes change -> on_snapshot -> broker -> fill back, idle (ns)	quote -> decision	26624	157696
+two quotes change -> on_snapshot -> broker -> fill back, idle (ns)	quote -> fill (the whole loop)	62976	194560
+the underlying ticks -> on_snapshot -> broker -> fill back, idle (ns)	quote -> decision	26112	141312
+the underlying ticks -> on_snapshot -> broker -> fill back, idle (ns)	quote -> fill (the whole loop)	61952	192512
+fills and commands from other threads, idle (300 us between) (ns)	fill -> strategy	15488	52224
+fills and commands from other threads, idle (300 us between) (ns)	command round trip	21760	52736
+write_log on the event thread (ns)	write_log (one 80-char line)	210	624
+order lifecycle — engine-side segments (ns)	submit, ten orders working	2720	13440
+order lifecycle — engine-side segments (ns)	engine round-trip (submit+2×Order+Trade)	3584	5120

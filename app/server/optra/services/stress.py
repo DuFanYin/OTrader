@@ -1,6 +1,6 @@
 """The strategies' holdings under the lab's stress scenarios (GET /api/risk/stress).
 
-Every option a strategy holds (a combo by its legs) is valued at its expiry's forward and its own
+Every option a strategy holds (holdings are by contract) is valued at its expiry's forward and its own
 implied vol from the newest quotes of its portfolio (the chain the lab reads: chains.load, today's
 recording when the engine records), then again with the forward moved by the scenario's spot shock,
 the vol by its vol shock and the rate by its shift: Black, by the engine's own function
@@ -16,21 +16,12 @@ from datetime import datetime
 from typing import Any
 
 from optra.infra.numerics import black_batch
-from optra.services.stress_library import scenarios
+from optra.services.stress_library import StressScenario as Scenario, scenarios
 
-from optra.services.days import ET
-from optra.services import chains
+from optra.data.days import ET, parse_option
+from optra.data import chains
 
 LADDER = (-0.05, -0.02, -0.01, 0.01, 0.02, 0.05)
-
-
-@dataclass(frozen=True)
-class Scenario:
-    name: str
-    description: str
-    spot_mult: float = 1.0
-    vol_mult: float = 1.0
-    rate_shift: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -39,18 +30,6 @@ class Leg:
     symbol: str
     quantity: float     # signed contracts
     multiplier: float
-
-
-def option_key(symbol: str) -> tuple[str, str, str, float] | None:
-    """"SPXW-20261016-C-5800" -> (root, ISO expiry, C or P, strike); None for anything else."""
-    parts = symbol.split("-")
-    if len(parts) != 4 or parts[2] not in ("C", "P") or len(parts[1]) != 8 or not parts[1].isdigit():
-        return None
-    d = parts[1]
-    try:
-        return parts[0], f"{d[:4]}-{d[4:6]}-{d[6:]}", parts[2], float(parts[3])
-    except ValueError:
-        return None
 
 
 def holdings_legs(holdings: dict[str, Any]) -> tuple[list[Leg], list[tuple[str, float, float, float]]]:
@@ -62,17 +41,14 @@ def holdings_legs(holdings: dict[str, Any]) -> tuple[list[Leg], list[tuple[str, 
         if u.get("quantity"):
             shares.append((strategy, float(u["quantity"]), float(u.get("mid_price") or 0.0),
                            float(u.get("multiplier") or 1.0)))
-        for pos in (h.get("options") or {}).values():
-            parts = pos.get("legs") or [pos]  # a combo is its legs
-            for p in parts:
-                if p.get("quantity"):
-                    legs.append(Leg(strategy, p["symbol"], float(p["quantity"]),
-                                    float(p.get("multiplier") or pos.get("multiplier") or 100.0)))
+        for p in (h.get("options") or {}).values():
+            if p.get("quantity"):
+                legs.append(Leg(strategy, p["symbol"], float(p["quantity"]), float(p.get("multiplier") or 100.0)))
     return legs, shares
 
 
 def scenario_set(pack: str, severity: str) -> list[Scenario]:
-    out = [Scenario(s.name, s.description, s.spot_mult, s.vol_mult, s.rate_shift) for s in scenarios(pack, severity)]
+    out = scenarios(pack, severity)
     out += [Scenario(f"Spot {m:+.0%}", f"The underlying {m:+.0%}, vols unchanged.", 1.0 + m) for m in LADDER]
     return out
 
@@ -89,11 +65,11 @@ def stress(holdings: dict[str, Any], pack: str = "core4", severity: str = "moder
     priced: list[tuple[Leg, dict, float]] = []   # leg, its chain row, its chain's rate
     unpriced: list[str] = []
     for leg in legs:
-        key = option_key(leg.symbol)
-        if key is None:
+        option = parse_option(leg.symbol)
+        if option is None:
             unpriced.append(f"{leg.strategy}: {leg.symbol} (not an option symbol)")
             continue
-        root, expiry, right, strike = key
+        root, expiry, right, strike = option.root, option.expiry.isoformat(), option.right, option.strike
         if root not in markets:
             try:
                 chain = chain_of(root)

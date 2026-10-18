@@ -4,7 +4,7 @@ import { params, setSetting, settings } from "../lib/store.js";
 import { Chips, Group, Num, Seg, Segmented, SmallButton, Toggle } from "../ui/controls.jsx";
 import { DialogGroup } from "../ui/dialog.jsx";
 
-const Info = ({ children }) => <p class="col-span-2 -mt-1 truncate font-mono text-2xs text-muted">{children}</p>;
+const Info = ({ children }) => <p class="col-span-full -mt-1 truncate font-mono text-2xs text-muted">{children}</p>;
 
 const DOT = { loading: "bg-warn animate-pulse", ok: "bg-up", error: "bg-down" };
 
@@ -27,11 +27,12 @@ export function MarketGroup({ drift }) {
   );
   return (
     <Group title="Market" action={status}>
-      <div class="col-span-2"><Segmented size="xs" value={settings.value.dataMode} options={[["live", "Live"], ["sim", "Simulated"]]} onChange={chooseSource} /></div>
+      <div class="col-span-full"><Segmented size="xs" value={settings.value.dataMode} options={[["live", "Live"], ["sim", "Simulated"]]} onChange={chooseSource} /></div>
       <Num k="spot" label="Spot" hint="BTC/USD index (Binance)" readOnly={live} decimals={live ? 2 : undefined} />
       <Num k="strike" label="Strike" onChange={() => { markStrikeEdited(); if (live) reresolve(); }} />
       <Num k="vol" label="σ" hint="Implied vol matched to strike and T (Deribit surface)" step="0.01" readOnly={live} decimals={live ? 4 : undefined} />
       <Num k="rate" label="r" hint="US Treasury yield interpolated to T" step="0.0001" readOnly={live} decimals={live ? 4 : undefined} />
+      {live && m.fallback?.length > 0 && <Info>Not fetched, fixed values used: {m.fallback.join(", ")}</Info>}
       {live && m.ivSource && <Info>σ {m.ivSource} · {m.ivMatch}</Info>}
       {live && m.rateTenor && <Info>r tenor {m.rateTenor}</Info>}
       <Num k="maturity" label="T (years)" step="0.05" onChange={() => live && reresolve()} />

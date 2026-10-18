@@ -1,16 +1,16 @@
 /**
- * Object pool latency (ObjectPool<OrderData>).
+ * Object pool latency (ObjectPool<Order>).
  *
  * A lock-free free list (a tagged stack of slot indices). Single-thread acquire/release and
  * the new/delete baseline are ns-scale → BATCH timing. Cross-thread 4-acquire/1-release is
- * timed per op under contention → PER_OP timing (real per-op tail). OrderData is a representative
- * pooled type (engine pools Event/PortfolioSnapshot/OrderData/TradeData).
+ * timed per op under contention → PER_OP timing (real per-op tail). Order is a representative
+ * pooled type (engine pools Event/PortfolioSnapshot/Order/Fill).
  */
 
-#include "bench_util.hpp"
-#include "mpsc_ring.hpp"
-#include "../../model/object.hpp"
-#include "object_pool.hpp"
+#include "tests/bench/bench_util.hpp"
+#include "utilities/mpsc_ring.hpp"
+#include "model/object.hpp"
+#include "utilities/object_pool.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -20,16 +20,16 @@
 using bench::Histogram;
 using bench::keep;
 using utilities::ObjectPool;
-using model::OrderData;
+using model::Order;
 
 namespace {
 
 // BATCH: acquire+release pair, steady state (pool depth oscillates 0/1). Amortized ns/op.
 Histogram bench_pool_pair_batch() {
-    ObjectPool<OrderData> pool(256);
+    ObjectPool<Order> pool(256);
     return bench::measure_batch(
         [&] {
-            OrderData* p = pool.acquire();
+            Order* p = pool.acquire();
             keep(p);
             pool.release(p);
         },
@@ -39,7 +39,7 @@ Histogram bench_pool_pair_batch() {
 Histogram bench_new_delete_batch() {
     return bench::measure_batch(
         [] {
-            auto* p = new OrderData();
+            auto* p = new Order();
             keep(p);
             delete p;
         },
@@ -49,10 +49,10 @@ Histogram bench_new_delete_batch() {
 // Cross-thread: 4 producers acquire + hand off (via engine's own MpscRing so the queue doesn't
 // perturb the pool measurement), 1 consumer releases. PER_OP timing on both sides.
 void bench_pool_cross() {
-    ObjectPool<OrderData> pool(2048);
+    ObjectPool<Order> pool(2048);
     constexpr int kProducers = 4;
     constexpr int kPerProducer = 1000000;
-    utilities::MpscRing<OrderData*, 4096> handoff;
+    utilities::MpscRing<Order*, 4096> handoff;
 
     std::atomic<bool> go{false};
     std::atomic<bool> stop{false};
@@ -61,7 +61,7 @@ void bench_pool_cross() {
     Histogram rel_rec;
 
     std::thread consumer([&] {
-        OrderData* p = nullptr;
+        Order* p = nullptr;
         while (!stop.load(std::memory_order_acquire)) {
             while (handoff.try_pop(p)) {
                 uint64_t t0 = bench::clock_ticks();
@@ -84,7 +84,7 @@ void bench_pool_cross() {
             Histogram& rec = acq_recs[pi];
             for (int i = 0; i < kPerProducer; ++i) {
                 uint64_t t0 = bench::clock_ticks();
-                OrderData* p = pool.acquire();
+                Order* p = pool.acquire();
                 uint64_t t1 = bench::clock_ticks();
                 rec.record_ns(bench::ticks_to_ns(t1 - t0));
                 if (p)
@@ -101,7 +101,7 @@ void bench_pool_cross() {
     stop.store(true, std::memory_order_release);
     consumer.join();
 
-    bench::print_header("ObjectPool<OrderData> — cross-thread (4 acquire, 1 release), PER_OP");
+    bench::print_header("ObjectPool<Order> — cross-thread (4 acquire, 1 release), PER_OP");
     for (int pi = 0; pi < kProducers; ++pi) {
         char name[48];
         std::snprintf(name, sizeof(name), "acquire[producer %d]", pi);
@@ -117,9 +117,9 @@ int main() {
 
     Histogram pool_pair = bench_pool_pair_batch();
     Histogram nd = bench_new_delete_batch();
-    bench::print_header("ObjectPool<OrderData> vs new/delete — single thread, BATCH (ns/op)");
+    bench::print_header("ObjectPool<Order> vs new/delete — single thread, BATCH (ns/op)");
     bench::print_row_batch("pool acquire+release", pool_pair);
-    bench::print_row_batch("new+delete OrderData", nd);
+    bench::print_row_batch("new+delete Order", nd);
 
     bench_pool_cross();
     return 0;

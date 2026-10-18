@@ -9,16 +9,8 @@ def price_strategy(req: MultiLegRequest) -> Result:
     result = multi_leg(spot=req.spot, rate=req.rate, vol=req.vol, maturity=req.maturity,
                        legs=[leg.engine_payload() for leg in req.legs],
                        dividend_yield=req.dividend_yield, n_paths=req.n_paths)
-    summary = {
-        "net_bs_price":  result.get("net_bs_price",  0.0),
-        "net_mc_price":  result.get("net_mc_price",  0.0),
-        "net_binomial_price": result.get("net_binomial_price", 0.0),
-        "net_delta":     result.get("net_delta",     0.0),
-        "net_vega":      result.get("net_vega",      0.0),
-        "strategy_hint": result.get("strategy_hint", ""),
-        "n_legs":        result.get("n_legs",        len(req.legs)),
-    }
-    return Result(summary=summary, details={"legs": result.get("legs", [])})
+    legs = result.pop("legs")
+    return Result(summary=result, details={"legs": legs})
 
 
 TOOLS = [

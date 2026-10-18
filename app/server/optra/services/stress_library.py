@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from optra.infra.numerics import run_engine_task
+from optra.infra.numerics import checked_task
 
 
 @dataclass(frozen=True)
@@ -27,24 +27,7 @@ _SEVERITY_SCALE = {
 
 
 def _load_pack_specs() -> dict[str, list[dict[str, Any]]]:
-    path = Path(__file__).with_name("stress_packs.json")
-    if not path.exists():
-        raise RuntimeError(f"stress pack config missing: {path}")
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise RuntimeError(f"failed to parse stress pack config: {path}") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError("stress pack config must be an object")
-    normalized: dict[str, list[dict[str, Any]]] = {}
-    for k, v in payload.items():
-        if isinstance(k, str) and isinstance(v, list):
-            normalized[k] = [x for x in v if isinstance(x, dict)]
-    if not normalized:
-        raise RuntimeError("stress pack config has no valid packs")
-    if "core4" not in normalized:
-        raise RuntimeError("stress pack config must include 'core4'")
-    return normalized
+    return json.loads(Path(__file__).with_name("stress_packs.json").read_text(encoding="utf-8"))
 
 
 _PACK_SPECS = _load_pack_specs()
@@ -70,25 +53,16 @@ def _clamp_rate(rate: float) -> float:
 
 
 def _run_pricing(payload: dict[str, Any]) -> dict[str, Any]:
-    r = run_engine_task("pricing", payload)
-    return r.get("result_summary", {}) if r.get("status") != "error" else {}
+    return checked_task("pricing", payload)["result_summary"]
 
 
 def _run_multi_leg(payload: dict[str, Any]) -> dict[str, Any]:
-    r = run_engine_task("multi_leg", payload)
-    if r.get("status") == "error":
-        raise ValueError(f"multi-leg pricing failed: {r.get('error', {}).get('message', 'unknown')}")
-    return r.get("result_summary", {})
+    return checked_task("multi_leg", payload)["result_summary"]
 
 
 def _run_hedging(payload: dict[str, Any]) -> dict[str, Any]:
-    r = run_engine_task("hedging", payload)
-    if r.get("status") == "error":
-        return {"summary": {}, "details": {}}
-    return {
-        "summary": r.get("result_summary", {}),
-        "details": r.get("result_details", {}),
-    }
+    r = checked_task("hedging", payload)
+    return {"summary": r["result_summary"], "details": r["result_details"]}
 
 
 def _pick_pack(stress_pack: str, scale: float) -> list[StressScenario]:
