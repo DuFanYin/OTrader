@@ -38,7 +38,7 @@ from statistics import NormalDist
 
 import polars as pl
 
-from optra.infra.numerics import black_batch
+from optra.infra.numerics import black_batch, synthetic_quotes
 from optra.data.days import (
     ET,
     RTH_END,
@@ -51,7 +51,7 @@ from optra.data.days import (
     risk_free_curve,
 )
 
-YEAR_SECONDS = 365.25 * 24 * 3600  # model::years_to_expiry (engine/model/utility.cpp)
+YEAR_SECONDS = 365 * 24 * 3600  # model::kSecondsAYear (engine/model/utility.hpp)
 MIN_T = 1e-6  # years_to_expiry's floor for a positive time
 MIN_IV, MAX_IV = 0.01, 3.0  # the smile is clipped to this range
 MOMENTUM_MINUTES = 30
@@ -111,7 +111,8 @@ def years_to_expiry(now: datetime, expiry: datetime) -> float:
 
 def prices(m: Model, spots: list[float], strikes: list[float], years: list[float], calls: list[bool]) -> list[float]:
     """Each option's fair price: Black on the forward spot·e^(rate·t) at the smile's vol, discounted at rate (the
-    numerics library's, one call for all); at expiry (t = 0) its payoff."""
+    numerics library's, one call for all); at expiry (t = 0) its payoff. The days' quotes are made in the numerics
+    library (synthetic_quotes, day_frames); this and quote are the same in Python, what the tests check them against."""
     forwards = [s * math.exp(m.rate * t) for s, t in zip(spots, years, strict=True)]
     vols = [smile_vol(m, f, k, t) for f, k, t in zip(forwards, strikes, years, strict=True)]
     black = black_batch(calls, forwards, strikes, years, m.rate, vols=vols)["prices"]
@@ -199,36 +200,27 @@ def chain(m: Model, day: date, open_px: float, days: list[date]) -> list[tuple[d
 
 
 def day_frames(m: Model, day: date, path: list[float], listed) -> tuple[pl.DataFrame, pl.DataFrame]:
-    """(option quotes, underlying quotes) for one session."""
+    """(option quotes, underlying quotes) for one session; the options' quotes made in the numerics library
+    (synthetic_quotes: prices and quote, there), a minute's rows a contract each."""
     stamps = session_minutes(day)
-    und = {"ts_recv": stamps, "bid_px": [], "ask_px": [], "bid_sz": [], "ask_sz": []}
-    cols = {k: [] for k in ("symbol", "ts_recv", "bid_px", "ask_px", "bid_sz", "ask_sz")}
-    contracts = [
-        (occ_body(e, c, k), engine_expiry(e), k, c) for e, k in listed for c in (True, False)
-    ]
-    mids = []
-    for px in path:
-        u_bid, u_ask = underlying_quote(px, m)
-        und["bid_px"].append(u_bid)
-        und["ask_px"].append(u_ask)
-        und["bid_sz"].append(m.size)
-        und["ask_sz"].append(m.size)
-        mids.append((u_bid + u_ask) / 2)
-    rows = [(ts, mid, c) for ts, mid in zip(stamps, mids, strict=True) for c in contracts]
-    fair = prices(m, [mid for _, mid, _ in rows], [c[2] for _, _, c in rows],
-                  [years_to_expiry(ts, c[1]) for ts, _, c in rows], [c[3] for _, _, c in rows])
-    for (ts, _, (symbol, _, _, _)), p in zip(rows, fair, strict=True):
-        bid, ask = quote(p, m)
-        cols["symbol"].append(symbol)
-        cols["ts_recv"].append(ts)
-        cols["bid_px"].append(bid)
-        cols["ask_px"].append(ask)
-        cols["bid_sz"].append(m.size)
-        cols["ask_sz"].append(m.size)
+    contracts = [(occ_body(e, c, k), engine_expiry(e), k, c) for e, k in listed for c in (True, False)]
+    und_quotes = [underlying_quote(px, m) for px in path]
+    mids = [(b + a) / 2 for b, a in und_quotes]
+    q = synthetic_quotes([int(ts.timestamp()) for ts in stamps], mids, [int(c[1].timestamp()) for c in contracts],
+                         [c[2] for c in contracts], [c[3] for c in contracts], rate=m.rate,
+                         implied_vol=m.implied_vol, skew=m.skew, smile=m.smile, tick=m.tick, spread=m.spread)
     utc = pl.Datetime("us", "UTC")
     to_et = pl.col("ts_recv").dt.convert_time_zone("America/New_York").cast(TS_DTYPE)
+    n = len(contracts)
     options = pl.DataFrame(
-        cols,
+        {
+            "symbol": [c[0] for c in contracts] * len(stamps),
+            "ts_recv": pl.Series(stamps, dtype=utc).gather([i // n for i in range(n * len(stamps))]),
+            "bid_px": q["bids"],
+            "ask_px": q["asks"],
+            "bid_sz": [m.size] * (n * len(stamps)),
+            "ask_sz": [m.size] * (n * len(stamps)),
+        },
         schema={
             "symbol": pl.String,
             "ts_recv": utc,
@@ -239,7 +231,13 @@ def day_frames(m: Model, day: date, path: list[float], listed) -> tuple[pl.DataF
         },
     ).with_columns(to_et)
     underlying = pl.DataFrame(
-        und,
+        {
+            "ts_recv": stamps,
+            "bid_px": [b for b, _ in und_quotes],
+            "ask_px": [a for _, a in und_quotes],
+            "bid_sz": [m.size] * len(stamps),
+            "ask_sz": [m.size] * len(stamps),
+        },
         schema={
             "ts_recv": utc,
             "bid_px": pl.Float64,
@@ -307,7 +305,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--start", required=True, help="first day, YYYY-MM-DD")
     ap.add_argument("--end", required=True, help="last day, YYYY-MM-DD")
-    ap.add_argument("--out", required=True, help="data root, e.g. Optra's data/synthetic (not data/, where the real days are)")
+    ap.add_argument("--out", required=True, help="data root, e.g. Optra's data/synthetic (not data/backtest/, where the real days are)")
     ap.add_argument("--symbol", default="SPY", help="folder / underlying name (default SPY)")
     ap.add_argument("--overwrite", action="store_true", help="replace existing day files")
     d = Model()

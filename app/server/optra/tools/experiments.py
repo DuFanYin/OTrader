@@ -183,8 +183,14 @@ def get_trial(p: TrialRequest) -> Result:
     days = ledger.trial_days([p.trial_id])[p.trial_id]
     if not days:
         raise ToolError(f"no finished trial {p.trial_id}", 404)
+    written: dict[str, list[float]] = {}
+    for d in days:
+        for name, value in (d.get("values") or {}).items():
+            written.setdefault(name, []).append(value)
     return Result(summary={"trial_id": p.trial_id, "days": len(days),
-                           "net": round(sum(d["net_pnl"] for d in days), 2)},
+                           "net": round(sum(d["net_pnl"] for d in days), 2)}
+                  | ({"values": {name: {"days": len(v), "mean": sum(v) / len(v)} for name, v in written.items()}}
+                     if written else {}),
                   details={"days": days, "trades": ledger.trial_trades([p.trial_id])[p.trial_id]})
 
 
@@ -261,14 +267,16 @@ TOOLS = [
          cost="seconds", engine=False, example={"experiment_id": EXAMPLE_ID}),
     Tool("experiment_robustness", "Robustness checks",
          EXPERIMENT + "Queues the checks that need new runs on a trial (the best unless named): its costs doubled, "
-         "its fills held to the size shown and a minute late, and each parameter the experiment varied moved 20% "
-         "down and up. Each is an experiment under the same "
+         "its fills held to the size shown and a minute late, each parameter the experiment varied moved 20% "
+         "down and up, and the same setting on the other underlying over the same dates (SPXW for SPY, SPY for SPXW "
+         "and XSP; reported, not a gate). Each is an experiment under the same "
          "family, so it counts against the budget.",
          RobustnessRequest, experiment_robustness, "/experiments/{experiment_id}/robustness", cost="seconds",
          engine=False, example={"experiment_id": EXAMPLE_ID}),
     Tool("get_trial", "Look up a trial",
          EXPERIMENT + "A finished trial's days (P&L, fees, P&L by source, flat at the close) and its round trips "
-         "(the day each opened, days open, net, risk, R).",
+         "(the day each opened, days open, net, risk, R); the values its strategy wrote each day (write_value: what a "
+         "strategy that only measures answers with), each day's under its \"values\".",
          TrialRequest, get_trial, "/experiments/trials/{trial_id}", method="GET", engine=False, record=False,
          example={"trial_id": EXAMPLE_TRIAL}),
     Tool("replay_trial", "Replay a trial",

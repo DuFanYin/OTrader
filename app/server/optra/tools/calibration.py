@@ -66,12 +66,13 @@ CALL = {"spot": 100.0, "strike": 100.0, "rate": 0.03, "maturity": 0.5}
 
 TOOLS = [
     Tool("implied_vol", "Implied volatility",
-         "Finds the Black-Scholes volatility that reproduces an observed European call price (Brent's method). Returns "
-         "result_summary.implied_vol, converged, and final_error (the price error left).",
+         "Finds the Black-Scholes volatility that reproduces an observed European call price (Jaeckel's Let's Be "
+         "Rational, as the trading engine). Returns result_summary.implied_vol (0 when none fits), converged, and "
+         "final_error (the price error left).",
          ImpliedVolRequest, implied_vol, "/lab/calibration/iv", example={**CALL, "market_price": 6.5}),
     Tool("implied_vol_batch", "Implied volatilities",
          "Implied vols of many observed call prices at once (strikes and expiries in the same order as the prices), e.g. to "
-         "build a smile. Returns result_details.ivs and converged, one per price.",
+         "build a smile. Returns result_details.ivs (0 where none fits) and converged, one per price.",
          ImpliedVolBatchRequest, implied_vol_batch, "/lab/calibration/iv/batch",
          example={"spot": 100.0, "rate": 0.03, "market_prices": [9.9, 6.5, 4.0], "strikes": [95.0, 100.0, 105.0],
                   "expiries": [0.5, 0.5, 0.5]}),

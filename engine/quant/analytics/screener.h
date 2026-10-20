@@ -140,6 +140,7 @@ struct ScreenCounts {
 };
 
 // ── Black-76 (forward-based) pricing ──────────────────────────────────────────
+// 0 (each Greek 0) for what cannot be priced, as black_price.
 
 double black76_price (double forward, double strike, double rate, double vol, double years, bool is_call);
 void   black76_greeks(double forward, double strike, double rate, double vol, double years, bool is_call,

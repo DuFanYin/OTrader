@@ -14,7 +14,7 @@ def run(tmp_path, monkeypatch):
     monkeypatch.setattr(session, "_data", lambda: tmp_path)
     monkeypatch.setattr(session, "notify", sent.append)
     monkeypatch.setattr(session, "problems", lambda client: seen.pop(0))
-    monkeypatch.setattr(session.promotion, "advance_pending", lambda: [])  # no ledger here
+    monkeypatch.setattr(session.versions, "advance_pending", lambda: [])  # no ledger here
 
     def check(*problems: str) -> list[str]:
         seen.append(list(problems))

@@ -1,6 +1,6 @@
 """Tests for the backtest days (optra.data.days, synthetic_days).
 
-The round-trip test splits a real day from data/SPXW back into option and underlying quotes, rebuilds it with
+The round-trip test splits a real day from data/backtest/SPXW back into option and underlying quotes, rebuilds it with
 days.convert_frame, and requires the same values (the file is written the newer, smaller way: rows by contract, the
 option's prices as decimals); if the backtester is built, it also requires an identical backtest result. A day
 written with prices that are not whole cents keeps them as doubles; either way it reads back as written. The example conversion (scripts/data/example_to_parquet.py) must rebuild a synthetic day from
@@ -35,7 +35,7 @@ from optra.data import synthetic_days as syn
 from optra.data.days import OPTION_SCHEMA
 
 REPO = Path(__file__).resolve().parents[4]
-REAL_DAY = REPO / "data" / "SPXW" / "SPXW-2025-08" / "20250804.parquet"
+REAL_DAY = REPO / "data" / "backtest" / "SPXW" / "SPXW-2025-08" / "20250804.parquet"
 BACKTEST = REPO / "engine" / "build" / "entry_backtest"
 BACKTEST_DATA = (
     REPO / "engine" / "build" / "tests" / "checks" / "test_backtest_data"
@@ -47,7 +47,7 @@ BACKTEST_DATA = (
 
 def _backtest(path: Path) -> dict:
     out = subprocess.run(
-        [str(BACKTEST), str(path), "RandomBuyStrategy"],
+        [str(BACKTEST), "--json", str(path), "RandomBuyStrategy"],
         capture_output=True,
         text=True,
         check=True,
@@ -61,7 +61,7 @@ def _backtest(path: Path) -> dict:
 
 def test_real_day_round_trip():
     if not REAL_DAY.exists():
-        print("      (skipped: no data/SPXW/SPXW-2025-08/20250804.parquet)")
+        print("      (skipped: no data/backtest/SPXW/SPXW-2025-08/20250804.parquet)")
         return
     original = days.read_option_day(REAL_DAY)  # its prices as the engine reads them
     option_part = original.select("symbol", "ts_recv", "bid_px", "ask_px", "bid_sz", "ask_sz",
@@ -82,7 +82,7 @@ def test_real_day_round_trip():
         rebuilt = days.read_option_day(written[0])
         assert rebuilt.schema == original.schema
         by_contract = original.sort("symbol", "ts_recv", maintain_order=True)
-        assert rebuilt.equals(by_contract), "rebuilt day differs from data/SPXW"
+        assert rebuilt.equals(by_contract), "rebuilt day differs from data/backtest/SPXW"
         if BACKTEST.exists():
             assert _backtest(written[0]) == _backtest(REAL_DAY)
         else:
@@ -275,3 +275,23 @@ def test_recorder_writes_each_minute_into_the_day_and_goes_on_after_a_restart(tm
 
     with pytest.raises(days.ConversionError, match="not OCC"):
         recorded_days.minute_rows(open_ns, [("SPY", 1.0, 1.1)], 663.0, 663.1)
+
+
+def test_values_by_day_are_added_and_a_day_there_is_kept(tmp_path):
+    from optra.data import daily_values
+
+    first = {"2026-10-15": {"DGS1MO": 4.17, "DGS2": 4.77}}
+    assert daily_values.add_values(first, tmp_path) == 1
+    again = {"2026-10-15": {"DGS1MO": 9.0, "DGS2": 9.0}, "2026-10-16": {"DGS1MO": 4.12, "DGS2": 4.74}}
+    assert daily_values.add_values(again, tmp_path) == 1  # 10-15 was there: kept
+    assert daily_values.read_series(tmp_path / "DGS1MO.csv") == {"2026-10-15": 4.17, "2026-10-16": 4.12}
+
+
+def test_realized_vol_of_the_last_21_spots_a_year_of_252():
+    import math
+
+    from optra.data import daily_values
+    spots = {f"2025-01-{d:02}": 100.0 * math.exp(0.01 * d) for d in range(1, 24)}  # 22 returns of 0.01
+    rv = daily_values.realized(spots)
+    assert list(rv) == ["2025-01-22", "2025-01-23"]
+    assert rv["2025-01-23"] == pytest.approx(0.01 * math.sqrt(252.0))

@@ -135,16 +135,16 @@ void EventLoop::put_pooled(model::EventType type, T* slot, const T& data) {
 }
 
 void EventLoop::put_order(const model::Order& order) {
-    put_pooled(model::EventType::Order, acquire_order(), order);
+    put_pooled(model::EventType::Order, order_pool_.take(), order);
 }
 
 void EventLoop::put_fill(const model::Fill& fill) {
-    put_pooled(model::EventType::Fill, acquire_fill(), fill);
+    put_pooled(model::EventType::Fill, fill_pool_.take(), fill);
 }
 
 void EventLoop::put_snapshot(const model::PortfolioSnapshot& snapshot) {
     if (!started_.load(std::memory_order_acquire)) { // in place, through a pooled copy as any event
-        model::PortfolioSnapshot* p = snapshot_pool_.acquire();
+        model::PortfolioSnapshot* p = snapshot_pool_.take();
         if (p == nullptr) {
             drop(model::Event(model::EventType::Snapshot), "no free snapshot slot");
             return;
@@ -161,7 +161,7 @@ void EventLoop::put_snapshot(const model::PortfolioSnapshot& snapshot) {
     }
     model::PortfolioSnapshot* p = slot->spare.exchange(nullptr, std::memory_order_acquire);
     if (p == nullptr) {
-        p = snapshot_pool_.acquire();
+        p = snapshot_pool_.take();
         if (p == nullptr) {
             drop(model::Event(model::EventType::Snapshot), "no free snapshot slot");
             return;

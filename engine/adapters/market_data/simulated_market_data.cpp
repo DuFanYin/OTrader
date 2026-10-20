@@ -3,10 +3,12 @@
 #include "model/portfolio_spec.hpp"
 #include "model/symbol.hpp"
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <format>
+#include <optional>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -153,15 +155,46 @@ void SimulatedMarketData::ask_close(const std::string& underlying,
                                     std::chrono::year_month_day day) {
     {
         const std::lock_guard lock(mutex_);
-        asked_.emplace_back(underlying, day);
+        asked_.push_back({.underlying = underlying, .day = day});
     }
     wake_.notify_all();
 }
 
-void SimulatedMarketData::answer(
-    core::MarketDataEngine& engine,
-    const std::vector<std::pair<std::string, std::chrono::year_month_day>>& asked) {
-    for (const auto& [underlying, day] : asked) {
+void SimulatedMarketData::ask_day_range(const std::string& underlying,
+                                        std::chrono::year_month_day day) {
+    {
+        const std::lock_guard lock(mutex_);
+        asked_.push_back({.underlying = underlying, .day = day, .range = true});
+    }
+    wake_.notify_all();
+}
+
+/** The underlying's mid at the day's first minute, the highest and lowest of its minutes until `now`
+ * (all of them when it is none); none without a quote. */
+static auto day_range(const ParquetQuotes& q, model::DateTime now)
+    -> std::optional<std::array<double, 3>> {
+    std::optional<std::array<double, 3>> out; // open, high, low
+    for (const ParquetQuotes::Minute& m : q.minutes) {
+        if (now != model::DateTime{} && m.time > now) {
+            break;
+        }
+        if (m.first == m.end || !std::isfinite(q.underlying_bid[m.first]) ||
+            !std::isfinite(q.underlying_ask[m.first])) {
+            continue;
+        }
+        const double mid = 0.5 * (q.underlying_bid[m.first] + q.underlying_ask[m.first]);
+        if (!out) {
+            out = std::array{mid, mid, mid};
+        }
+        (*out)[1] = std::max((*out)[1], mid);
+        (*out)[2] = std::min((*out)[2], mid);
+    }
+    return out;
+}
+
+void SimulatedMarketData::answer(core::MarketDataEngine& engine,
+                                 const std::vector<Asked>& asked) {
+    for (const auto& [underlying, day, range] : asked) {
         for (const std::string& file : files_) {
             const std::string portfolio = portfolio_of_file(file);
             if (model::underlying_of(portfolio) != underlying) {
@@ -174,12 +207,19 @@ void SimulatedMarketData::answer(
             auto read = read_parquet_quotes(that.string());
             if (!read) {
                 engine.log_source().write_log(
-                    std::format("No close of {} on {}: {}", underlying, on, read.error()),
+                    std::format("No {} of {} on {}: {}", range ? "range" : "close", underlying,
+                                on, read.error()),
                     utilities::WARNING);
                 break;
             }
-            // The last minute that quotes the underlying on both sides.
             const ParquetQuotes& q = *read;
+            if (range) {
+                if (const auto found = day_range(q, clock_())) {
+                    engine.day_range(underlying, day, (*found)[0], (*found)[1], (*found)[2]);
+                }
+                break;
+            }
+            // The last minute that quotes the underlying on both sides.
             for (std::size_t row = q.underlying_bid.size(); row-- > 0;) {
                 if (std::isfinite(q.underlying_bid[row]) && std::isfinite(q.underlying_ask[row])) {
                     engine.closed(underlying, day,

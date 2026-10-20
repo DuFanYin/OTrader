@@ -88,7 +88,7 @@ class PaperEngine:
 @pytest.fixture
 def world(tmp_path, monkeypatch, own_strategy_dirs):
     model = synthetic_days.Model(momentum=2.0, expiries=1, strikes=10)  # a plain edge: this walks the way, not the odds
-    synthetic_days.generate(model, date(2023, 1, 2), date(2023, 6, 30), tmp_path / "data", "SPY", False)
+    synthetic_days.generate(model, date(2023, 1, 2), date(2023, 6, 30), tmp_path / "data" / "backtest", "SPY", False)
     monkeypatch.setattr(files, "data_root", lambda: tmp_path / "data")
     monkeypatch.setattr(store, "_db", None)
     monkeypatch.setattr(settings, "home", lambda: tmp_path / "home")
@@ -159,21 +159,20 @@ def test_a_strategy_walks_from_a_backtest_to_pilot_and_the_agent_only_does_its_p
         "edge": "Planted.", "fails_when": "Never."})["result_summary"]["id"]
     with pytest.raises(ToolError, match="holdout reports, its most"):  # a family's look at the holdout is counted
         call_sync("holdout_report", {"version_id": second})
-    assert evidence.holdout_uses(f"{STRATEGY}:" + ",".join(
-        f"{k}={float(x)!r}" for k, x in sorted(versions.strategy_version(version)["setting"].items()))) == 1
+    assert versions.holdout_reports("late momentum") == 1
 
     # The person approves paper: started on the paper engine.
     with access.system():
         paper = call_sync("approve_strategy_version", {"version_id": version, "to": "paper",
                                                        "approved": "the owner: the walk"})["result_summary"]
-    name = promotion.engine_name(version, versions.strategy_version(version))
+    name = versions.engine_name(version, versions.strategy_version(version))
     assert paper["stage"] == "paper"
     assert engine.calls == [f"add {name}", f"init {name}", f"start {name}"]
     assert engine.strategies[name]["portfolio"] == "SPY"
     assert not (tmp_path / "paper").exists()  # a demo strategy: every engine loads it, nothing to install
 
     # Twenty paper days, each recorded and compared by the daily report; the paper fills here are the backtest's.
-    days = sorted(p for p in (tmp_path / "data" / "SPY").rglob("*.parquet") if p.stem >= HOLDOUT.strftime("%Y%m%d"))
+    days = sorted(p for p in (tmp_path / "data" / "backtest" / "SPY").rglob("*.parquet") if p.stem >= HOLDOUT.strftime("%Y%m%d"))
     v = versions.strategy_version(version)
     for f in days[:promotion.MIN_PAPER_DAYS]:
         day = date(int(f.stem[:4]), int(f.stem[4:6]), int(f.stem[6:]))

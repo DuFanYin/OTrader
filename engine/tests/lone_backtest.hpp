@@ -12,7 +12,7 @@
 namespace test {
 
 struct OwnReplay {
-    backtest::Replay replay;
+    adapters::Replay replay;
 };
 
 class LoneBacktest : private OwnReplay, public backtest::Backtest {
@@ -30,6 +30,15 @@ class LoneBacktest : private OwnReplay, public backtest::Backtest {
         const std::vector<std::string> dropped =
             day->has_data() ? replay.roll(*day) : std::vector<std::string>{};
         return Backtest::use_day(day, dropped);
+    }
+    /** Every chain of the day loaded and filled at each bar, as if its engines asked for them all
+     * (a check reading the whole day). */
+    void load_all_chains() {
+        std::vector<std::string> all;
+        for (const model::Listing::Chain& chain : day_->listing()->chains()) {
+            all.push_back(chain.symbol);
+        }
+        replay.load(*day_, all);
     }
     /** The bar applied, then run. */
     void run_bar(std::size_t i) {

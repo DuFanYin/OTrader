@@ -1,8 +1,8 @@
 #pragma once
 
 /**
- * Backtests. A Replay is the market: a portfolio structure, each day's contracts rolled into it
- * and each bar's quotes applied to it once for the backtests on it. A Backtest is an engine on a
+ * Backtests, on an adapters::Replay: the market, each day's contracts rolled into it and each
+ * bar's quotes applied to it once for the backtests on it. A Backtest is an engine on a
  * replay, a day at a time, and measures each day. run_backtests runs trials over many days: the
  * days loaded ahead, the trials on threads, those of a thread on one replay.
  */
@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <span>
@@ -64,6 +65,7 @@ struct DailyResult {
     std::vector<model::Fill> fills; ///< contract fills (a combo's are its legs'), by time
     std::vector<std::string> errors;
     std::vector<utilities::LogRecord> log; ///< the day's log records, when the trial asks for them
+    std::map<std::string, double, std::less<>> values; ///< what its strategy wrote (write_value)
 };
 
 /** A position from flat to flat again, a bar at a time: what a per-trade report measures. */
@@ -92,37 +94,6 @@ struct BacktestRunSummary {
     double duration_seconds = 0.0;
 };
 
-// ---- The market a day replays
-
-class Backtest;
-
-/**
- * The portfolio structure backtests share: each day's contracts rolled in once, each bar's quotes
- * applied once (the day's loaded chains filled into a snapshot of the portfolio's, read where it
- * is). The backtests a thread runs together share one; its owner rolls each day in and applies
- * each bar.
- */
-class Replay {
-  public:
-    Replay() = default;
-    Replay(const Replay&) = delete;
-    Replay& operator=(const Replay&) = delete;
-
-    /** The day's contracts in: its portfolio built on the first day, its contracts replaced after
-     * (none kept: a backtest holding one the day does not quote cannot take the day). The chains
-     * dropped, for each engine as it takes the day (Backtest::use_day). */
-    std::vector<std::string> roll(const adapters::HistoricalData& day);
-    /** The day's bar i: its minute filled into the portfolio's snapshot here, the portfolio
-     * reading it where it is. */
-    void apply(const std::shared_ptr<const adapters::HistoricalData>& day, std::size_t i);
-
-  private:
-    friend class Backtest;
-
-    model::Portfolios structure_;
-    std::unordered_map<const model::Portfolio*, model::PortfolioSnapshot> minutes_;
-};
-
 // ---- One engine, a day at a time
 
 /**
@@ -133,7 +104,7 @@ class Replay {
  */
 class Backtest {
   public:
-    explicit Backtest(Replay& replay);
+    explicit Backtest(adapters::Replay& replay);
     ~Backtest();
 
     Backtest(const Backtest&) = delete;
@@ -172,7 +143,7 @@ class Backtest {
     std::vector<RoundTrip> round_trips() const;
 
   private:
-    /** The chains its market data wants (subscribed, held, ordered) loaded in the day. */
+    /** The chains its strategy wants (subscribed, held, ordered) loaded in the day. */
     void load_chains_wanted();
     void cancel_active_orders();
     /** After the bar: the day's extremes, and its Metric when kept. */
@@ -180,7 +151,7 @@ class Backtest {
     /** The bar's new fills costed against the mids, a round trip opened or closed. */
     void track_round_trip(const model::Frame& bar);
 
-    Replay& replay_;
+    adapters::Replay& replay_;
     adapters::BacktestGateway* backtest_gateway_ = nullptr; // core::Main's venue; set as main_ is built
     core::Main main_;
     adapters::LoadedDay day_;
@@ -190,7 +161,7 @@ class Backtest {
     bool used_a_day_ = false;
     bool keep_metrics_ = false;
     int restart_minute_ = 0;
-    std::uint64_t wanted_changes_ = 0; // core::MarketDataEngine::wanted_changes() when last loaded
+    std::uint64_t wanted_changes_ = 0; // core::StrategyEngine::wanted_changes() when last loaded
     // The day being run, measured from the close before.
     DailyResult result_;
     bool running_ = false;

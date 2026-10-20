@@ -343,6 +343,18 @@ def black_batch(is_call: list[bool], forwards: list[float], strikes: list[float]
     return checked_task("black_batch", payload)["result_details"]
 
 
+def synthetic_quotes(times: list[int], spots: list[float], expiries: list[int], strikes: list[float],
+                     is_call: list[bool], *, rate: float, implied_vol: float, skew: float, smile: float, tick: float,
+                     spread: float) -> dict:
+    """A synthetic day's quotes (data.synthetic_days): each contract every minute (times and expiries in seconds since
+    the epoch, a spot a minute) at its Black price at the smile's vol, a spread around it on the tick: {"bids",
+    "asks"}, minute by minute, a contract each."""
+    payload = {"times": times, "spots": spots, "expiries": expiries, "strikes": strikes, "is_call": is_call,
+               "rate": rate, "implied_vol": implied_vol, "skew": skew, "smile": smile, "tick": tick,
+               "spread": spread}
+    return checked_task("synthetic_quotes", payload)["result_details"]
+
+
 def heston_price(
     spot: float, strike: float, rate: float, maturity: float,
     v0: float = 0.04, kappa: float = 1.5, theta: float = 0.04,

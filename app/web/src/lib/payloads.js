@@ -12,10 +12,10 @@ export function ladder(p) {
   return steps.length ? steps : LADDER;
 }
 
-export const anyCheck = (p) => p.pickStats || p.pickIto || p.pickSimulation || p.pickLattice;
+export const anyCheck = (p) => p.pickStats || p.pickIto || p.pickSimulation || p.pickLattice || p.pickSmile;
 
 export const validationGate = (p) => ({
-  pick_stats: p.pickStats, pick_ito: p.pickIto, pick_simulation: p.pickSimulation, pick_lattice: p.pickLattice,
+  pick_stats: p.pickStats, pick_ito: p.pickIto, pick_simulation: p.pickSimulation, pick_lattice: p.pickLattice, pick_smile: p.pickSmile,
   compute_block_on_validation: p.blockOnFail,
   spot: p.spot, strike: p.strike, rate: p.rate, vol: p.vol, maturity: p.maturity, mu: p.mu,
   stats_theta: p.statsTheta, stats_n: p.statsN,

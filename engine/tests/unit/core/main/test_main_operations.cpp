@@ -1,5 +1,5 @@
 /**
- * Main's operations over the backtest assembly, its clock the latest snapshot's: a terminal update
+ * Main's operations over the backtest assembly, its clock set by the test: a terminal update
  * waits for its fills only so long; an option settled in shares is closed in its last minutes
  * through its strategy; a fill booked by hand and a settlement by hand check what they are given;
  * a halt stops the strategies and cancels what is working; a strategy's hedging, registered through
@@ -7,6 +7,7 @@
  */
 #include "tests/read_main.hpp"
 #include "tests/lone_backtest.hpp"
+#include "model/session_calendar.hpp"
 #include "model/order_builder.hpp"
 #include "model/event.hpp"
 #include "model/symbol.hpp"
@@ -74,7 +75,7 @@ class MainOperations : public ::testing::Test {
         quotes.values(&model::Frame::ask)[0] = 2.1;
         quotes.priced = true;
         p.apply(quotes);
-        backtest.configure_execution({.fee_rate = 0.0});
+        backtest.configure_execution({});
         name_ = main.add_strategy("MainProbe", "SPY", {});
         main.init_strategy(name_);
         main.start_strategy(name_);
@@ -83,9 +84,7 @@ class MainOperations : public ::testing::Test {
 
     /** The engine's time, and its portfolio's, is now `t`. */
     void at(model::DateTime t) {
-        model::PortfolioSnapshot snapshot(nullptr, "elsewhere"); // only the clock moves
-        snapshot.datetime = t;
-        main.apply_snapshot(snapshot);
+        main.set_time(t);
         model::Portfolio& spy = *main.portfolios()->find_portfolio("SPY");
         model::PortfolioSnapshot moved = spy.snapshot();
         moved.assign(spy.frame());
@@ -120,7 +119,7 @@ class MainOperations : public ::testing::Test {
 
     const std::string call_ = model::option_symbol(
         {.root = "SPY", .expiry = kFriday, .type = model::OptionType::CALL, .strike = 600});
-    const model::DateTime close_ = model::option_expiry_time(kFriday);
+    const model::DateTime close_ = model::kNyse.expiry_time(kFriday);
     test::LoneBacktest backtest;
     core::Main& main = backtest.main();
     std::string name_;

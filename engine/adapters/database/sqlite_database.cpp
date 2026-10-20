@@ -1,4 +1,5 @@
 #include "adapters/database/sqlite_database.hpp"
+#include "model/portfolio_spec.hpp"
 #include "model/symbol.hpp"
 #include "model/utility.hpp"
 #include <algorithm>
@@ -176,12 +177,13 @@ auto option_type_from_string(const std::string& s) -> model::OptionType {
     return model::OptionType::CALL;
 }
 
-// The expiry column holds the date, YYYY-MM-DD (the New York date the option expires on).
-// The option expires at that date's 16:00 New York close, not at midnight in the machine's
-// zone.
-auto expiry_from_str(const std::string& s) -> std::chrono::system_clock::time_point {
+// The expiry column holds the date, YYYY-MM-DD (the date on its portfolio's calendar the option
+// expires on). The option expires at that date's close, not at midnight in the machine's zone.
+auto expiry_from_str(const std::string& s, std::string_view trading_class)
+    -> std::chrono::system_clock::time_point {
     const std::optional<std::chrono::year_month_day> date = model::parse_date(s);
-    return date ? model::option_expiry_time(*date) : std::chrono::system_clock::time_point{};
+    return date ? model::calendar_of(trading_class).expiry_time(*date)
+                : std::chrono::system_clock::time_point{};
 }
 
 /** The columns of CONTRACT_COLUMNS, from the start of a row. */
@@ -410,7 +412,7 @@ auto SqliteDatabase::load_option_contracts() -> std::vector<model::Contract> {
                 c.option_strike = sqlite3_column_double(s.get(), 9);
             }
             if (!is_null(s.get(), 10)) {
-                c.option_expiry = expiry_from_str(text(s.get(), 10));
+                c.option_expiry = expiry_from_str(text(s.get(), 10), c.trading_class);
             }
             if (!is_null(s.get(), 11)) {
                 c.option_underlying = text(s.get(), 11);
@@ -459,8 +461,8 @@ void SqliteDatabase::save_contracts(std::span<const model::Contract> contracts) 
             if (is_option) {
                 const auto type = c.option_type.transform(
                     [](model::OptionType t) { return model::to_string(t); });
-                const auto expiry = c.option_expiry.transform([](model::DateTime t) {
-                    return std::format("{:%F}", model::new_york_date(t));
+                const auto expiry = c.option_expiry.transform([&c](model::DateTime t) {
+                    return std::format("{:%F}", model::calendar_of(c.trading_class).date_of(t));
                 });
                 bind_from(s, 9, type, c.option_strike, expiry, c.option_underlying);
             }

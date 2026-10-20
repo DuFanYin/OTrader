@@ -16,7 +16,6 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace strategy {
@@ -78,12 +77,26 @@ class Strategy {
         return std::chrono::year_month_day{
             std::chrono::floor<std::chrono::days>(portfolio()->trading_day())};
     }
-    /** Minutes since the 09:30 New York open: the bar ending 09:31 is 1, the close's 390. */
-    int minute() const { return model::minutes_since_open(now()); }
+    /** Minutes since its portfolio's open (09:30 New York for SPY): the bar ending 09:31 is 1,
+     * the close's 390. */
+    int minute() const { return calendar().minutes_since_open(now()); }
+    /** Its portfolio's calendar. */
+    const model::SessionCalendar& calendar() const { return portfolio()->calendar(); }
+    /** Years to an expiry on its calendar's variance clock (SessionCalendar::variance_years),
+     * `overnight` of each day's variance before the open. The engine's IVs are on calendar time;
+     * one on this clock is iv * sqrt(calendar years / these). */
+    double variance_years(std::chrono::year_month_day expiry, double overnight = 0.4) const {
+        return calendar().variance_years(now(), calendar().expiry_time(expiry), overnight);
+    }
+    /** False when the engine started late and never saw today's open (the portfolio's first
+     * frame today after its first five minutes), until the source gave the day's open
+     * (Portfolio::restore_day). */
+    bool saw_open() const { return portfolio()->saw_open(); }
 
     // ---- Chains
     /** Chains find_chain finds and live streams quotes for. */
     void subscribe_chains(std::span<const std::string> chain_symbols);
+    /** A chain it subscribes, as the portfolio lists it now (a day's roll may drop one). */
     std::optional<model::Chain> find_chain(const std::string& chain_symbol) const;
     /** The nearest chain expiring min_dte to max_dte days out, subscribed in place of those
      * before; empty when there is none. */
@@ -121,9 +134,12 @@ class Strategy {
     /** Holds an option, alone or in a combo. */
     bool holds_options() const;
     // ---- Values by day (data/daily, prepared outside the engine), as of the day before
-    /** The series' last value dated before today. */
+    static constexpr int kStaleTradingDays = 5;
+    /** The series' last value dated before today; none once that value is more than
+     * kStaleTradingDays trading days old: a series no longer kept is missing, not its last
+     * value. */
     std::optional<double> daily(std::string_view series) const;
-    /** Its last n values before today, oldest first (fewer when it has fewer). */
+    /** Its last n values before today, oldest first (fewer when it has fewer; none when stale). */
     std::vector<double> daily_history(std::string_view series, std::size_t n) const;
     /** Trading days from today to the series' next date (0: today); -1 when it has none. */
     int trading_days_until(std::string_view series) const;
@@ -146,6 +162,9 @@ class Strategy {
     /** It stops: in error until inited again (StrategyContext::set_error). */
     void set_error(const std::string& msg);
     void write_log(const std::string& msg, utilities::LogLevel level = utilities::INFO) const;
+    /** A value of the day under `name`, what it measured (StrategyContext::write_value): a
+     * backtest reports each day's; a strategy that only measures writes its answers so. */
+    void write_value(std::string_view name, double value);
 
   protected:
     /** Its Setting from its record's; use as `const Setting setting_ = read_setting<Setting>();`. */
@@ -160,8 +179,6 @@ class Strategy {
 
     StrategyContext& context_;
     const BaseSetting base_setting_ = read_setting<BaseSetting>();
-    std::unordered_set<std::string> subscribed_chains_; // looked up in the portfolio: a day's roll
-                                                        // may drop a chain
 };
 
 } // namespace strategy

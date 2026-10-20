@@ -12,10 +12,6 @@ inline double terminal_price(double spot, double carry, double vol, double matur
     return spot * std::exp((carry - 0.5 * vol * vol) * maturity + vol * std::sqrt(maturity) * z);
 }
 
-inline double call_put_payoff(double st, double strike, bool is_call) {
-    return is_call ? std::max(st - strike, 0.0) : std::max(strike - st, 0.0);
-}
-
 inline double discounted_mean(double payoff_sum, double payoff_sq, double n, double disc,
                               double* out_stderr) {
     const double mean = payoff_sum / n;
@@ -35,10 +31,10 @@ double mc_pseudorandom(double spot, double strike, double carry, double disc, do
     const double n = static_cast<double>(n_paths);
     double payoff_sum = 0.0, payoff_sq = 0.0;
     for (int i = 0; i < n_paths; ++i) {
-        const double payoff = call_put_payoff(
-            terminal_price(spot, carry, vol, maturity, nd(rng)), strike, is_call);
-        payoff_sum += payoff;
-        payoff_sq  += payoff * payoff;
+        const double value =
+            payoff(terminal_price(spot, carry, vol, maturity, nd(rng)), strike, is_call);
+        payoff_sum += value;
+        payoff_sq  += value * value;
     }
     return discounted_mean(payoff_sum, payoff_sq, n, disc, out_stderr);
 }
@@ -54,35 +50,14 @@ double mc_antithetic(double spot, double strike, double carry, double disc, doub
     for (int i = 0; i < half; ++i) {
         const double z = nd(rng);
         const double p1 =
-            call_put_payoff(terminal_price(spot, carry, vol, maturity, z), strike, is_call);
+            payoff(terminal_price(spot, carry, vol, maturity, z), strike, is_call);
         const double p2 =
-            call_put_payoff(terminal_price(spot, carry, vol, maturity, -z), strike, is_call);
+            payoff(terminal_price(spot, carry, vol, maturity, -z), strike, is_call);
         const double avg = 0.5 * (p1 + p2);
         payoff_sum += avg;
         payoff_sq  += avg * avg;
     }
     return discounted_mean(payoff_sum, payoff_sq, n, disc, out_stderr);
-}
-
-// Rational approximation for the normal quantile (Beasley-Springer-Moro).
-// Accurate to ~1e-9 for p in (0,1).
-double norm_quantile(double p) {
-    static const double a[] = { 2.50662823884, -18.61500062529,  41.39119773534, -25.44106049637 };
-    static const double b[] = { -8.47351093090,  23.08336743743, -21.06224101826,  3.13082909833 };
-    static const double c[] = { 0.3374754822726147, 0.9761690190917186, 0.1607979714918209,
-                                  0.0276438810333863, 0.0038405729373609, 0.0003951896511349,
-                                  0.0000321767881768, 0.0000002888167364, 0.0000003960315187 };
-    const double q = p - 0.5;
-    if (std::abs(q) < 0.42) {
-        const double r = q * q;
-        return q * (((a[3]*r + a[2])*r + a[1])*r + a[0]) /
-                   ((((b[3]*r + b[2])*r + b[1])*r + b[0])*r + 1.0);
-    }
-    const double r0 = p < 0.5 ? p : 1.0 - p;
-    const double r = std::sqrt(-std::log(std::max(r0, 1e-300)));
-    double s = c[0];
-    for (int i = 1; i <= 8; ++i) s = s * r + c[i];
-    return p < 0.5 ? -s : s;
 }
 
 double mc_sobol(double spot, double strike, double carry, double disc, double vol,
@@ -95,11 +70,10 @@ double mc_sobol(double spot, double strike, double carry, double disc, double vo
     for (int i = 0; i < n_paths; ++i) {
         sobol.next(std::span<double>(u, 1));
         const double uc = std::clamp(u[0], 1e-12, 1.0 - 1e-12);
-        const double z = norm_quantile(uc);
-        const double payoff = call_put_payoff(
-            terminal_price(spot, carry, vol, maturity, z), strike, is_call);
-        payoff_sum += payoff;
-        payoff_sq  += payoff * payoff;
+        const double z = normal_quantile(uc);
+        const double value = payoff(terminal_price(spot, carry, vol, maturity, z), strike, is_call);
+        payoff_sum += value;
+        payoff_sq  += value * value;
     }
     return discounted_mean(payoff_sum, payoff_sq, n, disc, out_stderr);
 }

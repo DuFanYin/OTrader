@@ -319,7 +319,8 @@ auto GrpcLiveEngineService::ListSavedContracts(::grpc::ServerContext* /*context*
             m->set_option_strike(c.option_strike.value_or(0.0));
             if (c.option_expiry) {
                 m->set_option_expiry(
-                    std::format("{:%F}", model::new_york_date(*c.option_expiry)));
+                    std::format("{:%F}", model::calendar_of(c.trading_class)
+                                             .date_of(*c.option_expiry)));
             }
             m->set_option_underlying(c.option_underlying.value_or(""));
         }
@@ -352,16 +353,14 @@ auto GrpcLiveEngineService::GetQuotes(::grpc::ServerContext* /*context*/,
                                       const ::optra::QuotesRequest* request,
                                       ::optra::QuotesResponse* response) -> ::grpc::Status {
     return status_of([&] {
-        // Copied on the event thread, the response built off it.
-        struct Quoted {
-            std::string symbol;
-            double bid;
-            double ask;
-        };
+        // Only the quotes copied on the event thread (the listing is immutable, shared); the
+        // symbols and the response made off it.
         model::DateTime time{};
         double underlying_bid = 0.0;
         double underlying_ask = 0.0;
-        std::vector<Quoted> options;
+        std::shared_ptr<const model::Listing> listing;
+        std::vector<double> bids;
+        std::vector<double> asks;
         engine_.read([&](const core::Main& main) {
             const model::Portfolio* p = main.find_portfolio(request->portfolio());
             if (p == nullptr) {
@@ -372,24 +371,30 @@ auto GrpcLiveEngineService::GetQuotes(::grpc::ServerContext* /*context*/,
                 underlying_bid = u->bid() > 0.0 ? u->bid() : u->mid();
                 underlying_ask = u->ask() > 0.0 ? u->ask() : u->mid();
             }
-            for (std::uint32_t column = 0; column < p->listing().size(); ++column) {
-                const model::Option o(*p, column);
-                if (o.bid() > 0.0 || o.ask() > 0.0) {
-                    options.push_back({o.symbol(), o.bid(), o.ask()});
-                }
-            }
+            listing = p->shared_listing();
+            bids.assign(p->frame().bid.begin(), p->frame().bid.end());
+            asks.assign(p->frame().ask.begin(), p->frame().ask.end());
         });
         const auto ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch());
         response->set_time_ns(time == model::DateTime{} ? 0 : ns.count());
         response->set_underlying_bid(underlying_bid);
         response->set_underlying_ask(underlying_ask);
-        for (const Quoted& q : options) {
-            if (const std::optional<model::OptionId> id = model::parse_option_symbol(q.symbol)) {
+        const auto at = [](const std::vector<double>& v, std::size_t i) {
+            return i < v.size() ? v[i] : 0.0;
+        };
+        for (std::size_t column = 0; listing != nullptr && column < listing->size(); ++column) {
+            const double bid = at(bids, column);
+            const double ask = at(asks, column);
+            if (bid <= 0.0 && ask <= 0.0) {
+                continue;
+            }
+            if (const std::optional<model::OptionId> id =
+                    model::parse_option_symbol(listing->contract(column).symbol)) {
                 ::optra::OptionQuote* m = response->add_options();
                 m->set_symbol(model::occ_code(*id));
-                m->set_bid(q.bid);
-                m->set_ask(q.ask);
+                m->set_bid(bid);
+                m->set_ask(ask);
             }
         }
     });
@@ -406,7 +411,8 @@ auto GrpcLiveEngineService::SyncContracts(::grpc::ServerContext* /*context*/,
         for (const model::Contract& c : engine_.roll_day(portfolio)) { // traded at once
             if (c.product == model::Product::OPTION && c.option_expiry) {
                 ++options;
-                expiries.insert(std::format("{:%F}", model::new_york_date(*c.option_expiry)));
+                expiries.insert(std::format(
+                    "{:%F}", model::calendar_of(c.trading_class).date_of(*c.option_expiry)));
             }
         }
         response->set_options(options);

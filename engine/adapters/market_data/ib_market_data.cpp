@@ -3,6 +3,7 @@
 #include "adapters/market_data/ib_market_data.hpp"
 #include "utilities/log_source.hpp"
 #include "model/constant.hpp"
+#include "model/session_calendar.hpp"
 #include "utilities/log_level.hpp"
 #include "adapters/ib_api/ib_api.hpp"
 
@@ -12,6 +13,7 @@
 #include "bar.h"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <format>
@@ -62,6 +64,8 @@ constexpr auto kSummaryInterval = std::chrono::minutes(1);
 
 /** Request ids of closes asked for, apart from the tickers' (1 up). */
 constexpr int kCloseRequests = 1'000'000;
+/** Request ids of days' ranges asked for. */
+constexpr int kRangeRequests = 2'000'000;
 
 } // namespace
 
@@ -90,7 +94,44 @@ class IbMarketDataSession final : public IbSession {
         });
     }
 
+    void ask_day_range(const std::string& underlying, std::chrono::year_month_day day) {
+        queue_on_message_thread([this, underlying, day] {
+            const int id = kRangeRequests + static_cast<int>(ranges_.size());
+            ranges_.push_back({.underlying = underlying, .day = day});
+            const Contract c = ib_contract(underlying);
+            // Minute bars of the day's regular hours, until now for today; an index has no
+            // quotes, its trades are its values.
+            const bool today = model::kNyse.date_of(std::chrono::system_clock::now()) == day;
+            const std::string end =
+                today ? std::string{}
+                      : std::format("{:%Y%m%d} 23:59:59 US/Eastern", std::chrono::sys_days{day});
+            const std::string what = c.secType == "IND" ? "TRADES" : "MIDPOINT";
+            if (!send([&](EClientSocket& s) {
+                    s.reqHistoricalData(id, c, end, "1 D", "1 min", what, 1, 2, false, {});
+                })) {
+                log(std::format("Not connected to IB: {}'s open of {} not asked", underlying,
+                                day),
+                    utilities::WARNING);
+            }
+        });
+    }
+
   private:
+    /** A day's range asked for: the first minute's close, the highest and lowest; open 0 until
+     * a bar of the day comes. */
+    struct Range {
+        std::string underlying;
+        std::chrono::year_month_day day;
+        double open = 0.0;
+        double high = 0.0;
+        double low = 0.0;
+    };
+
+    auto range_request(int id) -> Range* {
+        const int i = id - kRangeRequests;
+        return i >= 0 && static_cast<std::size_t>(i) < ranges_.size() ? &ranges_[i] : nullptr;
+    }
+
     /** A close asked for; price 0 until its bar comes. */
     struct Close {
         std::string underlying;
@@ -104,6 +145,23 @@ class IbMarketDataSession final : public IbSession {
     }
 
     void historicalData(int reqId, const Bar& bar) override {
+        if (Range* r = range_request(reqId)) { // its bars' times: seconds since the epoch
+            long long seconds = 0;
+            const char* end = bar.time.data() + bar.time.size();
+            if (std::from_chars(bar.time.data(), end, seconds).ptr != end ||
+                model::kNyse.date_of(model::DateTime{std::chrono::seconds(seconds)}) != r->day ||
+                bar.close <= 0.0) {
+                return;
+            }
+            if (r->open <= 0.0) {
+                r->open = bar.close;
+                r->high = bar.high;
+                r->low = bar.low;
+            }
+            r->high = std::max(r->high, bar.high);
+            r->low = std::min(r->low, bar.low);
+            return;
+        }
         if (Close* c = close_request(reqId);
             c != nullptr && bar.time == std::format("{:%Y%m%d}", std::chrono::sys_days{c->day})) {
             c->price = bar.close;
@@ -112,6 +170,18 @@ class IbMarketDataSession final : public IbSession {
 
     void historicalDataEnd(int reqId, const std::string& /*start*/,
                            const std::string& /*end*/) override {
+        if (const Range* r = range_request(reqId)) {
+            if (r->open <= 0.0) {
+                log(std::format("IB has no minute bars of {} on {}", r->underlying, r->day),
+                    utilities::WARNING);
+                return;
+            }
+            log(std::format("IB's {} on {} until now: open {}, high {}, low {}", r->underlying,
+                            r->day, r->open, r->high, r->low),
+                utilities::INFO);
+            engine_.day_range(r->underlying, r->day, r->open, r->high, r->low);
+            return;
+        }
         Close* c = close_request(reqId);
         if (c == nullptr) {
             return;
@@ -271,6 +341,12 @@ class IbMarketDataSession final : public IbSession {
                 utilities::WARNING);
             return;
         }
+        if (const Range* r = range_request(id); r != nullptr) {
+            log(std::format("IB {} asking {}'s open of {}: {}", code, r->underlying, r->day,
+                            message),
+                utilities::WARNING);
+            return;
+        }
         const Ticker* t = ticker(id);
         if (t == nullptr) {
             IbSession::on_error(id, code, message);
@@ -296,6 +372,7 @@ class IbMarketDataSession final : public IbSession {
     std::size_t prices_since_summary_ = 0;
     std::chrono::steady_clock::time_point next_summary_;
     std::vector<Close> closes_; // by request id, from kCloseRequests
+    std::vector<Range> ranges_; // by request id, from kRangeRequests
 };
 
 IbMarketData::IbMarketData() = default;
@@ -324,6 +401,12 @@ void IbMarketData::stop() { session_.reset(); } // its destructor stops it
 void IbMarketData::ask_close(const std::string& underlying, std::chrono::year_month_day day) {
     if (session_) {
         session_->ask_close(underlying, day);
+    }
+}
+
+void IbMarketData::ask_day_range(const std::string& underlying, std::chrono::year_month_day day) {
+    if (session_) {
+        session_->ask_day_range(underlying, day);
     }
 }
 

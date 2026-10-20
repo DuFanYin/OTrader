@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -9,27 +10,11 @@
 #include <span>
 #include <vector>
 
-#include "quant/screener/screener.h"
+#include "quant/engine_api.h"
 
 namespace quant {
 
 // ── Optimizer ─────────────────────────────────────────────────────────────────
-
-struct OptResult {
-    std::vector<double> x;
-    double fval      = 1e30;
-    int    iterations = 0;
-    bool   converged  = false;
-};
-
-OptResult nelder_mead(
-    std::function<double(std::span<const double>)> objective,
-    std::span<const double> x0,
-    std::span<const double> lower,
-    std::span<const double> upper,
-    double tol      = 1e-6,
-    int    max_iter = 1000
-);
 
 // Bayesian optimisation's next `batch` points in the box [lower, upper] (integer[d] != 0: whole
 // numbers), to maximise: a Gaussian process fitted to the points tried and their values (NaN: a try
@@ -49,6 +34,12 @@ double clamp_positive   (double x, double eps = 1e-8);
 double clamp_nonnegative(double x);
 double norm_cdf(double x);
 double norm_pdf(double x);
+/** The standard normal quantile (Acklam, one Halley step: |error| < 1e-12). */
+double normal_quantile  (double p);
+/** A call's or a put's value at expiry. */
+inline double payoff(double s, double k, bool is_call) {
+    return is_call ? std::max(s - k, 0.0) : std::max(k - s, 0.0);
+}
 
 // ── Stats ─────────────────────────────────────────────────────────────────────
 
@@ -60,13 +51,6 @@ double stats_mgf(double mu, double sigma, double theta);
 // Sample moments of `sample_size` draws from N(mu, sigma²): E[e^{θX}], mean, variance.
 void   stats_normal(double mu, double sigma, double theta, int sample_size,
                     double* out_mgf, double* out_mean, double* out_variance);
-
-// Features of a strategy's data (strategy::Strategy wraps them). The annualised standard deviation
-// of the closes' log returns (NaN with fewer than two); the share of history at or below x (NaN when
-// empty); the IV at |delta| = target, linear between the options either side of it (NaN when none is).
-double realized_vol(std::span<const double> closes, double periods_per_year = 252.0);
-double percentile_rank(std::span<const double> history, double x);
-double iv_at_delta(std::span<const double> deltas, std::span<const double> ivs, double target);
 
 // Selection among trials: `returns` row-major, one row per trial and one column per period (a day), NaN
 // where a trial has no return. A period's Sharpe ratio is mean / sample standard deviation, NaN skipped
@@ -139,7 +123,6 @@ class SobolEngine {
 public:
     explicit SobolEngine(int dimension);
     void next(std::span<double> out_unit);
-    void skip(int n);
 private:
     int dim_;
     unsigned counter_;
@@ -187,70 +170,20 @@ private:
 };
 
 std::unique_ptr<StochasticModel> build_model(ModelType type, const ModelParams& params);
-double simulate_terminal_price_gbm(double spot, double rate, double vol, double maturity,
-                                   std::mt19937_64& rng);
 
-int simulation_path    (int model_code, int n_steps, double dt,
-                        double sigma, double kappa, double theta, double x0,
-                        std::span<double> out_values);
-int measure_density_path(double mu, double r, double sigma, double t,
-                         int n_steps, std::span<double> out_values);
-int measure_compare    (double mu, double r, double sigma, double t,
-                        int n_steps, int n_paths, double x0,
-                        std::span<double> out_stats_10, std::span<double> out_preview, int preview_len);
 
 // ── Pricing ───────────────────────────────────────────────────────────────────
 
-// Every European closed form is Black on the forward, discounted at `rate`: the trading engine's
-// Greeks and implied vol, and Black-Scholes on a spot paying a yield, as Black on spot_forward.
-/** Per-unit Greeks; theta per day, vega per 1% vol move (as py_vollib). */
-struct BlackGreeks {
-    double delta = 0.0;
-    double gamma = 0.0;
-    double theta = 0.0;
-    double vega = 0.0;
-};
-/** Greeks of an option priced as Black on `forward`, discounted at `rate`. Delta and gamma are to
- * `spot`, the forward moving with it (in proportion); theta holds the forward. */
-BlackGreeks black_greeks(bool is_call, double spot, double forward, double strike, double maturity,
-                         double rate, double vol);
-/** Black on `forward`, discounted at `rate`: the option's price; 0 for a non-positive input. */
-double black_price(bool is_call, double forward, double strike, double maturity, double rate,
-                   double vol);
-/** The vol at which Black on `forward`, discounted at `rate`, gives `price` (LetsBeRational, to
- * machine precision); 0 when there is none, at most 5. */
-double black_implied_vol(double price, double forward, double strike, double maturity, double rate,
-                         bool is_call);
+// Black itself is engine_api.h's; the European closed forms here are Black on the forward too.
 /** A cash-or-nothing call (1 at expiry above `strike`) under Black on `forward`, discounted at
  * `rate`. */
 double black_digital_call(double forward, double strike, double maturity, double rate, double vol);
-
-/** The forward of a spot paying a continuous `dividend_yield`. */
-inline double spot_forward(double spot, double rate, double dividend_yield, double maturity) {
-    return spot * std::exp((rate - dividend_yield) * maturity);
-}
 
 /** Black-Scholes Greeks of a call or put on a spot paying `dividend_yield`, from black_greeks on
  * its forward with the spot held: theta per year, vega per 1.00 of vol, rho at a fixed spot. */
 void pricing_greeks(bool is_call, double spot, double strike, double rate, double dividend_yield,
                     double vol, double maturity, double* out_delta, double* out_gamma,
                     double* out_theta, double* out_vega, double* out_rho);
-void greek_surface_grid (double strike, double rate, double vol, double dividend_yield,
-                         std::span<const double> spots, std::span<const double> maturities,
-                         int greek_code, std::span<double> out_grid);
-void scenario_bs5       (double spot, double strike, double rate, double vol,
-                         double maturity, double dividend_yield, bool is_call, double* out_prices_5);
-// Calls: Monte Carlo, Black-Scholes and a European CRR tree of 250 steps a year (at least 10).
-void pricing_batch      (std::span<const double> spots,
-                         std::span<const double> strikes,
-                         std::span<const double> rates,
-                         std::span<const double> vols,
-                         std::span<const double> maturities,
-                         std::span<const int> n_paths_arr,
-                         std::span<const double> div_yields,
-                         std::span<double> out_mc,
-                         std::span<double> out_bs,
-                         std::span<double> out_binomial);
 
 /** A European option by Monte Carlo on GBM terminal prices (drift rate - dividend_yield),
  * discounted at rate; seed 42. */
@@ -259,7 +192,7 @@ double mc_price(double spot, double strike, double rate, double dividend_yield, 
                 SamplerType sampler = SamplerType::Pseudorandom, double* out_stderr = nullptr);
 
 /** The vol at which Black-Scholes on a spot paying `dividend_yield` gives the call price
- * `market_price`; -1 when there is none in [1e-4, 5). */
+ * `market_price`; 0 when there is none in [1e-4, 5), as black_implied_vol. */
 double bs_implied_vol   (double market_price, double spot, double strike,
                          double rate, double maturity, double dividend_yield);
 void   implied_vol_batch(std::span<const double>  market_prices,
@@ -269,18 +202,12 @@ void   implied_vol_batch(std::span<const double>  market_prices,
                          std::span<double>        out_ivs,
                          std::span<uint8_t>       out_converged);
 
-double heston_call_price(double spot, double strike, double rate, double maturity,
-                         double v0, double kappa, double theta, double xi, double rho,
-                         int quad_points = 64);
-void   heston_price_batch(double spot, double rate,
-                          std::span<const double> strikes,
-                          std::span<const double> maturities,
-                          double v0, double kappa, double theta, double xi, double rho,
-                          std::span<double> out_prices);
-
 struct HestonParams {
     double v0 = 0.04, kappa = 1.5, theta = 0.04, xi = 0.5, rho = -0.7;
 };
+
+double heston_call_price(double spot, double strike, double rate, double maturity,
+                         const HestonParams& h);
 
 struct HestonFit {
     HestonParams params;
@@ -295,10 +222,6 @@ HestonFit heston_calibrate(double spot, double rate,
                            std::span<const double> maturities,
                            std::span<const double> call_prices,
                            const HestonParams& init, int max_iter = 500);
-
-double pde_price        (double spot, double strike, double rate, double vol,
-                         double maturity, double dividend_yield,
-                         int s_steps, int t_steps, int method);
 
 constexpr int kPdeMaxExplicitSteps = 2'000'000;
 
@@ -340,11 +263,6 @@ struct LsmResult {
 LsmResult lsm_american_price(double spot, double strike, double rate, double dividend_yield, double vol,
                              double maturity, int n_paths, int n_steps, bool is_call,
                              uint64_t seed = 42, bool antithetic = true);
-double vol_surface_interp(std::span<const double> strikes,
-                          std::span<const double> expiries,
-                          std::span<const double> ivs,
-                          double spot,
-                          double target_strike, double target_expiry);
 
 // ── Hedging ───────────────────────────────────────────────────────────────────
 

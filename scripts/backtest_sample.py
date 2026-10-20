@@ -23,14 +23,14 @@ from optra.utils import files  # noqa: E402
 OUT = Path(__file__).resolve().parents[1] / "app" / "web" / "public" / "samples" / "sample_backtest.json"
 START, END = date(2025, 8, 4), date(2025, 8, 8)
 SETTING = {"leg1_ratio": 1, "leg2_ratio": 1, "leg2_right": 1}
-COSTS = {"fee_rate": 0.35}
+COSTS = {"fee_scale": 1.0}
 
 
 def main() -> None:
     with tempfile.TemporaryDirectory() as data:
         root = Path(data)
-        synthetic_days.generate(synthetic_days.Model(seed=1), START, END, root, "SPY", False)
-        files.data_root = lambda: root  # the page's backtest reads its days from data/
+        synthetic_days.generate(synthetic_days.Model(seed=1), START, END, root / "backtest", "SPY", False)
+        files.data_root = lambda: root  # the page's backtest reads its days from data/backtest/
         jobs.use_workers(False)
         started = time.monotonic()
         out = backtest.run_backtest({"parquet": "SPY", "strategy": "ComboStrategy", "start_date": START.isoformat(),

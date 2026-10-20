@@ -4,9 +4,12 @@
 
 #include "model/constant.hpp"
 #include "model/object.hpp"
+#include "model/portfolio_spec.hpp"
 #include "model/symbol.hpp"
 #include "model/utility.hpp"
+#include "quant/engine_api.h"
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -68,23 +71,57 @@ class Listing {
     std::vector<std::uint32_t> columns_;
 };
 
-/** What IV is solved from, as price_snapshot takes it: "mid", "bid" or "ask" (any case), a view
- * that outlives any text; empty for anything else. */
+/** What IV is solved from, as pricing::price_snapshot takes it: "mid", "bid" or "ask" (any case),
+ * a view that outlives any text; empty for anything else. */
 std::string_view iv_price_mode_of(std::string_view text);
 
-/** Each expiry's rate (rates at its time), each chain's forward by put-call parity, then each
- * option's IV and Greeks as Black on them. Any thread. With quotes_changed (one per option, on a snapshot priced before) only what moved is
- * priced again; a move of the underlying alone rescales delta and gamma. time_step (live): an
- * expiry's time counts as moved once per step while more than an hour is left. */
-void price_snapshot(PortfolioSnapshot& snapshot, const RateCurve& rates,
-                    std::string_view iv_price_mode,
-                    std::span<const std::uint8_t> quotes_changed = {},
-                    bool underlying_changed = true,
-                    std::chrono::seconds time_step = std::chrono::seconds::zero());
+// ---- How a frame's options are priced: pricing::price_snapshot prices them so, and greeks_at one
+// again from what a frame keeps.
+
+enum class IvInput : std::uint8_t { Mid, Bid, Ask };
+
+/** Of iv_price_mode_of's modes; mid for any other. */
+inline IvInput iv_input(std::string_view mode) {
+    if (mode == "bid") {
+        return IvInput::Bid;
+    }
+    return mode == "ask" ? IvInput::Ask : IvInput::Mid;
+}
+
+/** The price IV is solved from; 0 for none. */
+inline double iv_input_price(double bid, double ask, IvInput input) {
+    if (bid > 0.0 && ask > 0.0 && bid > ask) {
+        return 0.0; // crossed: no valid quote
+    }
+    switch (input) {
+    case IvInput::Bid:
+        return bid > 0.0 ? bid : 0.0;
+    case IvInput::Ask:
+        return ask > 0.0 ? ask : 0.0;
+    case IvInput::Mid:
+        break;
+    }
+    return mark(bid, ask);
+}
+
+/** An option with no spot, strike, time left or price to price it from: no IV, no Greeks. */
+inline bool cannot_price(double spot, double strike, double years, double price) {
+    return spot <= 0.0 || strike <= 0.0 || years <= 0.0 || price <= 0.0;
+}
+
+/** The forward an option is priced on: its chain's by parity, else the spot grown at the rate. */
+inline double pricing_forward(double chain_forward, double spot, double rate, double years) {
+    return chain_forward <= 0.0 ? spot * std::exp(rate * years) : chain_forward;
+}
+
+/** The underlying's mark from its quotes, else as marked. */
+inline double frame_spot(const Frame& frame) {
+    return mark(frame.underlying_bid, frame.underlying_ask, frame.underlying_mark);
+}
+
 /** Option `column`'s Greeks (per option): the frame's own when it holds them, else priced from
  * what its pricing keeps (the IV, the chain's forward, the expiry's time and rate, the spot, the
- * setting),
- * bit for bit what price_snapshot gives; zeros when the frame is not priced. */
+ * setting), bit for bit what pricing::price_snapshot gives; zeros when the frame is not priced. */
 Greeks greeks_at(const Frame& frame, std::size_t column);
 
 class Portfolio;
@@ -117,15 +154,26 @@ class Chain {
     [[nodiscard]] double reference_price() const;
     /** Nearest reference_price(), the lower of two; unquoted: the middle one; none: 0. */
     [[nodiscard]] double atm_strike() const;
-    /** The ATM call's IV, else the put's. */
+    /** Its smile as last fitted (pricing::fit_smiles); points 0 before one, or when too few of
+     * its options were quoted. */
+    [[nodiscard]] quant::SviFit smile() const;
+    /** The IV on its smile at a strike, at the forward and years it was fitted at. */
+    [[nodiscard]] std::optional<double> smile_iv(double strike) const;
+    /** The IV on its smile where an option's delta (as Option::delta: a call's above 0, a put's
+     * below) is `delta`; none where its smile does not reach it. */
+    [[nodiscard]] std::optional<double> smile_iv_at_delta(double delta) const;
+    /** The IV on its smile at the forward it was fitted at. */
     [[nodiscard]] std::optional<double> atm_iv() const;
-    /** The 25 delta risk reversal: the IV of the call at delta 0.25 less the put's at -0.25. */
+    /** The 25 delta risk reversal on its smile: the IV at a call's delta 0.25 less a put's at
+     * -0.25. */
     [[nodiscard]] std::optional<double> skew_25d() const;
     /** The far chain's ATM IV less this one's. */
     [[nodiscard]] std::optional<double> term_slope(const Chain& far) const;
 
   private:
     [[nodiscard]] const Listing::Chain& listed() const;
+    /** Its kSmileValues in the frame; empty when not fitted. */
+    [[nodiscard]] std::span<const double> fitted() const;
 
     const Portfolio* portfolio_;
     std::uint32_t index_;
@@ -194,23 +242,24 @@ class Underlying {
 class Portfolio {
   public:
     std::string name;
-    std::string underlying_symbol;
-    /** When the underlying does not trade (an index); empty: the underlying. */
-    std::string hedge_symbol;
-    /** Settles in shares (SPY), else in cash (SPXW). */
-    bool physical = false;
 
-    explicit Portfolio(std::string name);
+    /** spec: what it is (one of model::kPortfolios), outliving it; none: what set_underlying and
+     * set_hedge_instrument give it, settled in cash. */
+    explicit Portfolio(std::string name, const PortfolioSpec* spec = nullptr);
     Portfolio(const Portfolio&) = delete;
     Portfolio& operator=(const Portfolio&) = delete;
 
-    /** One rate at every maturity (ignored when not finite); or a curve. */
-    void set_risk_free_rate(double rate);
-    void set_rates(RateCurve rates);
-    [[nodiscard]] const RateCurve& rates() const { return rates_; }
-    /** mid, bid or ask: what IV is solved from; anything else is ignored. */
-    void set_iv_price_mode(std::string_view mode);
-    [[nodiscard]] std::string_view iv_price_mode() const { return iv_price_mode_; }
+    [[nodiscard]] const PortfolioSpec* spec() const { return spec_; }
+    /** Its spec's (SPX for SPXW), else its underlying's; empty before one is set. */
+    [[nodiscard]] std::string_view underlying_symbol() const;
+    /** What hedges trade when the underlying does not (an index); empty: the underlying. */
+    [[nodiscard]] std::string_view hedge_symbol() const;
+    /** Settles in shares (SPY), else in cash (SPXW). */
+    [[nodiscard]] bool physical() const { return spec_ != nullptr && spec_->physical; }
+    /** Its spec's, else NYSE's. */
+    [[nodiscard]] const SessionCalendar& calendar() const {
+        return spec_ != nullptr ? *spec_->calendar : kNyse;
+    }
 
     // ---- Contracts
 
@@ -219,13 +268,29 @@ class Portfolio {
     /** The day's options, keeping the earlier ones `keep` names. Returns the chains dropped. */
     std::vector<std::string> replace_options(std::span<const Contract> options,
                                              const std::unordered_set<std::string>& keep);
-    /** The values of what stays carry over to the next frame. Returns the chains dropped. */
-    std::vector<std::string> list(std::shared_ptr<const Listing> listing);
+    /** The values of what stays carry over to the next frame: of the chains `valued` names when
+     * given (the frame holds none of the others' values), else of all. Returns the chains
+     * dropped. */
+    std::vector<std::string> list(std::shared_ptr<const Listing> listing,
+                                  std::optional<std::span<const std::string>> valued = {});
     [[nodiscard]] const Listing& listing() const { return *listing_; }
     [[nodiscard]] const std::shared_ptr<const Listing>& shared_listing() const { return listing_; }
-    /** A UTC midnight; each frame moves it to its own date. */
+    /** A UTC midnight: of the date on its calendar; each frame moves it to its own. */
     void set_trading_day(DateTime ref) { dte_ref_ = ref; }
     [[nodiscard]] DateTime trading_day() const { return dte_ref_; }
+    /** The underlying's mark at its first frame in today's session (from the open's first minute
+     * to the close, on its calendar), and its highest and lowest since; 0 before one. */
+    [[nodiscard]] double day_open() const { return day_open_; }
+    [[nodiscard]] double day_high() const { return day_high_; }
+    [[nodiscard]] double day_low() const { return day_low_; }
+    /** The minute since the open of that first frame (1: the open's bar); -1 before one. */
+    [[nodiscard]] int day_first_minute() const { return day_first_minute_; }
+    /** Its first frame today was in the session's first five minutes (or restore_day said where
+     * the day began). */
+    [[nodiscard]] bool saw_open() const { return day_first_minute_ >= 1 && day_first_minute_ <= 5; }
+    /** The underlying's open, high and low of `day` until now as the source has them, for an
+     * engine that started after the open: from the open's bar on; another day's are left out. */
+    void restore_day(std::chrono::year_month_day day, double open, double high, double low);
 
     // ---- The quotes
 
@@ -234,18 +299,12 @@ class Portfolio {
     [[nodiscard]] const Frame& frame() const { return frame_; }
     /** Zeros for its listing, to fill. */
     [[nodiscard]] PortfolioSnapshot snapshot() const;
-    /** Takes the snapshot's values (pricing them if not priced) and leaves it the old ones. */
+    /** Takes the snapshot's values, priced already (pricing::price_snapshot), and leaves it the
+     * old ones. */
     void apply(PortfolioSnapshot& snapshot);
-    /** Read in place while `storage` keeps them, else copied; priced if not. Of another listing:
+    /** Read in place while `storage` keeps them, else copied; priced already. Of another listing:
      * only the time and the underlying's and hedge's quotes. */
     void apply(const Frame& frame, std::shared_ptr<const void> storage = {});
-    void price_snapshot(PortfolioSnapshot& snapshot,
-                        std::span<const std::uint8_t> quotes_changed = {},
-                        bool underlying_changed = true,
-                        std::chrono::seconds time_step = std::chrono::seconds::zero()) const;
-    /** Live pricing's time_step, and the time left under which every step counts. */
-    static constexpr std::chrono::seconds kLiveTimeStep{10};
-    static constexpr std::chrono::hours kTimeStepMinTimeLeft{1};
 
     // ---- Reads
 
@@ -266,16 +325,56 @@ class Portfolio {
     void read_own(); // frame_ at own_
     void move_time(DateTime time);
 
+    const PortfolioSpec* spec_;
     std::shared_ptr<const Listing> listing_;
     std::optional<Contract> underlying_;
     std::optional<Contract> hedge_instrument_;
-    RateCurve rates_;
-    std::string_view iv_price_mode_ = "mid"; // one of iv_price_mode_of's
     DateTime datetime_{};
     DateTime dte_ref_{};
+    DateTime day_of_open_{}; // the day day_open_.. are of
+    double day_open_ = 0.0;
+    double day_high_ = 0.0;
+    double day_low_ = 0.0;
+    int day_first_minute_ = -1;
     PortfolioSnapshot own_;
+    // The chains whose values list() carried into own_, while nothing else has written it.
+    std::optional<std::vector<std::uint32_t>> own_written_;
     Frame frame_; // own_, or values storage_ keeps
     std::shared_ptr<const void> storage_;
 };
+
+// ---- Legs: how a leg of a combo picks its option
+
+/**
+ * A leg as a rule: which chain (by days to expiry) and which strike. One rule picks the same option
+ * in a strategy (ComboStrategy), on paper and in research (research/structures), at the same
+ * quotes.
+ */
+struct LegRule {
+    enum class StrikeBy : std::uint8_t {
+        kForwardPct,   // strike: the chain's forward x (1 + strike / 100), the nearest listed
+        kImpliedMoves, // forward x (1 + strike x the implied move: the ATM straddle's mid / forward)
+        kDelta,        // the option whose delta (a call's above 0, a put's below) is nearest strike
+    };
+    enum class ExpiryBy : std::uint8_t {
+        kFirstAtLeast, // the first expiry dte days out or more
+        kExactly,      // dte days out, no other
+        kNearest,      // the nearest dte days out within min_dte..max_dte (the earlier on a tie)
+    };
+    int ratio = 0; // contracts a unit: bought +, sold -; 0: no leg
+    OptionType right = OptionType::CALL;
+    StrikeBy strike_by = StrikeBy::kForwardPct;
+    double strike = 0.0;
+    ExpiryBy expiry_by = ExpiryBy::kFirstAtLeast;
+    int dte = 0;
+    int min_dte = 0;
+    int max_dte = 0;
+};
+
+/** The chain a leg picks among those listed now (a symbol); empty when none fits. */
+std::string leg_chain(const Portfolio& portfolio, const LegRule& rule);
+/** The option a leg picks on its chain now; none when the chain is not priced or has no strikes,
+ * by implied moves when its ATM straddle is not quoted both ways, by delta when none is priced. */
+std::optional<Option> leg_option(const Chain& chain, const LegRule& rule);
 
 } // namespace model

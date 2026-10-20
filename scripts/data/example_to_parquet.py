@@ -15,7 +15,7 @@ OUT/<SYMBOL>/<SYMBOL>-YYYY-MM/YYYYMMDD.parquet. Another vendor's files need only
 reading them into the same columns.
 
   uv run --project app/server python scripts/data/example_to_parquet.py options.csv underlying.csv \\
-      --symbol SPY --out data [--overwrite]
+      --symbol SPY --out data/backtest [--overwrite]
 """
 
 from __future__ import annotations
@@ -63,7 +63,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("options", type=Path)
     ap.add_argument("underlying", type=Path)
     ap.add_argument("--symbol", required=True, help="the portfolio, e.g. SPY: the folder the days go to")
-    ap.add_argument("--out", type=Path, default=Path("data"), help="data root (default data)")
+    ap.add_argument("--out", type=Path, default=Path("data/backtest"),
+                    help="the backtest days' root (default data/backtest)")
     ap.add_argument("--overwrite", action="store_true", help="replace days already there")
     args = ap.parse_args(argv)
     try:

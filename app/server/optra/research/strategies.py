@@ -96,7 +96,7 @@ def built_strategies() -> dict[str, Any]:
     with _listing:
         now = _libraries()
         if _listed is None or _listed[0] != now:
-            _listed = (now, json.loads(subprocess.run(program("--list-strategies"), capture_output=True, text=True,
+            _listed = (now, json.loads(subprocess.run(program("--list-strategies", "--json"), capture_output=True, text=True,
                                                       timeout=60, check=True).stdout))
         return _listed[1]
 

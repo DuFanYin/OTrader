@@ -72,7 +72,7 @@ function Params() {
   return (
     <>
       <Group title="Backtest data">
-        <Line>One Parquet file per trading day, under data/&lt;SYMBOL&gt;/&lt;SYMBOL&gt;-YYYY-MM/YYYYMMDD.parquet (see doc/data.md).</Line>
+        <Line>One Parquet file per trading day, under data/backtest/&lt;SYMBOL&gt;/&lt;SYMBOL&gt;-YYYY-MM/YYYYMMDD.parquet (see doc/data.md).</Line>
         <Line>No recorded data? POST /api/data/synthetic writes days from a model whose answers are known, to data/synthetic (out: "data" makes them the underlying's days).</Line>
       </Group>
       <Group title={`Contracts from ${broker()}`}>
@@ -115,7 +115,7 @@ function Symbols() {
   return (
     <Card title="Backtest data" wide meta={f.state === "ok" && `${f.symbols.length} symbols`}>
       {f.state === "error" ? <ErrorText>{f.error}</ErrorText> : f.state === "loading" && !f.symbols.length ? <Running /> : (
-        <Table rows={f.symbols} onRow={open} empty="No days under data/ yet." cols={[
+        <Table rows={f.symbols} onRow={open} empty="No days under data/backtest/ yet." cols={[
           { key: "name", label: "Symbol", align: "left", cls: "font-medium" },
           { key: "date_start", label: "First day", align: "left" },
           { key: "date_end", label: "Last day", align: "left" },

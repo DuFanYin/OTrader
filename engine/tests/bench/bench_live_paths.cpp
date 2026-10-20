@@ -18,6 +18,8 @@
  *                       venue, its SUBMITTING report queued, the hand-off and the broker's wake-up
  *   broker → strategy   the broker reports the order filled and the fill → the strategy's on_fill:
  *                       two events through the queue, booked (orders, holdings, the storage)
+ *   quote → order out   the snapshot priced and put → the broker's thread has the order: tick to
+ *                       order out, inside the process
  *   quote → fill        the whole loop
  *   ... the underlying  the same when only the underlying ticks (its options' quotes stay) and a
  *                       second passes every tenth snapshot, as live between option quotes
@@ -39,6 +41,8 @@
 
 #include "adapters/market_data/historical_data.hpp"
 #include "adapters/database/sqlite_database.hpp"
+#include "pricing/pricing.hpp"
+#include "utilities/thread_pool.hpp"
 #include "core/gateway/gateway.hpp"
 #include "core/main.hpp"
 #include "core/log/log_engine.hpp"
@@ -280,6 +284,7 @@ double ns_between(std::uint64_t from, std::uint64_t to) {
 
 struct LoopRows {
     Histogram decide, to_broker, back, total;
+    Histogram order_out; // the quote to its order at the broker's thread: tick to order out
     int skipped = 0;
 };
 
@@ -293,8 +298,6 @@ void run_day(const std::string& day, std::FILE* log_out, double pause_ns, int pa
         LiveAssembly assembly(day, log_out);
         core::Main& engine = assembly.main();
         adapters::HistoricalData* data = assembly.historical_data();
-        const model::Portfolio* portfolio =
-            engine.find_portfolio(assembly.historical_data()->portfolio_name());
         const std::size_t bars = data->minutes();
         options = data->listing()->size();
         g_probe.broker_fills = true;
@@ -306,7 +309,9 @@ void run_day(const std::string& day, std::FILE* log_out, double pause_ns, int pa
             data->fill(bar, snapshot); // as the quotes stand: not timed
             g_probe.sample.store(k, std::memory_order_release);
             g_probe.start[k] = clock_ticks();
-            portfolio->price_snapshot(snapshot); // a new bar: every quote and the time moved
+            // A new bar: every quote and the time moved.
+            pricing::price_snapshot(snapshot, data->rates(), data->iv_price_mode(), {}, true, {},
+                                    &utilities::shared_pool());
             engine.event_loop()->put_snapshot(snapshot);
             engine.event_loop()->put_event(model::Event(model::EventType::Timer));
             if (!wait_done(k)) {
@@ -317,6 +322,7 @@ void run_day(const std::string& day, std::FILE* log_out, double pause_ns, int pa
             if (bar >= kWarmBars) {
                 rows.decide.record_ns(ns_between(g_probe.start[k], g_probe.decided[k]));
                 rows.to_broker.record_ns(ns_between(g_probe.decided[k], g_probe.at_broker[k]));
+                rows.order_out.record_ns(ns_between(g_probe.start[k], g_probe.at_broker[k]));
                 rows.back.record_ns(ns_between(g_probe.at_broker[k], g_probe.filled[k]));
                 rows.total.record_ns(ns_between(g_probe.start[k], g_probe.filled[k]));
             }
@@ -341,14 +347,14 @@ void run_quotes(const std::string& day, std::FILE* log_out, double pause_ns, int
     LiveAssembly assembly(day, log_out);
     core::Main& engine = assembly.main();
     adapters::HistoricalData* data = assembly.historical_data();
-    const model::Portfolio* portfolio =
-        engine.find_portfolio(assembly.historical_data()->portfolio_name());
     g_probe.broker_fills = true;
     g_probe.on_snapshot = true;
     g_probe.done = -1;
     model::PortfolioSnapshot book(data->listing(), data->portfolio_name());
     data->fill(data->minutes() / 2, book);
-    portfolio->price_snapshot(book); // as MarketDataEngine's book stands after its first snapshot
+    // As MarketDataEngine's book stands after its first snapshot.
+    pricing::price_snapshot(book, data->rates(), data->iv_price_mode(), {}, true, {},
+                            &utilities::shared_pool());
     const std::size_t n = book.bid.size();
     std::vector<std::uint8_t> changed(n, 0);
     for (int i = 0; i < samples && i < static_cast<int>(Probe::kMax); ++i) {
@@ -376,8 +382,9 @@ void run_quotes(const std::string& day, std::FILE* log_out, double pause_ns, int
         g_probe.sample.store(k, std::memory_order_release);
         g_probe.start[k] = clock_ticks();
         book.quoted_tsc = g_probe.start[k]; // as MarketDataEngine stamps it: the engine measures from it
-        portfolio->price_snapshot(book, changed, /*underlying_changed=*/underlying,
-                                  model::Portfolio::kLiveTimeStep); // as MarketDataEngine prices
+        pricing::price_snapshot(book, data->rates(), data->iv_price_mode(), changed,
+                                /*underlying_changed=*/underlying, pricing::kLiveTimeStep,
+                                &utilities::shared_pool()); // as MarketDataEngine prices
         engine.event_loop()->put_snapshot(book);
         changed[a] = changed[b] = 0;
         if (!wait_done(k)) {
@@ -388,6 +395,7 @@ void run_quotes(const std::string& day, std::FILE* log_out, double pause_ns, int
         if (i >= static_cast<int>(kWarmBars)) {
             rows.decide.record_ns(ns_between(g_probe.start[k], g_probe.decided[k]));
             rows.to_broker.record_ns(ns_between(g_probe.decided[k], g_probe.at_broker[k]));
+            rows.order_out.record_ns(ns_between(g_probe.start[k], g_probe.at_broker[k]));
             rows.back.record_ns(ns_between(g_probe.at_broker[k], g_probe.filled[k]));
             rows.total.record_ns(ns_between(g_probe.start[k], g_probe.filled[k]));
         }
@@ -406,6 +414,7 @@ void print_loop(const char* title, const LoopRows& rows) {
     bench::print_header(title);
     bench::print_row("quote -> decision", rows.decide);
     bench::print_row("decision -> broker", rows.to_broker);
+    bench::print_row("quote -> order out (at the broker's thread)", rows.order_out);
     bench::print_row("broker -> strategy (order + fill)", rows.back);
     bench::print_row("quote -> fill (the whole loop)", rows.total);
     if (rows.skipped > 0) {
@@ -496,13 +505,12 @@ class SnapshotStream {
         : thread_([&assembly](const std::stop_token& st) {
               core::Main& engine = assembly.main();
               adapters::HistoricalData* data = assembly.historical_data();
-              const model::Portfolio* portfolio =
-                  engine.find_portfolio(assembly.historical_data()->portfolio_name());
               const std::size_t bars = data->minutes();
               model::PortfolioSnapshot snapshot(data->listing(), data->portfolio_name());
               for (std::size_t i = 0; !st.stop_requested(); ++i) {
                   data->fill(i % bars, snapshot);
-                  portfolio->price_snapshot(snapshot);
+                  pricing::price_snapshot(snapshot, data->rates(), data->iv_price_mode(), {}, true,
+                                          {}, &utilities::shared_pool());
                   engine.event_loop()->put_snapshot(snapshot);
               }
           }) {}

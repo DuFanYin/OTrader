@@ -1,12 +1,17 @@
 #include "model/object.hpp"
+#include "model/daily_table.hpp"
+#include "model/expiry.hpp"
 #include "model/portfolio.hpp"
 #include "model/symbol.hpp"
 #include "model/utility.hpp"
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdlib>
 #include <limits>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -15,13 +20,13 @@ namespace model {
 namespace {
 
 /** A snapshot's values for the listing: each option's columns, then the chains' (forward), the
- * expiries' (time, rate). */
+ * expiries' (time, rate), the chains' smiles. */
 auto values_size(const Listing* listing) -> std::size_t {
     if (listing == nullptr) {
         return 0;
     }
     return (listing->size() * PortfolioSnapshot::kOptionColumns.size()) +
-           listing->chains().size() + (2 * listing->expiries().size());
+           (listing->chains().size() * (1 + kSmileValues)) + (2 * listing->expiries().size());
 }
 
 auto is_combo_of(std::span<const Leg> legs) -> bool {
@@ -49,6 +54,22 @@ auto RateCurve::at(double t) const -> double {
 }
 
 auto RateCurve::flat(double rate) -> RateCurve { return {.years = {0.0}, .rates = {rate}}; }
+
+auto RateCurve::treasury(const DailyTable& daily, std::chrono::year_month_day day)
+    -> std::optional<RateCurve> {
+    static constexpr std::array<std::pair<std::string_view, double>, 5> kMaturities{
+        {{"DGS1MO", 1.0 / 12.0}, {"DGS3MO", 0.25}, {"DGS6MO", 0.5}, {"DGS1", 1.0}, {"DGS2", 2.0}}};
+    RateCurve curve{.years = {}, .rates = {}};
+    for (const auto& [series, years] : kMaturities) {
+        const std::vector<double> last = daily.before(series, day, 1);
+        if (last.empty()) {
+            return std::nullopt;
+        }
+        curve.years.push_back(years);
+        curve.rates.push_back(2.0 * std::log1p(last.front() / 200.0));
+    }
+    return curve;
+}
 
 // ---- PortfolioSnapshot
 
@@ -119,6 +140,7 @@ void PortfolioSnapshot::assign(const Frame& frame) {
     copy(frame.forward, &Frame::forward);
     copy(frame.expiry_years, &Frame::expiry_years);
     copy(frame.expiry_rate, &Frame::expiry_rate);
+    copy(frame.smile, &Frame::smile);
     if (frame.priced && !frame.iv_price_mode.empty()) { // its Greeks priced now, to hold them
         const std::span<double> delta = values(&Frame::delta);
         const std::span<double> gamma = values(&Frame::gamma);
@@ -135,6 +157,27 @@ void PortfolioSnapshot::assign(const Frame& frame) {
     iv_price_mode = {}; // its Greeks are its own: nothing to price them from, nor a view to keep
 }
 
+void PortfolioSnapshot::relist(std::shared_ptr<const Listing> listing,
+                               std::span<const std::uint32_t> written) {
+    if (owner_ != nullptr) {
+        for (const std::uint32_t c : written) {
+            const Listing::Chain& chain = owner_->chains()[c];
+            for (const auto column : kOptionColumns) {
+                std::ranges::fill(values(column).subspan(chain.first, chain.count), 0.0);
+            }
+            values(&Frame::forward)[c] = 0.0;
+            std::ranges::fill(values(&Frame::smile).subspan(c * kSmileValues, kSmileValues), 0.0);
+        }
+        std::ranges::fill(values(&Frame::expiry_years), 0.0);
+        std::ranges::fill(values(&Frame::expiry_rate), 0.0);
+    }
+    static_cast<Frame&>(*this) = Frame{};
+    quoted_tsc = 0;
+    owner_ = std::move(listing);
+    values_.resize(values_size(owner_.get()), 0.0); // what it grows by is zeros too
+    point();
+}
+
 void PortfolioSnapshot::point() {
     listing = owner_.get();
     portfolio_name = name_;
@@ -149,15 +192,17 @@ void PortfolioSnapshot::point() {
     forward = {at, chains};
     expiry_years = {at + chains, expiries};
     expiry_rate = {at + chains + expiries, expiries};
+    smile = {at + chains + (2 * expiries), chains * kSmileValues};
 }
 
 // ---- Positions
 
-OptionPosition::OptionPosition(const std::string& sym) : Position{sym} {
-    multiplier = 100.0;
+OptionPosition::OptionPosition(const std::string& sym, double contract_multiplier)
+    : Position{sym} {
+    multiplier = contract_multiplier;
     if (std::optional<OptionId> parsed = parse_option_symbol(sym)) {
         id = std::move(*parsed);
-        expires = option_expiry_time(id.expiry);
+        expires = calendar_of(id.root).expiry_time(id.expiry);
     }
 }
 
@@ -226,18 +271,15 @@ void Position::clear_fields() {
 }
 
 auto StrategyHolding::max_loss() const -> double {
-    struct Leg {
-        std::chrono::year_month_day expiry;
-        bool call = true;
-        double strike = 0.0;
-        double units = 0.0; // contracts x multiplier: bought +, sold -
-    };
-    std::vector<Leg> legs;
+    std::vector<ExpiryLeg> legs;
+    std::chrono::year_month_day expiry{};
+    bool one_expiry = true;
     double paid = 0.0;
     for_each_open_option([&](const OptionPosition& p) {
         if (const std::optional<OptionId> id = parse_option_symbol(p.symbol)) {
-            legs.push_back({id->expiry, id->type == OptionType::CALL, id->strike,
-                            p.quantity * p.multiplier});
+            one_expiry = one_expiry && (legs.empty() || id->expiry == expiry);
+            expiry = id->expiry;
+            legs.push_back({id->type, id->strike, p.quantity * p.multiplier});
             paid += p.quantity * p.avg_cost * p.multiplier;
         }
     });
@@ -245,25 +287,8 @@ auto StrategyHolding::max_loss() const -> double {
     if (legs.empty()) {
         return none;
     }
-    const bool one_expiry = std::ranges::all_of(
-        legs, [&](const Leg& l) { return l.expiry == legs.front().expiry; });
-    double calls_net = 0.0; // the slope past the last strike
-    for (const Leg& l : legs) {
-        calls_net += l.call ? l.units : 0.0;
-    }
-    if (one_expiry && calls_net >= 0.0) {
-        const auto value = [&](double s) {
-            double v = 0.0;
-            for (const Leg& l : legs) {
-                v += l.units * (l.call ? std::max(s - l.strike, 0.0) : std::max(l.strike - s, 0.0));
-            }
-            return v;
-        };
-        double worst = value(0.0);
-        for (const Leg& l : legs) {
-            worst = std::min(worst, value(l.strike));
-        }
-        const double loss = paid - worst;
+    if (const ExpiryWorst w = worst_at_expiry(legs); one_expiry && w.calls_net >= 0.0) {
+        const double loss = paid - w.worst;
         return loss > 0.0 ? loss : none;
     }
     return paid > 0.0 ? paid : none;

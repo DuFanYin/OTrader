@@ -9,8 +9,11 @@ import contextlib
 import copy
 import math
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from optra.data import chains
+from optra.data.days import day_of
 from optra.infra import numerics
 from optra.research import jobs, ledger
 from optra.research.space import within
@@ -86,13 +89,34 @@ def analysis(experiment_id: str, train: int | None = None, test: int | None = No
     return out
 
 
+# A setting found on one underlying, run on the other over the same dates: SPY's and the S&P 500's options.
+OTHER_UNDERLYING = {"SPY": "SPXW", "SPXW": "SPY", "XSP": "SPY"}
+
+
+def other_underlying_days(days: list[Path]) -> tuple[str, list[Path]] | None:
+    """The other underlying's backtest days (OTHER_UNDERLYING) of the same dates, its holdout left out; None for an
+    underlying with no other, or when it has none of the dates."""
+    other = OTHER_UNDERLYING.get(days[0].parent.parent.name) if days else None
+    if other is None:
+        return None
+    have = chains.day_files(other)
+    cut = ledger.holdout_from(other)
+    found = []
+    for f in days:
+        d = day_of(f)
+        if d is not None and (cut is None or d < cut) and (hit := have.get(d.isoformat())) and hit[1] == "backtest":
+            found.append(hit[0])
+    return (other, found) if found else None
+
+
 def robustness(experiment_id: str, trial_id: str | None = None,
                priority: int = jobs.PRIORITY_EXPERIMENT) -> dict[str, Any]:
     """The checks that need new runs, on a trial (the best by Sharpe unless named), as experiments of their
     own under the same family: its costs doubled (fees and the fill positions); its fills held to the size shown and a
     minute late; every leg at its bid or ask, when it filled inside the spread; and each parameter it varied moved 20%
-    down and up, one at a time. They count against the family's budget
-    like any trial."""
+    down and up, one at a time; and the same setting on the other underlying over the same dates (SPXW's days for one
+    found on SPY, SPY's for SPXW and XSP: other_underlying_days), reported but not a gate. They count against the
+    family's budget like any trial."""
     exp = ledger.experiment(experiment_id)
     done = [t for t in exp["trials"] if t["status"] == "done"]
     if trial_id is None:
@@ -108,14 +132,14 @@ def robustness(experiment_id: str, trial_id: str | None = None,
               "risk_free_rate": spec["pricing"]["risk_free_rate"], "iv_price_mode": spec["pricing"]["iv_price_mode"],
               "parent": experiment_id, "priority": priority}
     costs = ledger.Costs.of(spec["costs"])
-    doubled = ledger.submit(**common, costs=costs.doubled(), settings_list=[trial["setting"]], check="costs_doubled",
-                            note=f"fees and the fill positions doubled for {trial_id}")
-    strict = ledger.submit(**common, costs=costs.strict(), settings_list=[trial["setting"]],
-                           check="fills_shown_size_late",
-                           note=f"fills of the size shown, a minute late, for {trial_id}")
-    quoted = costs.at_the_quotes()
-    at_quotes = ledger.submit(**common, costs=quoted, settings_list=[trial["setting"]], check="fills_at_the_quotes",
-                              note=f"every leg at its bid or ask, for {trial_id}") if quoted else None
+    checks: dict[str, dict[str, Any]] = {}  # submitted together: those on the same days run as one batch
+    checks["costs_doubled"] = dict(**common, costs=costs.doubled(), settings_list=[trial["setting"]],
+                                   note=f"fees and the fill positions doubled for {trial_id}")
+    checks["fills_shown_size_late"] = dict(**common, costs=costs.strict(), settings_list=[trial["setting"]],
+                                           note=f"fills of the size shown, a minute late, for {trial_id}")
+    if quoted := costs.at_the_quotes():
+        checks["fills_at_the_quotes"] = dict(**common, costs=quoted, settings_list=[trial["setting"]],
+                                             note=f"every leg at its bid or ask, for {trial_id}")
     params = {p["name"]: p for p in strategy_classes()[exp["strategy"]]}
     varied = sorted((spec.get("space") or {}).keys()) or sorted(trial["setting"])
     neighbours = []
@@ -127,7 +151,13 @@ def robustness(experiment_id: str, trial_id: str | None = None,
             moved = within(name, max(params[name]["min"], min(params[name]["max"], value * factor)), params[name])
             if moved != value:
                 neighbours.append({**trial["setting"], name: moved})
-    nearby = ledger.submit(**common, costs=costs, settings_list=neighbours, check="parameters_moved",
-                    note=f"each parameter of {trial_id} moved 20% down and up") if neighbours else None
-    return {"trial_id": trial_id, "costs_doubled": doubled, "fills_shown_size_late": strict,
-            "fills_at_the_quotes": at_quotes, "parameters_moved": nearby}
+    if neighbours:
+        checks["parameters_moved"] = dict(**common, costs=costs, settings_list=neighbours,
+                                          note=f"each parameter of {trial_id} moved 20% down and up")
+    if other := other_underlying_days(ledger.experiment_days(experiment_id)):
+        checks["other_underlying"] = dict(**(common | {"days": [str(f) for f in other[1]]}), costs=costs,
+                                          settings_list=[trial["setting"]],
+                                          note=f"{trial_id} on {other[0]}, the same dates")
+    submitted = dict(zip(checks, ledger.submit_together([e | {"check": k} for k, e in checks.items()])))
+    return {"trial_id": trial_id} | {k: submitted.get(k) for k in (
+        "costs_doubled", "fills_shown_size_late", "fills_at_the_quotes", "parameters_moved", "other_underlying")}

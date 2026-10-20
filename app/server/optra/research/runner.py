@@ -6,8 +6,6 @@ them; outside the server (the tests, a script) jobs run here in the calling proc
 from __future__ import annotations
 
 import json
-import re
-import shutil
 import signal
 import subprocess
 import tempfile
@@ -49,9 +47,6 @@ def trim(root: Path) -> None:
         return
     _trimmed[root] = time.monotonic()
     budget = float(settings.config().get("day_cache_gb", DAY_CACHE_GB)) * 2**30
-    for d in root.iterdir():  # the cache before files were keyed by what they hold: a directory per build
-        if d.is_dir() and re.fullmatch(r"[0-9a-f]{16}", d.name):
-            shutil.rmtree(d, ignore_errors=True)
     stored = [(f, f.stat()) for f in root.glob("*/*") if f.suffix in (".day", ".chain")]
     total = sum(st.st_size for _, st in stored)
     for f, st in sorted(stored, key=lambda e: e[1].st_atime):
@@ -126,23 +121,44 @@ def run_trials(day_files: list[Path] | list[str], trials: list[dict[str, Any]], 
     return stdout
 
 
+def run_batch(batch: dict[str, Any], threads: int = 0, days_ahead: int = 3, name: str | None = None) -> bytes:
+    """A job's batch ({"files", "trials", "risk_free_rate", "iv_price_mode"}) through run_trials: the engine's output
+    as it wrote it, or {"status": "error", "error"} for a run refused."""
+    try:
+        return run_trials(batch["files"], batch["trials"], batch["risk_free_rate"], batch["iv_price_mode"], threads,
+                          days_ahead, name=name)
+    except ValueError as e:
+        return orjson.dumps({"status": "error", "error": str(e)})
+
+
+def check(out: bytes) -> None:
+    """ValueError unless entry_backtest's output says its run went through (its last line), read without the rest."""
+    last = orjson.loads(out[out.rstrip(b"\n").rfind(b"\n") + 1:])
+    if last.get("status") != "ok":
+        raise ValueError(last.get("error") or "the batch failed")
+
+
 def read(out: bytes) -> tuple[dict[str, list[Any]], Iterator[dict[str, Any]]]:
     """entry_backtest's output (a line a trial, then the last): the days its trials ran, a column a field ("date"
     YYYYMMDD, "file", "bars", "quotes", "underlying_open", "underlying_close"), and each trial's result, read as it is
     taken: {"id", "result" (its strategy, portfolio and run time), "errors", "days" and "round_trips" (a column a field,
     the P&L by source under "attribution"), and "fills", "log", "chart" when the trial asked for them}; what the days
     add up to is ledger.summary_of's. ValueError when the run failed."""
+    check(out)
     lines = out.rstrip(b"\n").split(b"\n")
-    last = orjson.loads(lines.pop())
-    if last.get("status") != "ok":
-        raise ValueError(last.get("error") or "the batch failed")
-    return last["days"], (orjson.loads(line) for line in lines)
+    return orjson.loads(lines.pop())["days"], (orjson.loads(line) for line in lines)
 
 
 def rows(columns: dict[str, Any]) -> list[dict[str, Any]]:
-    """A table of the output (a column a field) as rows, the P&L by source ("attribution") among the fields."""
-    flat = {k: v for k, v in columns.items() if k != "attribution"} | columns.get("attribution", {})
-    return [dict(zip(flat, values)) for values in zip(*flat.values())]
+    """A table of the output (a column a field) as rows, the P&L by source ("attribution") among the fields; the
+    values a strategy wrote ("values", by name) as each row's "values", those of the day only."""
+    values = columns.get("values") or {}
+    flat = {k: v for k, v in columns.items() if k not in ("attribution", "values")} | columns.get("attribution", {})
+    out = [dict(zip(flat, row)) for row in zip(*flat.values())]
+    if values:
+        for i, row in enumerate(out):
+            row["values"] = {name: column[i] for name, column in values.items() if column[i] is not None}
+    return out
 
 
 def cancel(name: str) -> bool:

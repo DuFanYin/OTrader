@@ -86,11 +86,4 @@ void SobolEngine::next(std::span<double> out_unit) {
     }
 }
 
-void SobolEngine::skip(int n) {
-    for (int i = 0; i < n; ++i) {
-        std::vector<double> tmp(dim_);
-        next(tmp);
-    }
-}
-
 }  // namespace quant

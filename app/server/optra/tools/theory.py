@@ -99,7 +99,7 @@ TOOLS = [
          "the terminal distributions (mean, variance, quantiles) and the drift and variance ratios.",
          MeasureCompareRequest, measure_compare, "/lab/measure/compare", example={"mu": 0.08, "r": 0.03, "sigma": 0.2}),
     Tool("validate", "Validation gate",
-         "Runs the chosen checks (pick_stats, pick_ito, pick_simulation, pick_lattice) with their parameters, each against a "
+         "Runs the chosen checks (pick_stats, pick_ito, pick_simulation, pick_lattice, pick_smile) with their parameters, each against a "
          "threshold, and says what to change when one fails. Use it before trusting a run, or to see whether a numerical "
          "setting is good enough. Returns result_summary (gate_decision go / warning / blocked, checks_failed) and "
          "result_details.rows: per check its value, threshold and status, what to change (action) and, where an input "

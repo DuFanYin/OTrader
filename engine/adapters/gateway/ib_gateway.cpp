@@ -292,7 +292,7 @@ class IbTws final : public IbSession {
         Sync& s = sync_.emplace();
         s.portfolio = portfolio;
         s.listing = listing;
-        s.from = model::new_york_date(std::chrono::system_clock::now());
+        s.from = model::calendar_of(portfolio).date_of(std::chrono::system_clock::now());
         s.max_dte = max_dte;
         s.deadline = std::chrono::steady_clock::now() + kContractSyncTimeout;
         s.next_log = std::chrono::steady_clock::now() + kContractSyncLogInterval;
@@ -1004,24 +1004,16 @@ auto IbGateway::sync_contracts(std::string_view portfolio, int max_dte)
         throw std::invalid_argument(
             std::format("No portfolio {} (model/portfolio_spec.hpp)", portfolio));
     }
-    const IbListing* listing = find_listing(p->underlying);
-    if (listing == nullptr) {
-        throw std::invalid_argument(
-            std::format("No IB listing for {} (adapters/ib_api/ib_api.hpp)", p->underlying));
-    }
-    const bool own_hedge = p->hedge == p->underlying;
-    const IbListing* hedge = own_hedge ? nullptr : find_listing(p->hedge);
-    if (!own_hedge && hedge == nullptr) {
-        throw std::invalid_argument(
-            std::format("No IB listing for {} (adapters/ib_api/ib_api.hpp)", p->hedge));
-    }
+    // Each spec's are listed (ib_api.hpp).
+    const IbListing& listing = *find_listing(p->underlying);
+    const IbListing* hedge = p->hedge == p->underlying ? nullptr : find_listing(p->hedge);
     if (max_dte < 0) {
         throw std::invalid_argument("max_dte must be 0 or more");
     }
     if (!is_connected()) {
         throw std::runtime_error("Connect the IB gateway first");
     }
-    return tws_->sync_contracts(p->name, *listing, hedge, max_dte);
+    return tws_->sync_contracts(p->name, listing, hedge, max_dte);
 }
 
 void IbGateway::restore_orders(std::span<const model::Order> orders) {

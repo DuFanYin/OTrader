@@ -477,9 +477,7 @@ auto contracts_of_codes(const std::string& portfolio, std::span<const std::strin
     model::Contract under;
     under.symbol = underlying;
     under.name = underlying;
-    // One that trades (SPY) is a stock; one hedged with another (SPX) an index.
-    under.product = spec != nullptr && spec->hedge == spec->underlying ? model::Product::EQUITY
-                                                                       : model::Product::INDEX;
+    under.product = spec != nullptr ? spec->underlying_product : model::Product::INDEX;
     under.multiplier = 1.0;
     under.price_tick = 0.01;
     out.push_back(std::move(under));
@@ -492,12 +490,12 @@ auto contracts_of_codes(const std::string& portfolio, std::span<const std::strin
         option.symbol = model::option_symbol(*id);
         option.name = code;
         option.product = model::Product::OPTION;
-        option.multiplier = 100.0;
+        option.multiplier = model::Contract::kOptionMultiplierDefault;
         option.price_tick = 0.01;
         option.trading_class = portfolio;
         option.option_strike = id->strike;
         option.option_type = id->type;
-        option.option_expiry = model::option_expiry_time(id->expiry);
+        option.option_expiry = model::calendar_of(portfolio).expiry_time(id->expiry);
         option.option_underlying = underlying;
         out.push_back(std::move(option));
     }
@@ -549,10 +547,10 @@ constexpr std::array<char, 8> kChainMagic{'O', 'P', 'T', 'C', 'H', 'A', 'I', 'N'
  * read again. */
 constexpr std::uint32_t kDayFormat = 3; // 2: the risk-free curve; 3: the underlying, then the
                                         // options in the listing's order
-/** Bump when what a chain file holds changes (a change of the pricing is pricing_fingerprint's to
+/** Bump when what a chain file holds changes (a change of the pricing is pricing::fingerprint's to
  * notice). 2: every column doubles, read in place; no Greeks, priced again from the IV when read.
- */
-constexpr std::uint32_t kChainFormat = 2;
+ * 3: each minute's smile. */
+constexpr std::uint32_t kChainFormat = 3;
 // Beyond any day: a header asking for more is not one.
 constexpr std::uint64_t kMaxMinutes = 1U << 16;
 constexpr std::uint64_t kMaxColumns = 1U << 20;
@@ -602,15 +600,16 @@ auto day_runs(const Header& h) -> DayRuns {
     return r;
 }
 
-/** A chain's runs: where each column starts (a minute a row of its options), then its forward;
- * and the file's size. */
-auto chain_runs(const Header& h, std::array<std::size_t, StoredChain::kColumns + 1>& starts)
+/** A chain's runs: where each column starts (a minute a row of its options), then its forward and
+ * its smiles; and the file's size. */
+auto chain_runs(const Header& h, std::array<std::size_t, StoredChain::kColumns + 2>& starts)
     -> std::size_t {
     Runs runs(h.names);
     for (std::size_t c = 0; c < StoredChain::kColumns; ++c) {
         starts[c] = runs.next(h.minutes * h.options * sizeof(double));
     }
     starts[StoredChain::kColumns] = runs.next(h.minutes * sizeof(double));
+    starts[StoredChain::kColumns + 1] = runs.next(h.minutes * model::kSmileValues * sizeof(double));
     return runs.size();
 }
 
@@ -941,41 +940,50 @@ auto read_chain_quotes(const std::string& path, std::span<const std::int64_t> ti
             option_of_value[static_cast<std::size_t>(i)] = at->second;
         }
     }
-    std::vector<std::int64_t> kept;
-    std::vector<std::uint32_t> option(static_cast<std::size_t>(t.num_rows()), 0);
+    // Each row at its minute in the file's order, the minute's last kept (a contract's rows at a
+    // time are in the order written); then a minute an option has no row at carries the minute
+    // before's quotes.
+    const std::size_t width = options.size();
+    std::vector<std::uint8_t> quoted(times.size() * width, 0);
+    std::size_t minute = 0; // a contract's rows come in time order: the next row's is near
     for (std::int64_t row = 0; row < t.num_rows(); ++row) {
         const std::int64_t i = symbol.at(row);
-        if (const std::int64_t k = i < 0 ? kNotInChain : option_of_value[static_cast<std::size_t>(i)];
-            k != kNotInChain) {
-            kept.push_back(row);
-            option[static_cast<std::size_t>(row)] = static_cast<std::uint32_t>(k);
-        }
-    }
-    // Rows in time order: the minutes before a row's carry their quotes on to it first.
-    constexpr std::size_t kQuotes = 4; // bid, ask, bid_size, ask_size: StoredChain's first four
-    std::size_t carried = 0;           // minutes [0, carried] hold their quotes
-    const auto carry_to = [&](std::size_t minute) {
-        for (; carried < minute; ++carried) {
-            for (std::size_t q = 0; q < kQuotes; ++q) {
-                std::ranges::copy(stored.row(q, carried), stored.row(q, carried + 1).begin());
-            }
-        }
-    };
-    for (const std::int64_t row : rows_in_time_order(*time, std::move(kept))) {
-        const std::int64_t at = to_datetime(time->Value(row), unit).time_since_epoch().count();
-        const auto minute = std::ranges::lower_bound(times, at);
-        if (minute == times.end() || *minute != at) {
+        const std::int64_t k = i < 0 ? kNotInChain : option_of_value[static_cast<std::size_t>(i)];
+        if (k == kNotInChain) {
             continue;
         }
-        const auto i = static_cast<std::size_t>(minute - times.begin());
-        carry_to(i);
-        const std::uint32_t k = option[static_cast<std::size_t>(row)];
-        stored.row(0, i)[k] = price_at(bid, row, 0.0);
-        stored.row(1, i)[k] = price_at(ask, row, 0.0);
-        stored.row(2, i)[k] = size_at(bid_size, row);
-        stored.row(3, i)[k] = size_at(ask_size, row);
+        const std::int64_t at = to_datetime(time->Value(row), unit).time_since_epoch().count();
+        if (times[minute] != at) {
+            if (minute + 1 < times.size() && times[minute + 1] == at) {
+                ++minute;
+            } else {
+                const auto found = std::ranges::lower_bound(times, at);
+                if (found == times.end() || *found != at) {
+                    continue;
+                }
+                minute = static_cast<std::size_t>(found - times.begin());
+            }
+        }
+        const auto option = static_cast<std::size_t>(k);
+        stored.row(0, minute)[option] = price_at(bid, row, 0.0);
+        stored.row(1, minute)[option] = price_at(ask, row, 0.0);
+        stored.row(2, minute)[option] = size_at(bid_size, row);
+        stored.row(3, minute)[option] = size_at(ask_size, row);
+        quoted[(minute * width) + option] = 1;
     }
-    carry_to(times.size() - 1);
+    constexpr std::size_t kQuotes = 4; // bid, ask, bid_size, ask_size: StoredChain's first four
+    for (std::size_t m = 1; m < times.size(); ++m) {
+        const std::uint8_t* has = quoted.data() + (m * width);
+        for (std::size_t q = 0; q < kQuotes; ++q) {
+            const std::span<const double> before = std::as_const(stored).row(q, m - 1);
+            const std::span<double> now = stored.row(q, m);
+            for (std::size_t k = 0; k < width; ++k) {
+                if (has[k] == 0) {
+                    now[k] = before[k];
+                }
+            }
+        }
+    }
     return {};
 }
 

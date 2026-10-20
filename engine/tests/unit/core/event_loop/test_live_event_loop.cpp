@@ -1,12 +1,13 @@
 /**
  * The live event loop (EventLoop started) over the engine itself: the backtest assembly with
- * its events through the event thread, so the data's clock tells which snapshot was applied.
+ * its events through the event thread, a portfolio's time telling which snapshot was applied.
  * Order updates, fills and tasks are never dropped and keep their order, the event thread
  * putting some itself; a portfolio's snapshots keep only the newest; the event thread runs the
  * timer itself; and a day replayed through the event thread trades as the backtest does.
  */
 #include "core/bookkeeping/bookkeeping_engine.hpp"
 #include "core/strategy/strategy_engine.hpp"
+#include "model/session_calendar.hpp"
 #include "model/event.hpp"
 #include "tests/lone_backtest.hpp"
 #include "core/event_loop.hpp"
@@ -90,6 +91,22 @@ auto at(int seconds) -> model::DateTime {
     return model::DateTime{} + std::chrono::hours(24 * 365 * 55) + std::chrono::seconds(seconds);
 }
 
+/** A snapshot of "P", a portfolio of no options made for it, whose time says which of its
+ * snapshots was applied last. */
+auto snapshot_of_p(core::Main& engine) -> model::PortfolioSnapshot {
+    return engine.event_loop()->on_event_thread([&] {
+        engine.portfolios()->ensure_portfolio("P");
+        model::PortfolioSnapshot s = engine.portfolios()->find_portfolio("P")->snapshot();
+        s.priced = true;
+        return s;
+    });
+}
+
+auto applied_at(core::Main& engine) -> model::DateTime {
+    return engine.event_loop()->on_event_thread(
+        [&] { return engine.find_portfolio("P")->datetime(); });
+}
+
 TEST(LiveEventLoop, BeforeStartAnOrderAndAFillAreBookedInPlace) {
     test::LoneBacktest backtest; // its loop never starts
     core::Main& engine = backtest.main();
@@ -159,31 +176,32 @@ TEST(LiveEventLoop, TheEventThreadPutsWithoutWaitingOnItself) {
 TEST(LiveEventLoop, OnlyThePortfoliosNewestSnapshotIsApplied) {
     Threaded threaded;
     core::Main& engine = threaded.main();
+    model::PortfolioSnapshot s = snapshot_of_p(engine);
     {
         Hold hold(engine);
-        model::PortfolioSnapshot s(nullptr, "backtest");
         for (int i = 1; i <= 1000; ++i) {
             s.datetime = at(i);
             engine.event_loop()->put_snapshot(s);
         }
     }
-    EXPECT_EQ(engine.event_loop()->on_event_thread([&] { return engine.now(); }), at(1000));
+    EXPECT_EQ(applied_at(engine), at(1000));
 }
 
 TEST(LiveEventLoop, ATaskComesAfterWhatWasPutBeforeIt) {
     Threaded threaded;
     core::Main& engine = threaded.main();
-    model::PortfolioSnapshot s(nullptr, "backtest");
+    model::PortfolioSnapshot s = snapshot_of_p(engine);
     for (int i = 0; i < 200; ++i) {
         const std::string id = std::format("T{}", i);
         put_fill(engine, id);
         s.datetime = at(i);
         engine.event_loop()->put_snapshot(s);
-        const auto [booked, now] = engine.event_loop()->on_event_thread([&] {
-            return std::pair(engine.bookkeeping_engine()->find_fill(id) != nullptr, engine.now());
+        const auto [booked, applied] = engine.event_loop()->on_event_thread([&] {
+            return std::pair(engine.bookkeeping_engine()->find_fill(id) != nullptr,
+                             engine.find_portfolio("P")->datetime());
         });
         EXPECT_TRUE(booked) << id;
-        EXPECT_EQ(now, at(i));
+        EXPECT_EQ(applied, at(i));
     }
 }
 
@@ -230,8 +248,8 @@ auto test_day() -> std::string {
     return std::string(OPTRA_DATA_DIR) + "/synthetic/SPY/SPY-2025-03/20250303.parquet";
 }
 
-/** As Backtest::run, each bar through the event thread: the snapshot, then the orders of the
- * bar before filled at its quotes, then the timer. */
+/** As Backtest::run, each bar through the event thread: the engine's time, the snapshot, then the
+ * orders of the bar before filled at its quotes, then the timer. */
 auto replay_through_the_event_thread(Threaded& live) -> DayResult {
     adapters::HistoricalData* data = live.historical_data();
     adapters::BacktestGateway* venue = live.backtest_gateway();
@@ -244,6 +262,7 @@ auto replay_through_the_event_thread(Threaded& live) -> DayResult {
     model::PortfolioSnapshot snapshot(data->listing(), data->portfolio_name());
     for (std::size_t bar = 0; bar < data->minutes(); ++bar) {
         data->fill(bar, snapshot);
+        events.on_event_thread([&] { engine.set_time(snapshot.datetime); }); // as run_bar
         events.put_snapshot(snapshot);
         events.on_event_thread([&] { venue->execute_pending_orders(); }); // its fills queue up
         events.put_event(Event(EventType::Timer));                         // after them
@@ -300,8 +319,8 @@ TEST(ZeroDteBuyers, TheControlBuysOneOptionExpiringThatDayAndSellsItBeforeTheClo
         const std::optional<model::OptionId> id = model::parse_option_symbol(fills[0].symbol);
         ASSERT_TRUE(id) << strategy;
         ASSERT_NE(fills[1].datetime, model::DateTime{}) << strategy;
-        EXPECT_EQ(id->expiry, model::new_york_date(fills[1].datetime)) << strategy;
-        EXPECT_LT(fills[1].datetime, model::option_expiry_time(id->expiry)) << strategy;
+        EXPECT_EQ(id->expiry, model::kNyse.date_of(fills[1].datetime)) << strategy;
+        EXPECT_LT(fills[1].datetime, model::kNyse.expiry_time(id->expiry)) << strategy;
         const std::string& name = backtest.strategy()->name;
         EXPECT_TRUE(backtest.main().bookkeeping_engine()->find_holding(name)->is_flat())
             << strategy;

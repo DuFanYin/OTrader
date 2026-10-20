@@ -155,8 +155,8 @@ Leg contract_leg(const Contract& contract, Side side) {
 OrderRequest order_request(std::span<const Leg> legs, double price, double quantity,
                            OrderType order_type, ComboType combo_type) {
     OrderRequest req{.type = order_type,
-                     .quantity = round_to(quantity, 1.0), // whole units
-                     .price = order_type == OrderType::MARKET ? 0.0 : round_to(price, 0.01),
+                     .quantity = round_digits(quantity, 0), // whole units
+                     .price = order_type == OrderType::MARKET ? 0.0 : round_digits(price, 2),
                      .trading_class = legs.empty() ? std::string{} : legs.front().trading_class,
                      .legs = {legs.begin(), legs.end()}};
     req.combo_type = req.is_combo() ? combo_type : ComboType::SINGLE_LEG;

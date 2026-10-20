@@ -183,6 +183,7 @@ class ValidationGateRequest(Input):
     pick_ito: bool = Field(False, description="Check E[f(W_t)] and Itô's formula on discrete paths.")
     pick_simulation: bool = Field(False, description="Check that a simulated path stays finite and the delta-hedge P&L spread is sane.")
     pick_lattice: bool = Field(False, description="Check the trinomial tree against Black-Scholes and LSM / PDE against a binomial American price.")
+    pick_smile: bool = Field(False, description="Check the SVI smile fit (the engine's): a smile noisy within its spread fitted within it and free of butterfly arbitrage, and the arbitrage check finding a known case.")
     compute_block_on_validation: bool = Field(False, description="Report a failed gate as a block rather than a warning.")
 
     spot: float = Field(..., gt=0, description=SPOT)

@@ -29,6 +29,9 @@ struct Order;
 // ---- Contracts
 
 struct Contract {
+    /** A US equity or index option's, what an option is taken at when its contract is not known. */
+    static constexpr double kOptionMultiplierDefault = 100.0;
+
     std::string symbol;
     std::string name;
     Product product = Product::UNKNOWN;
@@ -73,12 +76,33 @@ struct Frame {
     std::span<const double> forward;
     std::span<const double> expiry_years;
     std::span<const double> expiry_rate; // per expiry: the risk-free rate to it it was priced with
+    // Per chain, kSmileValues each (pricing::fit_smiles): its smile as last fitted, by SmileValue.
+    std::span<const double> smile;
     bool priced = false;
     double greeks_spot = 0.0; // the spot the Greeks stand at
     // Empty: it holds its Greeks (delta..vega). Else the setting it was priced with, its Greeks
     // priced from its IVs with it when asked (greeks_at).
     std::string_view iv_price_mode;
 };
+
+/** Where each of a chain's values is in Frame::smile: raw SVI (quant::Svi), the forward and years
+ * it was fitted at (the years also when a fit found too few quotes), its error and points, 1 when
+ * it is free of butterfly arbitrage (quant::SviFit); all 0 before a fit. */
+enum SmileValue : std::uint8_t {
+    kSviA,
+    kSviB,
+    kSviRho,
+    kSviM,
+    kSviSigma,
+    kSmileForward,
+    kSmileYears,
+    kSmileError,
+    kSmilePoints,
+    kSmileButterflyFree,
+    kSmileValues // a chain's
+};
+
+class DailyTable;
 
 /** A risk-free rate by time to maturity, continuously compounded, a year: a straight line between
  * its points (by years, increasing), flat before the first and after the last. One point: that
@@ -91,6 +115,11 @@ struct RateCurve {
     [[nodiscard]] double at(double t) const;
     /** One rate at every maturity. */
     [[nodiscard]] static RateCurve flat(double rate);
+    /** The Treasury's constant-maturity yields in `daily` last dated before `day` (DGS1MO,
+     * DGS3MO, DGS6MO, DGS1, DGS2: percent, compounded twice a year) made continuously
+     * compounded, as the backtest's days carry theirs; none unless each has a value. */
+    [[nodiscard]] static std::optional<RateCurve> treasury(const DailyTable& daily,
+                                                           std::chrono::year_month_day day);
     bool operator==(const RateCurve&) const = default;
 };
 
@@ -124,6 +153,11 @@ class PortfolioSnapshot : public Frame {
     [[nodiscard]] std::span<double> values(std::span<const double> Frame::* column);
     /** The frame's values, which must be of this listing; a column it lacks is zeros. */
     void assign(const Frame& frame);
+    /** Laid out for another listing in the buffer it has, all zeros, its time and quotes cleared:
+     * the values of the chains `written` names (indices into its listing now) and of every expiry
+     * are zeroed, the others being zeros already, as in a snapshot only those chains were written
+     * into since it was made (a backtest's replay, a day after the other: adapters::Replay). */
+    void relist(std::shared_ptr<const Listing> listing, std::span<const std::uint32_t> written);
 
     /** Live: when its first quote arrived (utilities::tsc_now); 0 in a backtest. */
     std::uint64_t quoted_tsc = 0;
@@ -241,7 +275,7 @@ struct OptionPosition : Position {
     OptionId id;
     DateTime expires = DateTime::max();
 
-    explicit OptionPosition(const std::string& sym);
+    OptionPosition(const std::string& sym, double contract_multiplier);
 };
 
 /** Shares of the underlying, or of the hedge instrument when the underlying does not trade;
@@ -286,6 +320,8 @@ struct StrategyHolding {
     DateTime last_order{};
     DateTime last_fill{};
     HoldingSummary summary;
+    /** Its summary computed since the engine started (BookkeepingEngine::value_holding). */
+    bool summarized = false;
 
     template <typename F> void for_each_open_option(F&& f) const {
         for (const auto& [symbol, position] : options) {
@@ -324,6 +360,15 @@ struct StrategyHolding {
         bool open = shares.quantity != 0;
         for_each_open_option([&open](const OptionPosition&) { open = true; });
         return !open;
+    }
+    /** Its summary values all of it: valued since the engine started, every open position at a
+     * mark (quoted once since then). */
+    [[nodiscard]] bool valued() const {
+        bool marked = summarized && (shares.quantity == 0 || shares.mid_price > 0.0);
+        for_each_open_option([&marked](const OptionPosition& p) {
+            marked = marked && p.mid_price > 0.0;
+        });
+        return marked;
     }
 };
 

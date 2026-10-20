@@ -1,7 +1,9 @@
 #include "core/bookkeeping/bookkeeping_engine.hpp"
+#include "model/expiry.hpp"
 #include "model/order_builder.hpp"
 #include "model/portfolios.hpp"
 #include "model/symbol.hpp"
+#include "model/utility.hpp"
 #include "utilities/text.hpp"
 #include <algorithm>
 #include <array>
@@ -21,24 +23,10 @@ namespace core {
 
 namespace {
 
-/** HALF_UP rounding by decimal digits (factor-based); avoids 0.01 float representation issues. */
-inline auto round_digits(double value, int digits) -> double {
-    if (digits < 0) {
-        return value;
-    }
-    // Exact powers of ten, the values std::pow gives for them, without its call.
-    static constexpr std::array<double, 9> kPowersOfTen{1e0, 1e1, 1e2, 1e3, 1e4,
-                                                        1e5, 1e6, 1e7, 1e8};
-    const double factor = std::cmp_less(digits, kPowersOfTen.size())
-                              ? kPowersOfTen[static_cast<std::size_t>(digits)]
-                              : std::pow(10.0, digits);
-    const double scaled = value * factor;
-    const double rounded = scaled >= 0.0 ? std::floor(scaled + 0.5) : std::ceil(scaled - 0.5);
-    return rounded / factor;
-}
-
 /** Quantities are whole contracts and shares: anything closer is the same. */
 constexpr double kQuantityTolerance = 1e-6;
+
+// ---- Holdings
 
 void apply_position_change(model::Position& pos, const model::Fill& fill) {
     int qty = static_cast<int>(std::abs(fill.quantity));
@@ -53,59 +41,54 @@ void apply_position_change(model::Position& pos, const model::Fill& fill) {
                            ? fill.price
                            : (pos.avg_cost * std::abs(prev_qty) + fill.price * qty) / total_qty;
         pos.quantity += signed_qty;
-        pos.cost_value = round_digits(pos.avg_cost * pos.quantity * multiplier, 2);
+        pos.cost_value = model::round_digits(pos.avg_cost * pos.quantity * multiplier, 2);
         return;
     }
 
     int close_qty = std::min(std::abs(prev_qty), qty);
     double pnl = (prev_qty > 0) ? (fill.price - pos.avg_cost) * close_qty
                                 : (pos.avg_cost - fill.price) * close_qty;
-    pos.realized_pnl += round_digits(pnl * multiplier, 2);
+    pos.realized_pnl += model::round_digits(pnl * multiplier, 2);
 
     int new_qty = std::abs(prev_qty) - close_qty;
     int extra = qty - close_qty;
     if (extra > 0) { // closed, and the rest opens the other way
         pos.avg_cost = fill.price;
         pos.quantity = (signed_qty > 0 ? 1 : -1) * extra;
-        pos.cost_value = round_digits(pos.avg_cost * pos.quantity * multiplier, 2);
+        pos.cost_value = model::round_digits(pos.avg_cost * pos.quantity * multiplier, 2);
     } else if (new_qty == 0) {
         pos.quantity = 0;
         pos.avg_cost = 0.0;
         pos.cost_value = 0.0;
     } else {
         pos.quantity = (prev_qty > 0 ? 1 : -1) * new_qty;
-        pos.cost_value = round_digits(pos.avg_cost * pos.quantity * multiplier, 2);
+        pos.cost_value = model::round_digits(pos.avg_cost * pos.quantity * multiplier, 2);
     }
-}
-
-void apply_shares_fill(model::StrategyHolding& holding, const model::Fill& fill) {
-    model::SharePosition& pos = holding.shares;
-    if (pos.symbol.empty()) {
-        pos.symbol = fill.symbol;
-    }
-    apply_position_change(pos, fill);
 }
 
 /** What a position adds to its holding's summary, valued at its mid and Greeks as set. */
 auto position_totals(const model::Position& pos) -> model::HoldingSummary {
-    return {.total_cost = round_digits(pos.cost_value, 2),
-            .current_value = round_digits(pos.current_value(), 2),
-            .realized_pnl = round_digits(pos.realized_pnl, 2),
-            .delta = round_digits(pos.quantity * pos.delta, 4),
-            .gamma = round_digits(pos.quantity * pos.gamma, 4),
-            .theta = round_digits(pos.quantity * pos.theta, 4),
-            .vega = round_digits(pos.quantity * pos.vega, 4)};
+    return {.total_cost = model::round_digits(pos.cost_value, 2),
+            .current_value = model::round_digits(pos.current_value(), 2),
+            .realized_pnl = model::round_digits(pos.realized_pnl, 2),
+            .delta = model::round_digits(pos.quantity * pos.delta, 4),
+            .gamma = model::round_digits(pos.quantity * pos.gamma, 4),
+            .theta = model::round_digits(pos.quantity * pos.theta, 4),
+            .vega = model::round_digits(pos.quantity * pos.vega, 4)};
 }
 
-/** A position's contribution to its holding's summary; also sets its own Greeks and mid. */
+/** A position's contribution to its holding's summary; also sets its own Greeks and mid. Unquoted
+ * now (a restart, a reconnect, before the open), it keeps the mark it had: not valued at 0. */
 auto mark_option(model::Position& pos, const std::optional<model::Option>& option)
     -> model::HoldingSummary {
     const model::Greeks g = option ? option->greeks() : model::Greeks{};
-    pos.delta = round_digits(g.delta, 4);
-    pos.gamma = round_digits(g.gamma, 4);
-    pos.theta = round_digits(g.theta, 4);
-    pos.vega = round_digits(g.vega, 4);
-    pos.mid_price = option ? option->mid() : 0.0; // a half-cent mid is the value: not rounded away
+    pos.delta = model::round_digits(g.delta, 4);
+    pos.gamma = model::round_digits(g.gamma, 4);
+    pos.theta = model::round_digits(g.theta, 4);
+    pos.vega = model::round_digits(g.vega, 4);
+    // A half-cent mid is the value: not rounded away.
+    pos.mid_price = option ? model::mark(option->bid(), option->ask(), pos.mid_price)
+                           : pos.mid_price;
     return position_totals(pos);
 }
 
@@ -113,13 +96,13 @@ auto mark_option(model::Position& pos, const std::optional<model::Option>& optio
 auto mark_shares(model::Position& pos, const std::optional<model::Underlying>& shares)
     -> model::HoldingSummary {
     double delta = 1.0;
-    double mid_price = 0;
     if (shares) {
         delta = shares->theo_delta();
-        mid_price = shares->mid();
+        if (const double mid = shares->mid(); mid > 0.0) {
+            pos.mid_price = mid;
+        }
     }
-    pos.delta = round_digits(delta, 4);
-    pos.mid_price = mid_price;
+    pos.delta = model::round_digits(delta, 4);
     return position_totals(pos);
 }
 
@@ -138,30 +121,18 @@ auto shares_instrument(const model::StrategyHolding& holding, const model::Portf
     // The hedge instrument when that is what was traded (SPY for SPXW), valued at its price and
     // counted in the underlying's units by its theo_delta.
     if (const std::optional<model::Underlying> hedge = portfolio.hedge();
-        hedge && !portfolio.hedge_symbol.empty() &&
+        hedge && !portfolio.hedge_symbol().empty() &&
         hedge->symbol() == holding.shares.symbol) {
         return hedge;
     }
     return portfolio.underlying();
 }
 
-// ---- Settlement at expiry
+// ---- Expiry
 
 constexpr const char* kSettlement = "Settlement";
-/** OCC exercises an option in the money by this much or more at expiry. */
-constexpr double kExerciseThreshold = 0.01;
 
 using Settlement = BookkeepingEngine::Settlement;
-
-auto closing(int quantity) -> model::Side {
-    return quantity > 0 ? model::Side::SELL : model::Side::BUY;
-}
-
-auto intrinsic(const model::OptionId& id, double price) -> double {
-    const double value =
-        id.type == model::OptionType::CALL ? price - id.strike : id.strike - price;
-    return std::round(std::max(value, 0.0) * 100.0) / 100.0;
-}
 
 /** A single contract's close-out or delivery: one order filled at once by one fill. */
 auto single_settlement(const std::string& order_id, const std::string& symbol,
@@ -175,19 +146,12 @@ auto single_settlement(const std::string& order_id, const std::string& symbol,
     return c;
 }
 
-/** The shares an option in the money delivers at its strike; nullopt when it delivers none. */
-auto delivery(const std::string& strategy_name, const std::string& symbol,
-              const model::OptionId& id, int quantity, double multiplier, double price,
-              const std::string& underlying, model::DateTime at) -> std::optional<Settlement> {
-    if (intrinsic(id, price) < kExerciseThreshold) {
-        return std::nullopt;
-    }
-    const bool call = id.type == model::OptionType::CALL;
-    const model::Side side =
-        (call == (quantity > 0)) ? model::Side::BUY : model::Side::SELL;
-    const double shares = std::abs(quantity) * multiplier;
+/** The shares an option delivers at its strike (model::settle_at_expiry): bought +, sold -. */
+auto delivery(const std::string& strategy_name, const std::string& symbol, double shares,
+              double strike, const std::string& underlying, model::DateTime at) -> Settlement {
+    const model::Side side = shares > 0.0 ? model::Side::BUY : model::Side::SELL;
     return single_settlement(std::format("settle-{}-{}-delivery", strategy_name, symbol),
-                             underlying, side, shares, id.strike, at);
+                             underlying, side, std::abs(shares), strike, at);
 }
 
 constexpr std::chrono::minutes kSettleWindow{15}; // a quote this near the close is its price
@@ -198,18 +162,27 @@ auto closing_price(const model::Portfolio& portfolio, std::chrono::year_month_da
     -> std::optional<double> {
     const std::optional<model::Underlying> underlying = portfolio.underlying();
     const double price = underlying ? underlying->mid() : 0.0;
-    const auto from_close = portfolio.datetime() - model::option_expiry_time(expiry);
+    const auto from_close = portfolio.datetime() - portfolio.calendar().expiry_time(expiry);
     if (price <= 0.0 || std::chrono::abs(from_close) > kSettleWindow) {
         return std::nullopt;
     }
     return price;
 }
 
-} // namespace
-
-auto BrokerCheckRow::is_mismatch() const -> bool {
-    return traded_here && std::abs(engine - broker) >= kQuantityTolerance;
+/** The holding's options expired by now, by symbol. */
+auto expired_in(const model::StrategyHolding& holding, model::DateTime now)
+    -> std::vector<const model::OptionPosition*> {
+    std::vector<const model::OptionPosition*> out;
+    holding.for_each_open_option([&](const model::OptionPosition& p) {
+        if (p.expires <= now) {
+            out.push_back(&p);
+        }
+    });
+    std::ranges::sort(out, {}, &model::OptionPosition::symbol);
+    return out;
 }
+
+} // namespace
 
 // ---- Orders and fills
 
@@ -248,10 +221,14 @@ auto BookkeepingEngine::update_order(const model::Order& update, model::DateTime
             t.held_since = now;
         }
         t.held_end = update; // a repeated end replaces the one held
+        held_ends_.insert(update.order_id);
         return std::nullopt;
     }
     if (!merge(t, update)) {
         return std::nullopt; // nothing new: a repeat, or an older update come late
+    }
+    if (!t.order.is_active()) {
+        held_ends_.erase(update.order_id); // merge let go of any end held
     }
     track_active(update.order_id, t);
     return t.order;
@@ -316,6 +293,7 @@ auto BookkeepingEngine::take_released(const model::Fill& fill) -> std::optional<
     }
     Tracked& t = it->second;
     const model::Order end = *std::exchange(t.held_end, std::nullopt);
+    held_ends_.erase(fill.order_id);
     if (!merge(t, end)) {
         return std::nullopt;
     }
@@ -324,17 +302,17 @@ auto BookkeepingEngine::take_released(const model::Fill& fill) -> std::optional<
 }
 
 auto BookkeepingEngine::take_overdue(model::DateTime now) -> std::vector<model::Order> {
-    std::vector<std::string> due;
-    for (const auto& [order_id, t] : orders_) {
-        if (t.held_end && now - t.held_since >= kTerminalUpdateTimeout) {
+    std::vector<std::string> due; // in order: deterministic
+    for (const std::string& order_id : held_ends_) {
+        if (now - orders_.at(order_id).held_since >= kTerminalUpdateTimeout) {
             due.push_back(order_id);
         }
     }
-    std::ranges::sort(due); // deterministic order
     std::vector<model::Order> out;
     for (const std::string& order_id : due) {
         Tracked& t = orders_.at(order_id);
         const model::Order end = *std::exchange(t.held_end, std::nullopt);
+        held_ends_.erase(order_id);
         if (merge(t, end)) {
             track_active(order_id, t);
             out.push_back(t.order);
@@ -442,16 +420,21 @@ void BookkeepingEngine::book_to_holding(const std::string& strategy_name, const 
     model::StrategyHolding& holding = ensure_holding(strategy_name);
     holding.last_fill = std::max(holding.last_fill, fill.datetime);
     if (!model::parse_option_symbol(fill.symbol)) { // not an option: the underlying
-        apply_shares_fill(holding, fill);
+        if (holding.shares.symbol.empty()) {
+            holding.shares.symbol = fill.symbol;
+        }
+        apply_position_change(holding.shares, fill);
         return;
     }
     auto it = holding.options.find(fill.symbol);
     if (it == holding.options.end()) {
         if (auto closed = holding.closed_options.extract(fill.symbol)) {
-            holding.closed_realized_pnl -= round_digits(closed.mapped().realized_pnl, 2);
+            holding.closed_realized_pnl -= model::round_digits(closed.mapped().realized_pnl, 2);
             it = holding.options.insert(std::move(closed)).position;
         } else {
-            it = holding.options.try_emplace(fill.symbol, fill.symbol).first;
+            it = holding.options
+                     .try_emplace(fill.symbol, fill.symbol, portfolios_.multiplier(fill.symbol))
+                     .first;
         }
     }
     model::OptionPosition& position = it->second;
@@ -466,7 +449,7 @@ void BookkeepingEngine::book_to_holding(const std::string& strategy_name, const 
     held_options_changed_ |= was_open != (position.quantity != 0);
     if (position.quantity == 0) {
         position.clear_fields();
-        holding.closed_realized_pnl += round_digits(position.realized_pnl, 2);
+        holding.closed_realized_pnl += model::round_digits(position.realized_pnl, 2);
         holding.closed_options.insert(holding.options.extract(it));
     }
 }
@@ -528,15 +511,16 @@ void BookkeepingEngine::value_holding(const std::string& strategy_name,
     }
 
     double unreal = totals.current_value - totals.total_cost;
-    holding.summary.current_value = round_digits(totals.current_value, 2);
-    holding.summary.total_cost = round_digits(totals.total_cost, 2);
-    holding.summary.unrealized_pnl = round_digits(unreal, 2);
-    holding.summary.realized_pnl = round_digits(totals.realized_pnl, 2);
+    holding.summary.current_value = model::round_digits(totals.current_value, 2);
+    holding.summary.total_cost = model::round_digits(totals.total_cost, 2);
+    holding.summary.unrealized_pnl = model::round_digits(unreal, 2);
+    holding.summary.realized_pnl = model::round_digits(totals.realized_pnl, 2);
     holding.summary.pnl = holding.summary.unrealized_pnl + holding.summary.realized_pnl;
-    holding.summary.delta = round_digits(totals.delta, 4);
-    holding.summary.gamma = round_digits(totals.gamma, 4);
-    holding.summary.theta = round_digits(totals.theta, 4);
-    holding.summary.vega = round_digits(totals.vega, 4);
+    holding.summary.delta = model::round_digits(totals.delta, 4);
+    holding.summary.gamma = model::round_digits(totals.gamma, 4);
+    holding.summary.theta = model::round_digits(totals.theta, 4);
+    holding.summary.vega = model::round_digits(totals.vega, 4);
+    holding.summarized = true;
     attribute_pnl(books, portfolio);
 
     for (auto& kv : holding.options) {
@@ -556,7 +540,7 @@ void BookkeepingEngine::attribute_pnl(Books& books, const model::Portfolio& port
     const std::optional<model::Underlying> instrument = shares_instrument(holding, portfolio);
     const double shares_price = instrument ? instrument->mid() : 0.0;
 
-    AttributionStart& start = books.attribution;
+    auto& start = books.attribution;
     double moved = 0.0; // what the holding at the start gained by now, at mids
     if (start.time != model::DateTime{}) {
         const double move = start.underlying_price > 0.0 && underlying > 0.0
@@ -629,6 +613,7 @@ void BookkeepingEngine::remove_strategy(const std::string& strategy_name) {
             return false;
         }
         removed.insert(kv.first);
+        held_ends_.erase(kv.first);
         return true;
     });
     forget_fills(removed);
@@ -638,6 +623,7 @@ void BookkeepingEngine::remove_strategy(const std::string& strategy_name) {
 
 void BookkeepingEngine::close() {
     orders_.clear();
+    held_ends_.clear();
     fills_.clear();
     fill_index_.clear();
     for (auto& [_, books] : books_) {
@@ -648,32 +634,6 @@ void BookkeepingEngine::close() {
 
 // ---- Expiry
 
-namespace {
-
-/** The holding's options expired by now, by symbol. */
-auto expired_in(const model::StrategyHolding& holding, model::DateTime now)
-    -> std::vector<const model::OptionPosition*> {
-    std::vector<const model::OptionPosition*> out;
-    holding.for_each_open_option([&](const model::OptionPosition& p) {
-        if (p.expires <= now) {
-            out.push_back(&p);
-        }
-    });
-    std::ranges::sort(out, {}, &model::OptionPosition::symbol);
-    return out;
-}
-
-auto symbols_of(std::span<const model::OptionPosition* const> positions)
-    -> std::vector<std::string> {
-    std::vector<std::string> out;
-    for (const model::OptionPosition* p : positions) {
-        out.push_back(p->symbol);
-    }
-    return out;
-}
-
-} // namespace
-
 auto BookkeepingEngine::settle_expiry(const std::string& strategy_name,
                                       std::chrono::year_month_day expiry, double price,
                                       const model::Portfolio& portfolio) const
@@ -682,9 +642,9 @@ auto BookkeepingEngine::settle_expiry(const std::string& strategy_name,
     if (holding == nullptr) {
         return {};
     }
-    const bool physical = portfolio.physical;
-    const std::string& underlying = portfolio.underlying_symbol;
-    const model::DateTime at = model::option_expiry_time(expiry);
+    const bool physical = portfolio.physical();
+    const std::string underlying(portfolio.underlying_symbol());
+    const model::DateTime at = portfolio.calendar().expiry_time(expiry);
     // Booked once the holding is walked: booking may change it.
     std::vector<Settlement> closes;
     std::vector<Settlement> deliveries;
@@ -695,15 +655,15 @@ auto BookkeepingEngine::settle_expiry(const std::string& strategy_name,
             id.expiry != expiry) {
             continue;
         }
-        const double close = physical ? 0.0 : intrinsic(id, price);
+        const model::ExpirySettlement settled =
+            model::settle_at_expiry(id, price, physical, position.multiplier);
+        const model::Side side = position.quantity > 0 ? model::Side::SELL : model::Side::BUY;
         closes.push_back(single_settlement(std::format("settle-{}-{}", strategy_name, symbol),
-                                           symbol, closing(position.quantity),
-                                           std::abs(position.quantity), close, at));
-        if (physical) {
-            if (auto d = delivery(strategy_name, symbol, id, position.quantity,
-                                  position.multiplier, price, underlying, at)) {
-                deliveries.push_back(std::move(*d));
-            }
+                                           symbol, side, std::abs(position.quantity),
+                                           settled.close, at));
+        if (settled.shares != 0.0) {
+            deliveries.push_back(delivery(strategy_name, symbol, position.quantity * settled.shares,
+                                          id.strike, underlying, at));
         }
     }
 
@@ -721,8 +681,12 @@ auto BookkeepingEngine::expiries_to_settle(const std::string& strategy_name,
         return {};
     }
     Books& books = found->second;
+    const std::vector<const model::OptionPosition*> expired = expired_in(books.holding, now);
+    if (expired.empty() && books.unsettled.empty()) {
+        return {}; // most bars: nothing has expired
+    }
     std::map<std::chrono::year_month_day, std::vector<std::string>> by_expiry;
-    for (const model::OptionPosition* p : expired_in(books.holding, now)) {
+    for (const model::OptionPosition* p : expired) {
         by_expiry[p->id.expiry].push_back(p->symbol);
     }
     std::vector<std::pair<std::chrono::year_month_day, double>> due;
@@ -758,7 +722,79 @@ auto BookkeepingEngine::unsettled_options() const
     return out;
 }
 
+auto BookkeepingEngine::closes_awaited(const std::string& strategy_name,
+                                      const model::Portfolio& portfolio) const
+    -> std::vector<std::pair<std::string, std::chrono::year_month_day>> {
+    std::vector<std::pair<std::string, std::chrono::year_month_day>> out;
+    const auto found = books_.find(strategy_name);
+    if (found == books_.end()) {
+        return out;
+    }
+    for (const std::string& symbol : found->second.unsettled) {
+        if (const auto id = model::parse_option_symbol(symbol)) {
+            std::pair close{std::string(portfolio.underlying_symbol()), id->expiry};
+            if (!std::ranges::contains(out, close)) {
+                out.push_back(std::move(close));
+            }
+        }
+    }
+    return out;
+}
+
+auto BookkeepingEngine::in_flatten_window(const model::OptionId& option,
+                                          const model::Portfolio* portfolio, model::DateTime now,
+                                          double minutes) -> bool {
+    if (minutes <= 0.0 || portfolio == nullptr || !portfolio->physical() ||
+        option.expiry != portfolio->calendar().date_of(now)) {
+        return false;
+    }
+    const auto close = portfolio->calendar().expiry_time(option.expiry);
+    return now >= close - std::chrono::minutes(static_cast<int>(minutes));
+}
+
+auto BookkeepingEngine::positions_to_close(const std::string& strategy_name,
+                                           const model::Portfolio& portfolio, model::DateTime now,
+                                           double minutes) const
+    -> std::map<std::string, std::vector<model::OptionPosition>> {
+    const model::StrategyHolding* holding = find_holding(strategy_name);
+    if (minutes <= 0.0 || holding == nullptr || holding->options.empty()) {
+        return {};
+    }
+    std::set<std::string> active;
+    for_each_active_order(strategy_name, [&](const model::Order& o) {
+        for (const model::Leg& leg : o.legs) {
+            active.insert(leg.symbol);
+        }
+    });
+    // The day before an ex-dividend day, in the window before today's close: combos with a call
+    // sold.
+    std::set<std::string> before_dividend;
+    const model::SessionCalendar& calendar = portfolio.calendar();
+    const auto today = calendar.date_of(now);
+    if (daily_ != nullptr && portfolio.physical() &&
+        daily_->next(std::string(portfolio.underlying_symbol()) + "_ex_dividend",
+                     std::chrono::sys_days{today} + std::chrono::days{1}) ==
+            calendar.next_trading_day(today) &&
+        now >= calendar.expiry_time(today) -
+                   std::chrono::minutes(static_cast<int>(minutes))) {
+        holding->for_each_open_option([&](const model::OptionPosition& p) {
+            if (p.id.type == model::OptionType::CALL && p.quantity < 0) {
+                before_dividend.insert(p.combo.empty() ? p.symbol : p.combo);
+            }
+        });
+    }
+    return holding->open_options_by_combo([&](const model::OptionPosition& p) {
+        return !active.contains(p.symbol) &&
+               (in_flatten_window(p.id, &portfolio, now, minutes) ||
+                before_dividend.contains(p.combo.empty() ? p.symbol : p.combo));
+    });
+}
+
 // ---- The broker's account
+
+auto BrokerCheckRow::is_mismatch() const -> bool {
+    return traded_here && std::abs(engine - broker) >= kQuantityTolerance;
+}
 
 auto BookkeepingEngine::compare_with_broker(const std::map<std::string, double>& broker,
                                             const model::Portfolios& portfolios) const
@@ -851,9 +887,13 @@ auto BookkeepingEngine::start_refusal(const std::string& strategy_name, model::D
             holding != nullptr ? expired_in(*holding, now)
                                : std::vector<const model::OptionPosition*>{};
         !expired.empty()) {
+        std::vector<std::string> symbols;
+        for (const model::OptionPosition* p : expired) {
+            symbols.push_back(p->symbol);
+        }
         return std::format(
             "{} holds expired options not settled ({}): settle them with SettleExpired",
-            strategy_name, utilities::join(symbols_of(expired)));
+            strategy_name, utilities::join(symbols));
     }
     if (!broker_agreement_required) {
         return std::nullopt;

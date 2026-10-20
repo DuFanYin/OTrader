@@ -1,6 +1,7 @@
 /** The platform's instrument names: parsing and formatting option and chain symbols. */
 
 #include "model/symbol.hpp"
+#include "model/utility.hpp"
 #include <array>
 #include <cctype>
 #include <charconv>
@@ -13,19 +14,6 @@ namespace {
 
 constexpr auto right_letter(OptionType type) -> char {
     return type == OptionType::CALL ? 'C' : 'P';
-}
-
-/** YYYYMMDD as a date. */
-auto parse_date(std::string_view text) -> std::optional<std::chrono::year_month_day> {
-    int ymd = 0;
-    if (text.size() != 8 ||
-        std::from_chars(text.data(), text.data() + text.size(), ymd).ec != std::errc{}) {
-        return std::nullopt;
-    }
-    const std::chrono::year_month_day date{
-        std::chrono::year{ymd / 10000}, std::chrono::month{static_cast<unsigned>(ymd / 100 % 100)},
-        std::chrono::day{static_cast<unsigned>(ymd % 100)}};
-    return date.ok() ? std::optional(date) : std::nullopt;
 }
 
 } // namespace
@@ -94,7 +82,7 @@ auto parse_option_symbol(std::string_view symbol) -> std::optional<OptionId> {
     }
     OptionId id;
     id.root = fields[0];
-    const auto expiry = parse_date(fields[1]);
+    const auto expiry = fields[1].size() == 8 ? parse_date(fields[1]) : std::nullopt;
     if (!expiry) {
         return std::nullopt;
     }

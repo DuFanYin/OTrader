@@ -194,9 +194,7 @@ def test_a_run_the_kernel_killed_says_so(slow_batch):
 
 def test_the_day_cache_lets_the_files_read_longest_ago_go_first(tmp_path, monkeypatch):
     root = tmp_path / "cache" / "days"
-    (root / "0123456789abcdef").mkdir(parents=True)  # a build's directory, as the cache was before
-    (root / "0123456789abcdef" / "20250303-1.day").write_bytes(b"x")
-    (root / "SPY").mkdir()
+    (root / "SPY").mkdir(parents=True)
     for name, read in (("20250303-a.day", 300), ("20250303-SPY_20250303-b.chain", 200), ("20250304-c.day", 100)):
         (root / "SPY" / name).write_bytes(b"x" * 1000)
         os.utime(root / "SPY" / name, (time.time() - read, time.time()))

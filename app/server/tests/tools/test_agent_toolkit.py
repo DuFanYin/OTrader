@@ -81,7 +81,8 @@ GATED = {"holdout_report", "approve_strategy_version"}
 def test_every_example_runs_and_returns_the_envelope(offline, own_strategy_dirs, tmp_path, monkeypatch):
     # The examples' week (2025-03-03 to 03-07) of synthetic SPXW and SPY days: the examples run, not the full data.
     for symbol in ("SPXW", "SPY"):
-        synthetic_days.generate(synthetic_days.Model(), date(2025, 3, 3), date(2025, 3, 7), tmp_path / "data", symbol,
+        synthetic_days.generate(synthetic_days.Model(), date(2025, 3, 3), date(2025, 3, 7), tmp_path / "data" / "backtest",
+                                symbol,
                                 False)
     monkeypatch.setattr(files, "data_root", lambda: tmp_path / "data")
     monkeypatch.setattr(store, "db_path", lambda: tmp_path / "experiments.db")  # a ledger of its own

@@ -19,8 +19,9 @@ namespace strategy {
  * exact_dte), so one setting runs in backtest and on paper. It enters only on a day whose day
  * before moved within prev_rv_min..prev_rv_max (realized vol of its minutes, %, the series
  * <portfolio>_minute_rv of the values by day) and when the underlying has
- * moved within move_min..move_max (% since the day's first bar). Model 1 enters only when the
- * Heston value less the executable cost (ask to buy, bid to sell) is at least min_edge USD a unit.
+ * moved within move_min..move_max (% since the day's first bar). With model 1 it enters only when
+ * the legs' value at the IVs on their chains' smiles (model::Chain::smile_iv, fitted with the
+ * quotes) less the executable cost (ask to buy, bid to sell) is at least min_edge USD a unit.
  */
 class ComboStrategy final : public Strategy {
   public:
@@ -51,7 +52,7 @@ class ComboStrategy final : public Strategy {
         Param<int> hedge{"hedge", 0, 0, 1};               // 1: its delta hedge keeps delta near 0
         Param<int> hedge_timer{"hedge_timer", 1, 1, 390}; // hedge every this many bars
         Param<int> delta_range{"delta_range", 20, 0, 1000}; // shares either side of zero left alone
-        Param<int> model{"model", 0, 0, 1};                 // 1: enter only on a Heston edge
+        Param<int> model{"model", 0, 0, 1};                 // 1: enter only on the smile's edge
         Param<double> min_edge{"min_edge", 0, -1'000'000, 1'000'000}; // USD a combo unit
         Param<int> exact_dte{"exact_dte", 0, 0, 1};      // 1: no combo on a day without that expiry
         Param<int> close_itm_only{"close_itm_only", 0, 0, 1}; // 1: at exit_minute, legs in the money
@@ -72,24 +73,15 @@ class ComboStrategy final : public Strategy {
     static constexpr int kMaxLegs = 4;
 
   private:
-    struct LegRule {
-        int ratio = 0; // contracts per combo unit: bought +, sold -; 0: no leg
-        model::OptionType right = model::OptionType::CALL;
-        double strike_pct = 0.0; // strike: forward x (1 + strike_pct / 100), the nearest listed
-        int dte = 0;
-    };
-
-    static std::array<LegRule, kMaxLegs> rules_of(const Setting& s);
+    static std::array<model::LegRule, kMaxLegs> rules_of(const Setting& s);
     /** Each leg's option now; empty when a leg has no chain, strike or two-sided quote. */
     std::vector<model::Option> pick_options() const;
-    /** The edge under Heston, USD a combo unit (NaN when it cannot be computed). */
-    double heston_edge(std::span<const model::Option> options) const;
+    /** The edge at the IVs on the legs' smiles, USD a combo unit (NaN when it cannot be computed). */
+    double smile_edge(std::span<const model::Option> options) const;
     void enter(int minute);
     /** pnl_at_entry_ for a combo held when it started: the holding's P&L less its options'
      * unrealized; false until they are valued. */
     bool resume_pnl_at_entry();
-    /** Each new minute: the underlying's first price and the sum of squared log returns today. */
-    void track_underlying(int minute);
     /** Whether the entry filters let a combo open now; one that rules today out says why and
      *  ends the day's tries. */
     bool filters_allow(int minute);
@@ -97,16 +89,13 @@ class ComboStrategy final : public Strategy {
     void close_in_the_money(int minute);
 
     const Setting setting_ = read_setting<Setting>();
-    const std::array<LegRule, kMaxLegs> rules_ = rules_of(setting_);
+    const std::array<model::LegRule, kMaxLegs> rules_ = rules_of(setting_);
     std::array<std::string, kMaxLegs> chains_{}; // each leg's chain today
     bool entered_ = false;
     bool done_ = false;
     bool sell_delivered_ = false; // shares a settlement delivered, sold at the day's first bar
     double premium_ = 0.0; // |net premium| at entry, USD: what take_profit and stop_loss scale
     double pnl_at_entry_ = 0.0; // the holding's pnl before it: earlier days' are not this combo's
-    int last_minute_ = -1;
-    double first_price_ = 0.0; // today's first underlying price
-    double last_price_ = 0.0;
     double prev_rv_ = std::numeric_limits<double>::quiet_NaN(); // the day before's, %
 };
 

@@ -8,45 +8,47 @@ The network and the venue are not measured here. Optra trades through Interactiv
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/timeline-dark.svg">
-  <img alt="One quote to its fill, to scale at p50 and at p99: quote to decision, decision to broker, broker back to the strategy, with the event thread sleeping and spinning; the other paths and the machine" src="bench/timeline-light.svg">
+  <img alt="Tick to order out and the backtest's throughput as key numbers; one quote through the engine to its fill at p50; every path from nanoseconds to seconds; the machine" src="bench/timeline-light.svg">
 </picture>
 
 The figure:
 
-- **Top**: one tick of the underlying through the engine at p50. Each leg is split into the engine at work (tinted) and the wait for the next thread (dotted). Pricing and deciding take most of the first leg; the other two are mostly waiting. With the event thread spinning, the wait back from the broker falls from 16 µs to 4 µs and the whole loop from 50 µs to 33 µs.
-- **Bottom**: every path on one scale from nanoseconds to seconds. An order to its fill on IB's paper account takes median 3 s, p90 15 s (13 and 14 October).
-- **Right**: the backtest: 512 settings of one strategy over six years of SPY minute bars (1,568 trading days, options within 7 days and 5% of the money) in 92 s from the day cache.
+- **Key numbers**: tick to order out, 28 µs at p50 (p99 143 µs): from a quote, decoded, to its order at the broker's thread. Reading IB's socket and writing the order to it are not in it; the second is measured on its own below (the order reaches TWS about 93 µs after the strategy sends it). Then the backtest, from the day cache: 512 settings of one strategy over SPXW's whole chain, 2,386 trading days of minute bars (January 2016 to June 2025), in 71 s; one setting in 17 s.
+- **The bar**: one tick of the underlying through the engine at p50, to the fill back at the strategy (33 µs). Each leg is split into the engine at work (tinted) and the wait for the next thread (dotted). Pricing and deciding take most of the first leg; the other two are mostly waiting.
+- **The scale**: every path on one scale from nanoseconds to seconds. An order to its fill on IB's paper account takes median 3 s, p90 15 s (13 and 14 October).
+- In these runs the event thread spins when idle ([Waking up](#waking-up)). Sleeping, the default, the loop to the fill is 45 µs at p50 (p99 172 µs), measured the same day.
 
-Paths that cross threads, measured on 18 October:
+Paths that cross threads, measured on 20 October, the event thread spinning:
 
-| Path | p50 | p99 | Spinning: p50 | p99 |
-|---|---|---|---|---|
-| The underlying ticks → the strategy has decided (492 options repriced) | 15.4 µs | 116 µs | 14.2 µs | 120 µs |
-| Two options' quotes change → the strategy has decided | 17.9 µs | 147 µs | 16.6 µs | 147 µs |
-| The underlying ticks → the fill is back at the strategy | 49.7 µs | 176 µs | 32.5 µs | 166 µs |
-| A fill from the broker's thread → the strategy | 14.6 µs | 47 µs | 12.4 µs | 30 µs |
-| The same, while snapshots stream in | 18.4 µs | 762 µs | 3.6 µs | 21 µs |
-| A command from the server → run → answered, while snapshots stream in | 27.7 µs | 82 µs | 17.4 µs | 51 µs |
-| Logging a line, as the event thread pays for it | 0.22 µs | 0.78 µs | 0.12 µs | 0.74 µs |
+| Path | p50 | p99 |
+|---|---|---|
+| The underlying ticks → the strategy has decided (492 options repriced) | 13.7 µs | 115 µs |
+| The underlying ticks → its order at the broker's thread (tick to order out) | 27.7 µs | 143 µs |
+| Two options' quotes change → the strategy has decided | 16.0 µs | 145 µs |
+| The underlying ticks → the fill is back at the strategy | 32.5 µs | 162 µs |
+| A fill from the broker's thread → the strategy | 12.0 µs | 24 µs |
+| The same, while snapshots stream in | 3.4 µs | 25 µs |
+| A command from the server → run → answered, while snapshots stream in | 16.4 µs | 44 µs |
+| Logging a line, as the event thread pays for it | 0.10 µs | 0.92 µs |
 
 Work on an order within one thread:
 
 | Path | p50 | p99 |
 |---|---|---|
-| The risk check and the hand-off of an order, ten orders working | 2.0 µs | 12.5 µs |
-| The same, 20,000 orders working | 2.1 µs | 2.2 µs |
-| The engine's round trip: an order sent, two updates and its fill booked | 3.7 µs | 6.0 µs |
-| Sending an order to IB, what it costs the event thread | 3.6 µs | 11 µs |
-| The same, until TWS has read the order off its socket | 93 µs | 176 µs |
+| The risk check and the hand-off of an order, ten orders working | 1.9 µs | 12.5 µs |
+| The same, 20,000 orders working | 1.8 µs | 2.0 µs |
+| The engine's round trip: an order sent, two updates and its fill booked | 3.5 µs | 6.9 µs |
+| Sending an order to IB, what it costs the event thread (18 October) | 3.6 µs | 11 µs |
+| The same, until TWS has read the order off its socket (18 October) | 93 µs | 176 µs |
 
 - Each number is the median of three runs at a fixed clock on the machine below.
-- "Spinning": the event thread polls for work on a core of its own instead of sleeping ([Waking up](#waking-up)); off by default.
+- Spinning: the event thread polls for work on a core of its own instead of sleeping ([Waking up](#waking-up)); off by default.
 - The broker in the first table is a stand-in on its own thread that fills every order at once: "the fill is back" is the engine's share of the loop, without the network.
 - The last two rows are the real IB adapter talking to a stand-in for TWS on a local socket.
 
 ## Where the time goes
 
-Of the 50 µs loop with the event thread sleeping, each piece measured on its own:
+Of the 45 µs loop with the event thread sleeping (the default), each piece measured on its own:
 
 | Piece | Time | What it is |
 |---|---|---|
@@ -113,7 +115,7 @@ Three ways to reach the event thread, none with a lock:
 
 ## Pricing once, and not on the event thread
 
-Every option needs a forward, an IV and Greeks. For 492 options this is the largest piece of work in the engine. It runs on the market-data thread before the hand-off, and only for what changed:
+Every option needs a forward, an IV and Greeks. For 492 options this is the largest piece of work in the engine. It runs on the market-data thread before the hand-off (`pricing::price_snapshot`, in `engine/pricing/`), and only for what changed:
 
 | Shortcut | What it does |
 |---|---|
@@ -121,6 +123,7 @@ Every option needs a forward, an IV and Greeks. For 492 options this is the larg
 | Underlying-only moves solve nothing | an option's forward comes from its own quotes, so its IV, theta and vega are unchanged; delta and gamma are rescaled, two multiplications per option, equal up to rounding. Pricing this takes 1.1 µs |
 | A chain's forward is kept | while its quotes and time to expiry are unchanged and the forward is still near the spot |
 | Time moves in ten-second steps | the whole chain's IVs are solved again every 10 s, and every second in the last hour before an expiry |
+| A smile is fitted once a minute | each chain's SVI smile (`pricing::fit_smiles`) is fitted again once a minute, chains in parallel on the pool: a same-day SPY chain takes 45 µs at p50 and 105 µs at p99 |
 
 - The ten-second step is the 116 µs at p99 in the first row: in the benchmark one snapshot in a hundred crosses a step and reprices the whole chain on a thread pool. Live, the underlying ticks many times a second, so the share is smaller.
 - A backtest takes none of these shortcuts: it prices every minute of the day exactly, in parallel, so its results do not depend on them.
@@ -137,15 +140,15 @@ Every option needs a forward, an IV and Greeks. For 492 options this is the larg
 
 ## Before and after
 
-Measured on 13 October before and after the changes above, then on 18 October after the engine was rebuilt around its ports and strategies. p50, each the median of three runs at the fixed clock:
+Measured on 13 October before and after the changes above, on 18 October after the engine was rebuilt around its ports and strategies, and on 20 October. p50, each the median of three runs at the fixed clock:
 
-| Path | Before | 13 October | 18 October | 18 October, spinning |
-|---|---|---|---|---|
-| The underlying ticks → decision | 69.6 µs | 26.1 µs | 15.4 µs | 14.2 µs |
-| The underlying ticks → fill back at the strategy | 109.6 µs | 62.0 µs | 49.7 µs | 32.5 µs |
-| A fill → the strategy, while snapshots stream in | 25.6 µs | 17.9 µs | 18.4 µs | 3.6 µs |
-| Logging a line | 1.7 µs | 0.2 µs | 0.22 µs | 0.12 µs |
-| An order, ten orders working | 3.1 µs | 2.7 µs | 2.0 µs | |
+| Path | Before | 13 October | 18 October | 18 October, spinning | 20 October, spinning |
+|---|---|---|---|---|---|
+| The underlying ticks → decision | 69.6 µs | 26.1 µs | 15.4 µs | 14.2 µs | 13.7 µs |
+| The underlying ticks → fill back at the strategy | 109.6 µs | 62.0 µs | 49.7 µs | 32.5 µs | 32.5 µs |
+| A fill → the strategy, while snapshots stream in | 25.6 µs | 17.9 µs | 18.4 µs | 3.6 µs | 3.4 µs |
+| Logging a line | 1.7 µs | 0.2 µs | 0.22 µs | 0.12 µs | 0.10 µs |
+| An order, ten orders working | 3.1 µs | 2.7 µs | 2.0 µs | | 1.9 µs |
 
 - The first row's p99: about the same before and on 13 October (the full repricing moved from every second, above p50, to every ten seconds, at p99); 141 µs → 116 µs from 13 to 18 October, when the portfolio's data were rewritten and applying a snapshot became the buffer swap.
 - One path got worse: with the event thread sleeping and snapshots streaming in, a fill's p99 to the strategy is 0.5 to 0.8 ms on 17 and 18 October, against 75 µs on 13 October. The code of 15 October, alternated with that of 17 October (three rounds each), has the same tail (0.49 against 0.54 ms) and every p50 within 7%, so no change after 15 October caused it. Whether the code of 13 to 15 October or the machine did is not measured. Spinning, it is 25 µs in both.
@@ -169,7 +172,7 @@ sudo scripts/bench.sh clock off
 ```
 
 - The baseline (`engine/tests/bench/baseline.tsv`) holds the 13 October numbers. A path fails when its p50 is more than 15% slower or its p99 more than 50% slower.
-- The code of 18 October passes on every path; logging's p99 is 0.78 µs against 0.6, inside the margin. The code from before 13 October fails on five paths.
+- The code of 20 October passes on every path, the event thread sleeping: the underlying's tick to the fill back 44.5 µs (p99 172 µs) against 62.0 µs (193 µs); logging's p99 is 0.8 µs against 0.6, inside the margin. The code from before 13 October fails on five paths.
 
 ## What is left
 

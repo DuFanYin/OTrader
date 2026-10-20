@@ -1,6 +1,6 @@
 #include "adapters/gateway/simulated_gateway.hpp"
 #include "adapters/market_data/data_loader.hpp"
-#include "model/portfolio_spec.hpp"
+#include "model/expiry.hpp"
 #include "model/symbol.hpp"
 #include "model/utility.hpp"
 #include <algorithm>
@@ -17,9 +17,9 @@ namespace adapters {
 
 SimulatedGateway::SimulatedGateway(const model::Portfolios& portfolios,
                                    std::vector<std::string> files, std::string account_file,
-                                   Clock clock, double fee_rate)
+                                   Clock clock)
     // Each run's ids its own: an id seen in an earlier run's records is a fill the engine drops.
-    : BacktestGateway(portfolios, {.fee_rate = fee_rate},
+    : BacktestGateway(portfolios, {.fee_scale = 1.0}, // fees as IB charges them
                       std::format("sim{}", std::chrono::duration_cast<std::chrono::seconds>(
                                                std::chrono::system_clock::now().time_since_epoch())
                                                .count())),
@@ -82,7 +82,7 @@ auto SimulatedGateway::mid(const std::string& symbol) const -> double {
 
 void SimulatedGateway::book(const std::string& symbol, double quantity, double price) {
     const std::lock_guard lock(mutex_);
-    const double size = default_contract_size(symbol);
+    const double size = portfolios_.multiplier(symbol);
     const double value = quantity * price * size;
     cash_ -= value;
     // The fees the fills so far were charged.
@@ -127,11 +127,9 @@ void SimulatedGateway::settle_expired() {
     const model::DateTime now = clock_();
     for (const auto& [symbol, quantity] : held) {
         const std::optional<model::OptionId> id = model::parse_option_symbol(symbol);
-        if (!id || now < model::option_expiry_time(id->expiry)) {
-            continue;
-        }
         const model::Portfolio* portfolio = portfolios_.portfolio_of(symbol);
-        if (portfolio == nullptr || !portfolio->underlying()) {
+        if (!id || portfolio == nullptr || !portfolio->underlying() ||
+            now < portfolio->calendar().expiry_time(id->expiry)) {
             continue;
         }
         const std::string& underlying = portfolio->underlying()->symbol();
@@ -139,13 +137,12 @@ void SimulatedGateway::settle_expired() {
         if (spot <= 0.0) {
             continue; // no price at the close yet
         }
-        const bool call = id->type == model::OptionType::CALL;
-        const double intrinsic = std::max(0.0, call ? spot - id->strike : id->strike - spot);
-        book(symbol, -quantity, intrinsic); // the option closes at its intrinsic value
-        const model::PortfolioSpec* spec = model::find_portfolio(portfolio->name);
-        if (spec != nullptr && spec->physical && intrinsic >= 0.01) {
-            // Delivered: the shares at the underlying's price (with the intrinsic value, the strike).
-            book(underlying, quantity * 100.0 * (call ? 1.0 : -1.0), spot);
+        // As the engine books it: closed, and share-settled in the money, delivered at the strike.
+        const model::ExpirySettlement settled = model::settle_at_expiry(
+            *id, spot, portfolio->physical(), portfolios_.multiplier(symbol));
+        book(symbol, -quantity, settled.close);
+        if (settled.shares != 0.0) {
+            book(underlying, quantity * settled.shares, id->strike);
         }
     }
 }
@@ -165,7 +162,7 @@ auto SimulatedGateway::query_account() -> std::future<core::BrokerAccount> {
             }
             const auto mark = marks_.find(symbol);
             const double price = mark != marks_.end() ? mark->second : 0.0;
-            const double size = default_contract_size(symbol);
+            const double size = portfolios_.multiplier(symbol);
             const double value = p.quantity * price * size;
             market += value;
             unrealized += value - p.cost;

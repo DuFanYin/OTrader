@@ -72,7 +72,8 @@ export function OptionGroup({ mc = true }) {
 }
 
 export const CHECKS = [["pickStats", "Stats"], ["pickIto", "Itô"], ["pickSimulation", "Simulation"],
-  ["pickLattice", "Lattice", "Trinomial vs BS; LSM and PSOR finite differences vs the binomial American put"]];
+  ["pickLattice", "Lattice", "Trinomial vs BS; LSM and PSOR finite differences vs the binomial American put"],
+  ["pickSmile", "Smile", "The SVI fit within a noisy smile's spread, free of butterfly arbitrage"]];
 
 export function PrecheckGroup() {
   const p = params.value, picked = CHECKS.filter(([k]) => p[k]).map(([, label]) => label);

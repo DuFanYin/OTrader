@@ -29,8 +29,18 @@ class SimulatedMarketData final : public core::MarketData {
     /** Answered from the day's file beside the files it streams (<PORTFOLIO>-YYYY-MM/YYYYMMDD):
      * the underlying's last mid of the day; unanswered when there is none. */
     void ask_close(const std::string& underlying, std::chrono::year_month_day day) override;
+    /** From the same file: the underlying's mid at its first minute, the highest and lowest of
+     * its minutes until the clock's time (all of them when the clock gives none). */
+    void ask_day_range(const std::string& underlying, std::chrono::year_month_day day) override;
 
   private:
+    /** A close asked for, or a day's range. */
+    struct Asked {
+        std::string underlying;
+        std::chrono::year_month_day day;
+        bool range = false;
+    };
+
     /** One minute of one portfolio: its underlying's quote and its options'. */
     struct Minute {
         model::DateTime time{};
@@ -46,9 +56,8 @@ class SimulatedMarketData final : public core::MarketData {
 
     void load();
     void run(core::MarketDataEngine& engine);
-    /** The closes asked for, answered (the source's thread). */
-    void answer(core::MarketDataEngine& engine,
-                const std::vector<std::pair<std::string, std::chrono::year_month_day>>& asked);
+    /** What was asked for, answered (the source's thread). */
+    void answer(core::MarketDataEngine& engine, const std::vector<Asked>& asked);
 
     std::vector<std::string> files_;
     Clock clock_;
@@ -57,7 +66,7 @@ class SimulatedMarketData final : public core::MarketData {
     std::mutex mutex_;
     std::condition_variable wake_;
     bool stopping_ = false;
-    std::vector<std::pair<std::string, std::chrono::year_month_day>> asked_; // closes to answer
+    std::vector<Asked> asked_; // to answer
     std::thread thread_;
 };
 

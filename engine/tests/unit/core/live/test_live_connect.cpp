@@ -9,6 +9,7 @@
  */
 #include "tests/unit/core/live/fake_broker.hpp"
 #include "assembly/live.hpp"
+#include "model/session_calendar.hpp"
 #include "model/symbol.hpp"
 #include "model/utility.hpp"
 #include "strategy/strategy_registry.hpp"
@@ -141,7 +142,7 @@ auto spy_and_a_put() -> std::vector<model::Contract> {
     option.trading_class = "SPY";
     option.option_strike = 555;
     option.option_type = model::OptionType::PUT;
-    option.option_expiry = model::option_expiry_time(kExpiry);
+    option.option_expiry = model::kNyse.expiry_time(kExpiry);
     option.option_underlying = "SPY";
     return {spy, option};
 }

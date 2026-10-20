@@ -14,7 +14,7 @@ import statistics
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from optra.data.days import DAY_FILE
 
@@ -46,8 +46,8 @@ def days_of(path: Path) -> list[Path]:
 
 
 def label(strategy: str, setting: dict[str, float]) -> str:
-    """How a class and setting are named in a report and in the holdout's record: "Class:name=value,...", the names
-    sorted. Only shown and kept, never read back."""
+    """How a class and setting are named in a report: "Class:name=value,...", the names sorted. Only shown, never
+    read back."""
     return strategy + ":" + ",".join(f"{k}={float(x)!r}" for k, x in sorted(setting.items()))
 
 
@@ -61,17 +61,40 @@ def parse_spec(spec: str) -> tuple[str, dict[str, float]]:
     return cls, setting
 
 
+def drawdown(nets: Iterable[float]) -> float:
+    """The deepest fall of the running sum of nets from its peak (0 or less)."""
+    equity = peak = deepest = 0.0
+    for x in nets:
+        equity += x
+        peak = max(peak, equity)
+        deepest = min(deepest, equity - peak)
+    return deepest
+
+
+def r_stats(rs: list[float]) -> tuple[float | None, float | None]:
+    """The mean R of the trades and its t (None for no trade; t None without spread)."""
+    if not rs:
+        return None, None
+    mean = statistics.fmean(rs)
+    sd = statistics.stdev(rs) if len(rs) > 1 else 0.0
+    return mean, (mean / sd * math.sqrt(len(rs)) if sd > 0 else None)
+
+
+def es95(nets_sorted: list[float]) -> float:
+    """The mean of the worst 5% of nets (at least one), the nets sorted ascending."""
+    return statistics.fmean(nets_sorted[:max(1, math.ceil(0.05 * len(nets_sorted)))])
+
+
 def day_measures(days: list[tuple[str, float]]) -> dict[str, Any]:
     """A run's days (day YYYY-MM-DD, net P&L after fees): its worst day, the mean of its worst 5% of days (ES95, at
     least one day) and its net by month."""
     if not days:
         return {}
     nets = sorted(net for _, net in days)
-    tail = nets[:max(1, math.ceil(0.05 * len(nets)))]
     months: dict[str, float] = {}
     for day, net in days:
         months[day[:7]] = months.get(day[:7], 0.0) + net
-    return {"worst_day": round(nets[0], 2), "es95_day": round(statistics.fmean(tail), 2),
+    return {"worst_day": round(nets[0], 2), "es95_day": round(es95(nets), 2),
             "by_month": {m: round(v, 2) for m, v in sorted(months.items())}}
 
 

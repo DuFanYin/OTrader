@@ -11,6 +11,7 @@
 
 #include "utilities/log_source.hpp"
 #include "model/constant.hpp"
+#include "model/daily_table.hpp"
 #include "model/object.hpp"
 #include "model/portfolio.hpp"
 #include "model/utility.hpp"
@@ -20,6 +21,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -55,8 +57,12 @@ class BookkeepingEngine {
         std::vector<model::Fill> fills;
     };
 
-    BookkeepingEngine() = default;
-    explicit BookkeepingEngine(utilities::Logger* logger) : log_(logger, "Bookkeeping") {}
+    /** portfolios: whose contracts give a position its multiplier; it must outlive the engine. */
+    BookkeepingEngine(utilities::Logger* logger, const model::Portfolios& portfolios)
+        : log_(logger, "Bookkeeping"), portfolios_(portfolios) {}
+    /** Where ex-dividend days are (the series <underlying>_ex_dividend); it must outlive the
+     * engine. nullptr: none. */
+    void use_daily(const model::DailyTable* daily) { daily_ = daily; }
 
     // ---- Orders and fills
 
@@ -168,6 +174,22 @@ class BookkeepingEngine {
                        model::DateTime now);
     /** Strategy → expired options without a closing price, for settle_expired by hand. */
     std::unordered_map<std::string, std::vector<std::string>> unsettled_options() const;
+    /** The closes (underlying, day) the strategy's unsettled options wait for, each once: what
+     * Main asks the market data for. */
+    std::vector<std::pair<std::string, std::chrono::year_month_day>>
+    closes_awaited(const std::string& strategy_name, const model::Portfolio& portfolio) const;
+
+    /** A share-settled option expiring today, `minutes` or less before its close (0: never):
+     * held, it is closed (positions_to_close); the risk check opens none. */
+    static bool in_flatten_window(const model::OptionId& option, const model::Portfolio* portfolio,
+                                  model::DateTime now, double minutes);
+    /** The options to close now, by the combo each was opened in: those in their flatten window,
+     * and, the day before an ex-dividend day of a share-settled underlying, every combo with a
+     * call sold (it may be exercised early for the dividend), within `minutes` of the close.
+     * Skips those with an active order (the close sent a tick ago) so closes are not stacked. */
+    [[nodiscard]] std::map<std::string, std::vector<model::OptionPosition>>
+    positions_to_close(const std::string& strategy_name, const model::Portfolio& portfolio,
+                       model::DateTime now, double minutes) const;
 
     // ---- The broker's account
 
@@ -200,6 +222,27 @@ class BookkeepingEngine {
         double working = 0.0;
     };
 
+    /** A strategy's books: its holding, the holding at its last valuation (P&L attribution's
+     * baseline), the expired options it holds without a closing price to settle at, and its
+     * orders the venue has not ended (by order_id; orders_'s nodes stay put) with what they would
+     * still trade, by contract. */
+    struct Books {
+        model::StrategyHolding holding;
+        struct {
+            model::DateTime time{};
+            double pnl = 0.0;
+            double underlying_price = 0.0;
+            model::Position shares;
+            std::vector<model::Position> options; // mid, Greeks per contract
+            std::vector<double> option_ivs;
+        } attribution;
+        std::vector<std::string> unsettled;
+        std::map<std::string, const Tracked*> active;
+        std::unordered_map<std::string, double> working;
+    };
+
+    // ---- Orders and fills
+
     /** The update merged into t: false when it changes nothing. */
     static bool merge(Tracked& t, const model::Order& update);
     /** Each leg's booked quantity covers `filled` units by its ratio. */
@@ -207,45 +250,30 @@ class BookkeepingEngine {
     /** Active: in its strategy's active, and its remaining in its working, while the order has
      * not ended. */
     void track_active(const std::string& order_id, Tracked& t);
-
-    /** The fill into the strategy's holding; `order` (null when unknown) names the combo. */
-    void book_to_holding(const std::string& strategy_name, const model::Fill& fill,
-                         const model::Order* order);
-
-    /** The holding at its last update: the baseline for P&L attribution. */
-    struct AttributionStart {
-        model::DateTime time{};
-        double pnl = 0.0;
-        double underlying_price = 0.0;
-        model::Position shares;
-        std::vector<model::Position> options; // mid, Greeks per contract
-        std::vector<double> option_ivs;
-    };
-    /** A strategy's books: its holding, its attribution's baseline, the expired options it holds
-     * without a closing price to settle at, and its orders the venue has not ended (by order_id;
-     * orders_'s nodes stay put) with what they would still trade, by contract. */
-    struct Books {
-        model::StrategyHolding holding;
-        AttributionStart attribution;
-        std::vector<std::string> unsettled;
-        std::map<std::string, const Tracked*> active;
-        std::unordered_map<std::string, double> working;
-    };
-    /** Adds moves since the last update to pnl_*, then resets the baseline. */
-    static void attribute_pnl(Books& books, const model::Portfolio& portfolio);
     /** units of the order's legs (each by its side and ratio) into the books' working. */
     static void add_working(Books& books, const model::Order& order, double units);
     /** The fills of these orders forgotten. */
     void forget_fills(const std::unordered_set<std::string>& order_ids);
 
+    // ---- Holdings
+
+    /** The fill into the strategy's holding; `order` (null when unknown) names the combo. */
+    void book_to_holding(const std::string& strategy_name, const model::Fill& fill,
+                         const model::Order* order);
+    /** Adds moves since the last update to pnl_*, then resets the baseline. */
+    static void attribute_pnl(Books& books, const model::Portfolio& portfolio);
+
     enum class BrokerCheck : std::uint8_t { NotYet, Agree, Disagree, Failed };
 
     utilities::LogSource log_;
+    const model::Portfolios& portfolios_;
     std::unordered_map<std::string, Tracked> orders_;
+    std::set<std::string> held_ends_; // the orders_ holding an end back (held_end), in order
     std::vector<model::Fill> fills_;                          // in the order booked
     std::unordered_map<std::string, std::size_t> fill_index_; // by fill_id: into fills_
-    std::unordered_map<std::string, Books> books_; // by strategy
+    std::unordered_map<std::string, Books> books_;            // by strategy
     bool held_options_changed_ = false;
+    const model::DailyTable* daily_ = nullptr; // not owned
     BrokerCheck broker_check_ = BrokerCheck::NotYet;
     std::string broker_check_problem_;
 };

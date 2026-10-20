@@ -1,7 +1,7 @@
 /** Strategy: the base every strategy derives from. */
 
 #include "strategy/strategy.hpp"
-#include "quant/kernel.h"
+#include "quant/engine_api.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -30,13 +30,12 @@ void Strategy::on_fill(const model::Fill& fill) {
 }
 
 void Strategy::subscribe_chains(std::span<const std::string> chain_symbols) {
-    subscribed_chains_ = {chain_symbols.begin(), chain_symbols.end()};
     context_.subscribe_chains(chain_symbols);
 }
 
 auto Strategy::find_chain(const std::string& chain_symbol) const
     -> std::optional<model::Chain> {
-    if (!subscribed_chains_.contains(chain_symbol)) {
+    if (!context_.subscribed(chain_symbol)) {
         return std::nullopt;
     }
     return portfolio()->chain(chain_symbol);
@@ -79,7 +78,20 @@ auto Strategy::daily(std::string_view series) const -> std::optional<double> {
 
 auto Strategy::daily_history(std::string_view series, std::size_t n) const
     -> std::vector<double> {
-    return context_.daily().before(series, day(), n);
+    using std::chrono::days;
+    using std::chrono::sys_days;
+    const std::chrono::year_month_day today = day();
+    const auto last = context_.daily().last_before(series, today);
+    if (!last) {
+        return {};
+    }
+    int missed = 0; // trading days after its last value, before today
+    for (sys_days d = sys_days{*last} + days{1}; d < sys_days{today} && missed <= kStaleTradingDays;
+         d += days{1}) {
+        missed += calendar().is_trading_day(std::chrono::year_month_day{d}) ? 1 : 0;
+    }
+    return missed > kStaleTradingDays ? std::vector<double>{}
+                                      : context_.daily().before(series, today, n);
 }
 
 auto Strategy::trading_days_until(std::string_view series) const -> int {
@@ -90,7 +102,7 @@ auto Strategy::trading_days_until(std::string_view series) const -> int {
     }
     int days = 0;
     for (std::chrono::sys_days d{today}; d < std::chrono::sys_days{*next}; d += std::chrono::days{1}) {
-        days += model::is_trading_day(std::chrono::year_month_day{d}) ? 1 : 0;
+        days += calendar().is_trading_day(std::chrono::year_month_day{d}) ? 1 : 0;
     }
     return days;
 }
@@ -112,22 +124,23 @@ auto Strategy::traded_today() const -> bool { return last_fill_minute() >= 0; }
 
 namespace {
 
-/** Minutes since the open of `at` when it is on `day` (New York), else -1. */
-auto minute_on(model::DateTime at, std::chrono::year_month_day day) -> int {
-    if (at == model::DateTime{} || model::new_york_date(at) != day) {
+/** Minutes since the open of `at` when it is on `day` (on the calendar), else -1. */
+auto minute_on(const model::SessionCalendar& calendar, model::DateTime at,
+               std::chrono::year_month_day day) -> int {
+    if (at == model::DateTime{} || calendar.date_of(at) != day) {
         return -1;
     }
-    return std::max(model::minutes_since_open(at), 0);
+    return std::max(calendar.minutes_since_open(at), 0);
 }
 
 } // namespace
 
 auto Strategy::last_fill_minute() const -> int {
-    return minute_on(context_.holding().last_fill, day());
+    return minute_on(calendar(), context_.holding().last_fill, day());
 }
 
 auto Strategy::last_order_minute() const -> int {
-    return minute_on(context_.holding().last_order, day());
+    return minute_on(calendar(), context_.holding().last_order, day());
 }
 
 auto Strategy::leg(const std::string& symbol, model::Side side,
@@ -207,6 +220,10 @@ void Strategy::close_options(std::span<const model::OptionPosition> options) {
 auto Strategy::has_active_order() const -> bool { return context_.has_active_order(); }
 
 void Strategy::set_error(const std::string& msg) { context_.set_error(msg); }
+
+void Strategy::write_value(std::string_view name, double value) {
+    context_.write_value(name, value);
+}
 
 void Strategy::write_log(const std::string& msg, utilities::LogLevel level) const {
     context_.write_log(msg, level);

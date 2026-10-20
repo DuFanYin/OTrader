@@ -63,10 +63,10 @@ def api_session_report(day: Optional[date] = None, record_dir: Optional[str] = N
 
 
 @router.get("/api/session/compare", dependencies=ANYONE)
-def api_session_compare(day: date, strategy: str, fee_rate: float = 0.65) -> Dict[str, Any]:
+def api_session_compare(day: date, strategy: str) -> Dict[str, Any]:
     """A paper day of one strategy against a backtest of the same recorded day, fill by fill."""
     try:
-        return session.compare(live.client("paper"), strategy, day, fee_rate)
+        return session.compare(live.client("paper"), strategy, day)
     except ValueError as exc:
         raise _bad_request(exc) from exc
 
@@ -78,7 +78,7 @@ class SyntheticRequest(BaseModel):
     start: date
     end: date
     symbol: str = "SPY"
-    out: str = Field("data/synthetic", description="the data root written to (apart from the real days in data/)")
+    out: str = Field("data/synthetic", description="the data root written to (apart from the real days in data/backtest/)")
     overwrite: bool = False
     model: Dict[str, float] = Field(
         default_factory=dict,

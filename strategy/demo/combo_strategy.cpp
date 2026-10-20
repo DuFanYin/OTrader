@@ -2,7 +2,7 @@
 #include "strategy_registry.hpp"
 
 #include "model/utility.hpp"
-#include "quant/kernel.h"
+#include "quant/engine_api.h"
 #include <algorithm>
 #include <cmath>
 #include <format>
@@ -13,14 +13,6 @@ namespace strategy {
 
 namespace {
 
-constexpr int kHestonStrikes = 40;    // the strikes nearest the forward it is fitted to
-constexpr int kHestonIterations = 300;
-constexpr int kNoExpiryLimit = 3650;
-
-auto two_sided(const std::optional<model::Option>& option) -> bool {
-    return option && option->bid() > 0.0 && option->ask() > 0.0;
-}
-
 /** Quoted on the side a leg trades: an ask to buy, a bid to sell (a far wing often has no bid). */
 auto quoted_for(const std::optional<model::Option>& option, int ratio) -> bool {
     return option && (ratio > 0 ? option->ask() : option->bid()) > 0.0;
@@ -28,18 +20,19 @@ auto quoted_for(const std::optional<model::Option>& option, int ratio) -> bool {
 
 auto mid(const model::Option& option) -> double { return 0.5 * (option.bid() + option.ask()); }
 
-auto multiplier_of(const model::Option& option) -> double {
-    return option.multiplier() > 0.0 ? option.multiplier() : 100.0;
-}
-
 } // namespace
 
-auto ComboStrategy::rules_of(const Setting& s) -> std::array<LegRule, kMaxLegs> {
-    const auto rule = [](int ratio, int right, double strike_pct, int dte) {
-        return LegRule{.ratio = ratio,
-                       .right = right == 0 ? model::OptionType::CALL : model::OptionType::PUT,
-                       .strike_pct = strike_pct,
-                       .dte = dte};
+auto ComboStrategy::rules_of(const Setting& s) -> std::array<model::LegRule, kMaxLegs> {
+    const auto expiry_by = s.exact_dte != 0 ? model::LegRule::ExpiryBy::kExactly
+                                            : model::LegRule::ExpiryBy::kFirstAtLeast;
+    const auto rule = [expiry_by](int ratio, int right, double strike_pct, int dte) {
+        return model::LegRule{
+            .ratio = ratio,
+            .right = right == 0 ? model::OptionType::CALL : model::OptionType::PUT,
+            .strike_by = model::LegRule::StrikeBy::kForwardPct,
+            .strike = strike_pct,
+            .expiry_by = expiry_by,
+            .dte = dte};
     };
     return {rule(s.leg1_ratio, s.leg1_right, s.leg1_strike_pct, s.leg1_dte),
             rule(s.leg2_ratio, s.leg2_right, s.leg2_strike_pct, s.leg2_dte),
@@ -49,11 +42,11 @@ auto ComboStrategy::rules_of(const Setting& s) -> std::array<LegRule, kMaxLegs> 
 
 void ComboStrategy::on_init() {
     std::string legs;
-    for (const LegRule& rule : rules_) {
+    for (const model::LegRule& rule : rules_) {
         if (rule.ratio != 0) {
             legs += std::format("{}{:+d} {} {:+.2f}% {}d", legs.empty() ? "" : ", ", rule.ratio,
-                                rule.right == model::OptionType::CALL ? "C" : "P",
-                                rule.strike_pct, rule.dte);
+                                rule.right == model::OptionType::CALL ? "C" : "P", rule.strike,
+                                rule.dte);
         }
     }
     if (legs.empty()) {
@@ -69,7 +62,7 @@ void ComboStrategy::on_init() {
     const std::string hedged =
         s.hedge != 0 ? std::format(", hedged within {} shares", s.delta_range) : "";
     const std::string edge =
-        s.model == 1 ? std::format(", Heston edge >= {:.2f}", s.min_edge) : "";
+        s.model != 0 ? std::format(", smile edge >= {:.2f}", s.min_edge) : "";
     const std::string closes = s.close_itm_only != 0 ? " (legs in the money)" : "";
     const std::string expiry = s.exact_dte != 0 ? ", expiries exactly dte out" : "";
     const std::string filters =
@@ -85,8 +78,6 @@ void ComboStrategy::on_day() {
     // From the values by day, not from the minutes it saw: the same after a restart in the day.
     prev_rv_ = daily(portfolio()->name + "_minute_rv")
                    .value_or(std::numeric_limits<double>::quiet_NaN());
-    last_minute_ = -1;
-    first_price_ = last_price_ = 0.0;
     done_ = false;
     if (!holds_options()) { // a combo held from a day before stays the one entered
         entered_ = false;
@@ -106,23 +97,21 @@ void ComboStrategy::on_day() {
     }
     std::set<std::string> subscribe;
     for (int i = 0; i < kMaxLegs; ++i) {
-        const LegRule& rule = rules_[static_cast<std::size_t>(i)];
+        const model::LegRule& rule = rules_[static_cast<std::size_t>(i)];
         std::string& chain = chains_[static_cast<std::size_t>(i)];
         chain.clear();
         if (rule.ratio == 0) {
             continue;
         }
         const bool exact = setting_.exact_dte != 0;
-        const std::vector<std::string> found =
-            portfolio()->chains_by_expiry(rule.dte, exact ? rule.dte : kNoExpiryLimit);
-        if (found.empty()) {
+        chain = model::leg_chain(*portfolio(), rule);
+        if (chain.empty()) {
             write_log(std::format("{}: no chain {} days out{}: no fill", day(), rule.dte,
                                   exact ? "" : " or more"),
                       exact ? utilities::INFO : utilities::WARNING);
             done_ = true;
             return;
         }
-        chain = found.front();
         subscribe.insert(chain);
     }
     subscribe_chains(std::vector<std::string>(subscribe.begin(), subscribe.end()));
@@ -133,19 +122,13 @@ void ComboStrategy::on_day() {
 auto ComboStrategy::pick_options() const -> std::vector<model::Option> {
     std::vector<model::Option> picked;
     for (int i = 0; i < kMaxLegs; ++i) {
-        const LegRule& rule = rules_[static_cast<std::size_t>(i)];
+        const model::LegRule& rule = rules_[static_cast<std::size_t>(i)];
         if (rule.ratio == 0) {
             continue;
         }
         const std::optional<model::Chain> chain = find_chain(chains_[static_cast<std::size_t>(i)]);
-        if (!chain || chain->forward() <= 0.0 || chain->strikes().empty()) {
-            return {};
-        }
-        const double target = chain->forward() * (1.0 + rule.strike_pct / 100.0);
-        const auto nearest = std::ranges::min_element(chain->strikes(), {}, [target](double k) {
-            return std::abs(k - target);
-        });
-        const std::optional<model::Option> option = chain->option(rule.right, *nearest);
+        const std::optional<model::Option> option =
+            chain ? model::leg_option(*chain, rule) : std::nullopt;
         if (!quoted_for(option, rule.ratio)) {
             return {};
         }
@@ -157,65 +140,28 @@ auto ComboStrategy::pick_options() const -> std::vector<model::Option> {
     return picked;
 }
 
-auto ComboStrategy::heston_edge(std::span<const model::Option> options) const -> double {
+auto ComboStrategy::smile_edge(std::span<const model::Option> options) const -> double {
     double value = 0.0;
     double cost = 0.0;
-    std::unordered_map<std::string, quant::HestonParams> fitted; // by chain
     std::size_t next = 0;
     for (int i = 0; i < kMaxLegs; ++i) {
-        const LegRule& rule = rules_[static_cast<std::size_t>(i)];
+        const model::LegRule& rule = rules_[static_cast<std::size_t>(i)];
         if (rule.ratio == 0) {
             continue;
         }
         const model::Option& option = options[next++];
-        const std::string& chain_symbol = chains_[static_cast<std::size_t>(i)];
-        const std::optional<model::Chain> chain = find_chain(chain_symbol);
+        const std::optional<model::Chain> chain = find_chain(chains_[static_cast<std::size_t>(i)]);
         const double years = model::years_to_expiry(now(), option.expiry());
-        if (!chain || chain->forward() <= 0.0 || years <= 0.0) {
+        const std::optional<double> vol =
+            chain ? chain->smile_iv(option.strike()) : std::optional<double>{};
+        if (!vol || chain->forward() <= 0.0 || years <= 0.0) {
             return std::numeric_limits<double>::quiet_NaN();
         }
-        const double forward = chain->forward();
-        const double rate = chain->rate();
-        const double discount = std::exp(-rate * years);
-        if (!fitted.contains(chain_symbol)) {
-            // OTM mids as call prices (puts by parity)
-            std::vector<std::pair<double, double>> quotes; // strike, call price
-            for (const double k : chain->strikes()) {
-                const std::optional<model::Option> call = chain->call(k);
-                const std::optional<model::Option> put = chain->put(k);
-                if (k >= forward && two_sided(call)) {
-                    quotes.emplace_back(k, mid(*call));
-                } else if (k < forward && two_sided(put)) {
-                    quotes.emplace_back(k, mid(*put) + discount * (forward - k));
-                }
-            }
-            std::ranges::sort(quotes, {}, [forward](const auto& q) {
-                return std::abs(q.first - forward);
-            });
-            quotes.resize(std::min<std::size_t>(quotes.size(), kHestonStrikes));
-            if (quotes.size() < 5) {
-                return std::numeric_limits<double>::quiet_NaN();
-            }
-            std::vector<double> strikes;
-            std::vector<double> prices;
-            for (const auto& [k, price] : quotes) {
-                strikes.push_back(k);
-                prices.push_back(price);
-            }
-            const std::vector<double> maturities(strikes.size(), years);
-            fitted[chain_symbol] = quant::heston_calibrate(forward * discount, rate, strikes,
-                                                           maturities, prices, {},
-                                                           kHestonIterations)
-                                       .params;
-        }
-        const quant::HestonParams& h = fitted[chain_symbol];
-        const double call = quant::heston_call_price(forward * discount, option.strike(), rate,
-                                                     years, h.v0, h.kappa, h.theta, h.xi, h.rho);
-        const double price = option.type() == model::OptionType::CALL
-                                 ? call
-                                 : call - discount * (forward - option.strike());
-        value += rule.ratio * price * multiplier_of(option);
-        cost += rule.ratio * (rule.ratio > 0 ? option.ask() : option.bid()) * multiplier_of(option);
+        const double price = quant::black_price(option.type() == model::OptionType::CALL,
+                                                chain->forward(), option.strike(), years,
+                                                chain->rate(), *vol);
+        value += rule.ratio * price * option.multiplier();
+        cost += rule.ratio * (rule.ratio > 0 ? option.ask() : option.bid()) * option.multiplier();
     }
     return value - cost;
 }
@@ -226,23 +172,22 @@ void ComboStrategy::enter(int minute) {
         return; // a leg not quoted on its side yet: the next bar
     }
     entered_ = true;
-    if (setting_.model == 1) {
-        const double edge = heston_edge(options);
+    if (setting_.model != 0) {
+        const double edge = smile_edge(options);
         if (std::isnan(edge) || edge < setting_.min_edge) {
-            write_log(std::format("Minute {}: Heston edge {:.2f} USD a unit, under {:.2f}: no "
-                                  "fill",
+            write_log(std::format("Minute {}: smile edge {:.2f} USD a unit, under {:.2f}: no fill",
                                   minute, edge, setting_.min_edge));
             done_ = true;
             return;
         }
-        write_log(std::format("Minute {}: Heston edge {:.2f} USD a unit", minute, edge));
+        write_log(std::format("Minute {}: smile edge {:.2f} USD a unit", minute, edge));
     }
     std::vector<model::Leg> legs;
     std::string names;
     double premium = 0.0;
     std::size_t next = 0;
     try {
-        for (const LegRule& rule : rules_) {
+        for (const model::LegRule& rule : rules_) {
             if (rule.ratio == 0) {
                 continue;
             }
@@ -250,7 +195,7 @@ void ComboStrategy::enter(int minute) {
             legs.push_back(leg(option.symbol(),
                                rule.ratio > 0 ? model::Side::BUY : model::Side::SELL,
                                std::abs(rule.ratio)));
-            premium += rule.ratio * mid(option) * multiplier_of(option) * setting_.quantity;
+            premium += rule.ratio * mid(option) * option.multiplier() * setting_.quantity;
             names += std::format("{}{:+d} {}", names.empty() ? "" : ", ", rule.ratio,
                                  option.symbol());
         }
@@ -269,22 +214,6 @@ void ComboStrategy::enter(int minute) {
                           setting_.quantity, premium));
 }
 
-void ComboStrategy::track_underlying(int minute) {
-    if (minute == last_minute_) {
-        return; // live: a tick a second, the returns are a minute's
-    }
-    last_minute_ = minute;
-    const std::optional<model::Underlying> underlying = portfolio()->underlying();
-    const double price = underlying ? underlying->mid() : 0.0;
-    if (price <= 0.0) {
-        return;
-    }
-    if (first_price_ <= 0.0) {
-        first_price_ = price;
-    }
-    last_price_ = price;
-}
-
 auto ComboStrategy::filters_allow(int minute) -> bool {
     const Setting& s = setting_;
     if (s.prev_rv_min > 0.0 || s.prev_rv_max < 100.0) {
@@ -297,10 +226,13 @@ auto ComboStrategy::filters_allow(int minute) -> bool {
         }
     }
     if (s.move_min > 0.0 || s.move_max < 100.0) {
-        if (first_price_ <= 0.0) {
+        const double open = portfolio()->day_open();
+        const std::optional<model::Underlying> u = underlying();
+        const double price = u ? u->mid() : 0.0;
+        if (open <= 0.0 || price <= 0.0) {
             return false; // no price yet: the next bar
         }
-        const double move = std::abs(last_price_ / first_price_ - 1.0) * 100.0;
+        const double move = std::abs(price / open - 1.0) * 100.0;
         if (move < s.move_min || move > s.move_max) {
             write_log(std::format("Minute {}: the move since the open {:.3f}% is not within "
                                   "{:g}..{:g}%: no combo today",
@@ -313,7 +245,8 @@ auto ComboStrategy::filters_allow(int minute) -> bool {
 }
 
 void ComboStrategy::close_in_the_money(int minute) {
-    const double price = last_price_;
+    const std::optional<model::Underlying> u = underlying();
+    const double price = u ? u->mid() : 0.0;
     std::vector<model::OptionPosition> in_the_money;
     std::string names;
     for (const auto& [symbol, position] : holding()->options) {
@@ -353,7 +286,6 @@ void ComboStrategy::on_timer() {
     if (minute < 1 || minute > 390) {
         return;
     }
-    track_underlying(minute);
     if (has_active_order()) {
         return;
     }

@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * A day's data in files, read as numbers: the day file (data/<ROOT>/<ROOT>-YYYY-MM/<day>.parquet)
+ * A day's data in files, read as numbers: the day file (data/backtest/<ROOT>/<ROOT>-YYYY-MM/<day>.parquet)
  * as the conversion writes it, and the day as the backtest cache stores it (data/cache/days, a
  * file for the day and one for each chain loaded). What a day makes of the numbers is
  * HistoricalData's.
@@ -27,7 +27,7 @@ namespace adapters {
 // ---- What the files hold
 
 /**
- * A day file (data/<ROOT>/<ROOT>-YYYY-MM/<day>.parquet) as it is: its rows in time order (as
+ * A day file (data/backtest/<ROOT>/<ROOT>-YYYY-MM/<day>.parquet) as it is: its rows in time order (as
  * written within a time), each an option's quote at a time with the underlying's at that time;
  * and the rows of each time. A null price or size is 0; a null underlying price is NaN (none at
  * that row).
@@ -60,11 +60,11 @@ struct ParquetQuotes {
  * its parent from build/). */
 std::expected<ParquetQuotes, std::string> read_parquet_quotes(const std::string& path);
 
-/** The trading day a file holds, from its name (data/SPY/SPY-2025-03/20250303.parquet); none when
+/** The trading day a file holds, from its name (data/backtest/SPY/SPY-2025-03/20250303.parquet); none when
  * the name is not a date. */
 std::optional<std::chrono::year_month_day> day_of_file(const std::string& file);
 
-/** The portfolio a file is of: its folder's (data/<PORTFOLIO>/<PORTFOLIO>-YYYY-MM/<day>), or
+/** The portfolio a file is of: its folder's (data/backtest/<PORTFOLIO>/<PORTFOLIO>-YYYY-MM/<day>), or
  * the name's (backtest_<PORTFOLIO>_<start>_<end>.parquet). */
 std::string portfolio_of_file(const std::string& file);
 
@@ -143,10 +143,18 @@ class StoredChain {
     void set_forward(std::size_t i, double value) {
         const_cast<double*>(values(kColumns))[i] = value;
     }
+    /** Minute i's smile (model::kSmileValues, as model::Frame::smile holds a chain's). */
+    [[nodiscard]] std::span<const double> smile(std::size_t i) const {
+        return {values(kColumns + 1) + (i * model::kSmileValues), model::kSmileValues};
+    }
+    [[nodiscard]] std::span<double> smile(std::size_t i) {
+        return {const_cast<double*>(values(kColumns + 1)) + (i * model::kSmileValues),
+                model::kSmileValues};
+    }
 
   private:
     StoredChain() = default;
-    /** Where column `column` starts (kColumns: the forward). */
+    /** Where column `column` starts (kColumns: the forward, then the smiles). */
     [[nodiscard]] const double* values(std::size_t column) const {
         return reinterpret_cast<const double*>(bytes_.get() + runs_[column]);
     }
@@ -154,7 +162,8 @@ class StoredChain {
     std::shared_ptr<std::byte> bytes_; // the file's
     std::size_t size_ = 0;
     std::size_t options_ = 0;
-    std::array<std::size_t, kColumns + 1> runs_{}; // where each column starts, then the forward
+    // Where each column starts, then the forward and the smiles.
+    std::array<std::size_t, kColumns + 2> runs_{};
 };
 
 /** The quotes (bid, ask and their sizes) of a chain's options (all of one expiry, `name` their
@@ -172,7 +181,7 @@ std::expected<void, std::string> read_chain_quotes(const std::string& path,
  * keeps it. */
 std::string stored_day(const std::string& cache_dir, const std::string& parquet_path);
 /** And one of its chains: <YYYYMMDD>-<chain>-<key>.chain beside it, keyed also by the format and
- * what it was priced with: the pricing code's fingerprint (pricing_fingerprint), the risk-free
+ * what it was priced with: the pricing code's fingerprint (pricing::fingerprint), the risk-free
  * rate and the IV's price. */
 std::string stored_chain(const std::string& cache_dir, const std::string& parquet_path,
                          std::string_view chain, std::uint64_t pricing, double risk_free_rate,

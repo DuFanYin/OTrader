@@ -6,6 +6,9 @@ if(BUILD_BACKTEST)
   target_link_libraries(entry_backtest PRIVATE backtest nlohmann_json::nlohmann_json)
   optra_strategy_host(entry_backtest)
   optra_code_identity(entry_backtest ENGINE core CORE entry_backtest)
+
+  add_executable(entry_research entry_research.cpp)
+  target_link_libraries(entry_research PRIVATE research nlohmann_json::nlohmann_json)
 endif()
 
 # Live: one process. BUILD_GATEWAY chooses IbGateway over no broker.
@@ -63,7 +66,7 @@ if(BUILD_GATEWAY OR BUILD_MARKETDATA OR BUILD_LIVE_GRPC)
 endif()
 
 # The programs at the build directory's root, where everything runs them.
-foreach(exe entry_backtest entry_live entry_simulate)
+foreach(exe entry_backtest entry_live entry_simulate entry_research)
   if(TARGET ${exe})
     set_target_properties(${exe} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
   endif()

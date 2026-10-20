@@ -1,8 +1,8 @@
 #include "core/strategy/strategy_engine.hpp"
 #include "core/bookkeeping/bookkeeping_engine.hpp"
-#include "core/market_data/market_data_engine.hpp"
 #include "model/order_builder.hpp"
 #include "model/portfolios.hpp"
+#include "model/symbol.hpp"
 #include "strategy/strategy_context.hpp"
 #include "strategy/strategy_registry.hpp"
 #include "strategy/strategy.hpp"
@@ -22,6 +22,12 @@ namespace {
 /** What a hedge order's reference starts with, its strategy's name after: how a hedge is told from
  * the strategy's own orders. */
 constexpr std::string_view kHedgeReference = "Hedge_";
+
+/** Sorted, each once. */
+void make_set(std::vector<std::string>& values) {
+    std::ranges::sort(values);
+    values.erase(std::ranges::unique(values).begin(), values.end());
+}
 } // namespace
 
 /** The engine as one hosted strategy sees it. */
@@ -47,12 +53,18 @@ class StrategyEngine::Context final : public strategy::StrategyContext {
     }
     void unregister_hedging() override { hosted_.hedging.reset(); }
     void subscribe_chains(std::span<const std::string> chains) override {
-        engine_.market_data_.subscribe_chains(hosted_.record.name, chains);
+        engine_.subscribe(hosted_, chains);
+    }
+    bool subscribed(std::string_view chain) const override {
+        return std::ranges::contains(hosted_.chains, chain);
     }
     void write_log(const std::string& msg, utilities::LogLevel level) const override {
         engine_.write_log(hosted_, msg, level);
     }
     void set_error(const std::string& msg) override { engine_.set_error(hosted_, msg); }
+    void write_value(std::string_view name, double value) override {
+        hosted_.values.insert_or_assign(std::string(name), value);
+    }
 
   private:
     StrategyEngine& engine_;
@@ -62,9 +74,9 @@ class StrategyEngine::Context final : public strategy::StrategyContext {
 
 StrategyEngine::StrategyEngine(utilities::Logger* logger,
                                const model::Portfolios& portfolios, BookkeepingEngine& book,
-                               MarketDataEngine& market_data, Callbacks callbacks)
+                               Callbacks callbacks)
     : logger_(logger), log_(logger, "Strategy"), portfolios_(portfolios), bookkeeping_(book),
-      market_data_(market_data), callbacks_(std::move(callbacks)) {}
+      callbacks_(std::move(callbacks)) {}
 
 StrategyEngine::~StrategyEngine() = default;
 
@@ -148,7 +160,7 @@ auto StrategyEngine::remove_strategy(const std::string& strategy_name) -> bool {
     enter(*h, model::StrategyState::Removed);
     std::erase_if(hosted_, [h](const std::unique_ptr<Hosted>& each) { return each.get() == h; });
     bookkeeping_.remove_strategy(name);
-    market_data_.unsubscribe_chains(name);
+    wanted_changed();
     return true;
 }
 
@@ -207,7 +219,13 @@ void StrategyEngine::stop_strategy(const std::string& strategy_name) {
         throw std::logic_error(strategy_name + " is not running");
     }
     enter(h, model::StrategyState::Inited);
-    h.strategy->on_stop();
+    try {
+        h.strategy->on_stop();
+    } catch (const std::exception& e) {
+        // Not passed on: a halt stops every strategy, and one that throws must not keep the others
+        // running.
+        set_error(h, std::format("on_stop threw: {}: stopped, its positions stay", e.what()));
+    }
 }
 
 void StrategyEngine::make_again(const std::string& strategy_name) {
@@ -215,8 +233,12 @@ void StrategyEngine::make_again(const std::string& strategy_name) {
     h.strategy = strategy::StrategyRegistry::create(*h.context);
     if (h.record.state == model::StrategyState::Inited || h.record.state == model::StrategyState::Running) {
         h.day = {};
-        h.strategy->on_init();
-        day(h);
+        try {
+            h.strategy->on_init();
+            day(h);
+        } catch (const std::exception& e) {
+            set_error(h, std::string("init threw: ") + e.what());
+        }
     }
 }
 
@@ -279,6 +301,12 @@ auto StrategyEngine::error(const std::string& strategy_name) const -> std::strin
     return h != nullptr ? h->error : std::string{};
 }
 
+auto StrategyEngine::take_values(const std::string& strategy_name)
+    -> std::map<std::string, double, std::less<>> {
+    Hosted* h = hosted(strategy_name);
+    return h != nullptr ? std::exchange(h->values, {}) : std::map<std::string, double, std::less<>>{};
+}
+
 auto StrategyEngine::errors() const -> std::vector<std::pair<std::string, std::string>> {
     std::vector<std::pair<std::string, std::string>> out;
     for (const auto& h : hosted_) {
@@ -293,6 +321,63 @@ auto StrategyEngine::find_strategy(const std::string& strategy_name) const
     -> strategy::Strategy* {
     const Hosted* h = hosted(strategy_name);
     return h != nullptr ? h->strategy.get() : nullptr;
+}
+
+// ---- What they want streamed
+
+void StrategyEngine::subscribe_chains(const std::string& strategy_name,
+                                      std::span<const std::string> chains) {
+    if (Hosted* h = hosted(strategy_name)) {
+        subscribe(*h, chains);
+    }
+}
+
+void StrategyEngine::subscribe(Hosted& h, std::span<const std::string> chains) {
+    h.chains.assign(chains.begin(), chains.end());
+    wanted_changed();
+}
+
+void StrategyEngine::note_ordered(const model::OrderRequest& request) {
+    bool added = false;
+    for (const model::Leg& leg : request.legs) {
+        if (model::parse_option_symbol(leg.symbol) && ordered_options_.insert(leg.symbol).second) {
+            added = true;
+        }
+    }
+    if (added) {
+        wanted_changed();
+    }
+}
+
+void StrategyEngine::clear_ordered() {
+    ordered_options_.clear();
+    wanted_changed();
+}
+
+void StrategyEngine::set_held_options(std::span<const std::string> options) {
+    held_options_.assign(options.begin(), options.end());
+    wanted_changed();
+}
+
+void StrategyEngine::wanted_changed() {
+    auto wanted = std::make_shared<Wanted>();
+    for (const auto& h : hosted_) {
+        wanted->subscribed.insert(wanted->subscribed.end(), h->chains.begin(), h->chains.end());
+    }
+    make_set(wanted->subscribed);
+    wanted->options = held_options_;
+    wanted->options.insert(wanted->options.end(), ordered_options_.begin(),
+                           ordered_options_.end());
+    make_set(wanted->options);
+    wanted->chains = wanted->subscribed;
+    for (const std::string& option : wanted->options) {
+        if (const std::optional<model::OptionId> id = model::parse_option_symbol(option)) {
+            wanted->chains.push_back(model::chain_symbol(id->root, id->expiry));
+        }
+    }
+    make_set(wanted->chains);
+    wanted_.store(std::move(wanted), std::memory_order_release);
+    ++wanted_changes_;
 }
 
 // ---- Its hedging
@@ -310,8 +395,9 @@ void StrategyEngine::register_hedging(Hosted& h, const Hedging& hedging) {
                   std::format("Hedges {}, which has no {} contract to hedge with: sync the "
                               "contracts",
                               h.record.portfolio,
-                              h.portfolio->hedge_symbol.empty() ? "underlying"
-                                                                : h.portfolio->hedge_symbol),
+                              h.portfolio->hedge_symbol().empty()
+                                  ? std::string_view("underlying")
+                                  : h.portfolio->hedge_symbol()),
                   utilities::WARNING);
     }
 }

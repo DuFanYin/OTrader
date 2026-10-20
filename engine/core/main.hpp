@@ -16,9 +16,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
-#include <set>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -38,7 +38,7 @@ class Main final {
   public:
     /** Factories, since adapters need Main's log and portfolios. */
     struct Ports {
-        /** None: the latest snapshot's time (backtest). */
+        /** None: the time set_time sets (backtest: each bar's). */
         std::function<model::DateTime()> clock;
         std::function<std::unique_ptr<Database>(utilities::Logger*)> database;
         std::function<std::unique_ptr<Gateway>(utilities::Logger*,
@@ -51,7 +51,7 @@ class Main final {
         /** Reads the values by day its strategies read (data/daily): at the start and at each
          * roll_day, so live sees each close's. None: none. */
         std::function<model::DailyTable()> daily;
-        /** None: its own (live). A backtest's is its replay's (backtest::Replay), which rolls each
+        /** None: its own (live). A backtest's is its replay's (adapters::Replay), which rolls each
          * day's contracts in and applies each bar's quotes. */
         model::Portfolios* portfolios = nullptr;
     };
@@ -91,7 +91,9 @@ class Main final {
 
     void write_log(const std::string& msg, utilities::LogLevel level = utilities::INFO) const;
     /** Everything takes time from here, never the system clock, so backtests replay exactly. */
-    model::DateTime now() const { return clock_ ? clock_() : snapshot_time_; }
+    model::DateTime now() const { return clock_ ? clock_() : time_; }
+    /** The time now() gives without a clock: the assembly's (a backtest's bar). Event thread. */
+    void set_time(model::DateTime time) { time_ = time; }
 
     // ---- The event thread's: the event loop's handler and the assembly call these there
 
@@ -99,10 +101,10 @@ class Main final {
     [[nodiscard]] std::string latency_report() const;
     void process_event(const model::Event& event);
     /** The quotes into their portfolio, which takes over the snapshot's values (leaving it a buffer
-     * to reuse), then snapshot_applied (live). An unknown portfolio's only moves the time. */
+     * to reuse), then snapshot_applied (live). An unknown portfolio's are dropped. */
     void apply_snapshot(model::PortfolioSnapshot& snapshot);
-    /** The frame's quotes are in its portfolio (a backtest applies them itself): the engine's
-     * time advances and the strategies are told. */
+    /** The frame's quotes are in its portfolio (a backtest applies them itself): the strategies
+     * are told. */
     void snapshot_applied(const model::Frame& frame);
     /** For assemblies whose storage outlives them: the strategies saved, hosted again. */
     void restore();
@@ -134,7 +136,8 @@ class Main final {
     void contracts_rolled(const std::string& portfolio, std::span<const std::string> dropped);
     /** Portfolio name, max DTE to sync. */
     using Synced = std::pair<std::string, int>;
-    /** Sync and roll in, serialized. Throws if a sync fails, leaving the old contracts. */
+    /** Sync, save and roll in, serialized. Throws if a sync fails, leaving the old contracts, in
+     * storage too. */
     std::vector<model::Contract> roll_day(std::span<const Synced> portfolios);
 
     // ---- Strategies (operator actions are persisted)
@@ -216,12 +219,42 @@ class Main final {
 
     /** Settles expired options first so the strategies, metrics and hedges see what is left. */
     void on_timer(model::DateTime now);
-    /** Settles at the underlying's closing price where the portfolio has it. */
+    /** Settles at the underlying's closing price where the portfolio has it; the closes it does
+     * not have asked of the source, until it answers. */
     void settle_due(model::DateTime now);
     /** Closes share-settled options in their flatten window. */
     void flatten_expiring(model::DateTime now);
     /** Settles what expired on `day` at the underlying's close the source gave (event thread). */
     void settle_at(const std::string& underlying, std::chrono::year_month_day day, double close);
+    /** A portfolio the engine first saw after its first five minutes today (it started late):
+     * its underlying's open, high and low until now asked of the source, until it answers. */
+    void ask_day_ranges(model::DateTime now);
+    /** What the source gave for them, into each portfolio of the underlying (event thread). */
+    void restore_day(const std::string& underlying, std::chrono::year_month_day day, double open,
+                     double high, double low);
+
+    /**
+     * What was asked of the source, by (underlying, day), until answered. An answer may never come
+     * (IB tells its errors to no one): each is asked again a minute after, then after twice the
+     * wait before, up to kAtMost.
+     */
+    class Asked {
+      public:
+        using Key = std::pair<std::string, std::chrono::year_month_day>;
+        static constexpr std::chrono::minutes kAtMost{30};
+        /** Never asked, or its wait is over. */
+        bool due(const Key& key, model::DateTime now) const;
+        /** Asked now; the times it was, this one counted. */
+        int asked(const Key& key, model::DateTime now);
+
+      private:
+        struct Asking {
+            model::DateTime again;
+            std::chrono::minutes wait{1};
+            int times = 0;
+        };
+        std::map<Key, Asking> asking_;
+    };
 
     void save_risk();
     /** Market data first, storage last. */
@@ -236,24 +269,23 @@ class Main final {
     EventLoop event_loop_{&log_, [this](const model::Event& e) { process_event(e); },
                           [this] { return latency_report(); }};
     std::unique_ptr<Gateway> gateway_;
-    BookkeepingEngine bookkeeping_engine_{&log_};
+    BookkeepingEngine bookkeeping_engine_{&log_, portfolios_};
     RiskEngine risk_engine_{&log_, portfolios_, bookkeeping_engine_};
-    MarketDataEngine market_data_;
     std::function<model::DailyTable()> read_daily_;
     std::shared_ptr<const model::DailyTable> daily_; // what strategy_engine_ reads
-    // The closes asked of the source (settle_due), by underlying and day: once each.
-    std::set<std::pair<std::string, std::chrono::year_month_day>> asked_closes_;
     StrategyEngine strategy_engine_{
         &log_,
         portfolios_,
         bookkeeping_engine_,
-        market_data_,
         {.send_order = [this](const model::StrategyRecord& strategy,
                               const model::OrderRequest& req) { return send_order(strategy, req); },
          .cancel_order = [this](const model::CancelRequest& req) { cancel_order(req); },
          .state_changed = [this](const model::StrategyRecord& r) { database_->save_strategy(r); }}};
+    MarketDataEngine market_data_; // reads what strategy_engine_ wants streamed, on its thread
 
-    model::DateTime snapshot_time_{}; // the backtest's clock
+    model::DateTime time_{}; // set_time's: the clock without one
+    Asked ranges_asked_;
+    Asked closes_asked_;
     std::mutex roll_mutex_;
     std::mutex connect_mutex_; // the trading days' connect and the operator's
     const bool broker_check_warn_only_;

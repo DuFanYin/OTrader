@@ -4,7 +4,6 @@
  * for SPX) at equal value. Once a bar, every timer_trigger bars, whatever the strategy's state.
  */
 #include "core/bookkeeping/bookkeeping_engine.hpp"
-#include "core/market_data/market_data_engine.hpp"
 #include "core/strategy/strategy_engine.hpp"
 #include "model/portfolios.hpp"
 #include "strategy/strategy_registry.hpp"
@@ -35,18 +34,27 @@ struct Recorder final : utilities::Logger {
     std::vector<utilities::LogRecord> records;
 };
 
-/** One strategy, "s", on SPY; what its hedging sends. */
+/** An index whose hedge instrument is not loaded. */
+constexpr model::PortfolioSpec kUnhedged{.name = "UNHEDGED",
+                                         .underlying = "SPX",
+                                         .underlying_product = model::Product::INDEX,
+                                         .hedge = "DIA"};
+
+/** One strategy, "s", on a portfolio of no spec, "S", whose underlying is SPY (what hedges trade
+ * until it is given a hedge instrument); what its hedging sends. */
 struct Hedge : ::testing::Test {
     Hedge() {
         spy.symbol = "SPY";
         spy.multiplier = 1.0;
-        structure.ensure_portfolio("SPY");
+        structure.ensure_portfolio("S");
         structure.ensure_portfolio("bare"); // no contract loaded
-        structure.load_contracts(std::vector{spy});
-        engine.add_strategy({.name = "s", .class_name = "HedgeProbe", .portfolio = "SPY"});
+        portfolio().set_underlying(spy);
+        engine.add_strategy({.name = "s", .class_name = "HedgeProbe", .portfolio = "S"});
     }
 
-    model::Portfolio& portfolio() { return *structure.find_portfolio("SPY"); }
+    model::Portfolio& portfolio(const std::string& name = "S") {
+        return *structure.find_portfolio(name);
+    }
     strategy::Strategy& strategy(const std::string& name = "s") {
         return *engine.find_strategy(name);
     }
@@ -54,11 +62,11 @@ struct Hedge : ::testing::Test {
         book.ensure_holding(name).summary.delta = d;
     }
     /** The next bar: the portfolio's quotes as they are, a minute on. */
-    auto bar() -> std::vector<model::OrderRequest> {
-        model::PortfolioSnapshot moved = portfolio().snapshot();
-        moved.assign(portfolio().frame());
+    auto bar(const std::string& name = "S") -> std::vector<model::OrderRequest> {
+        model::PortfolioSnapshot moved = portfolio(name).snapshot();
+        moved.assign(portfolio(name).frame());
         moved.datetime = open + minutes(bars++);
-        portfolio().apply(moved);
+        portfolio(name).apply(moved);
         engine.run_hedging();
         return std::exchange(sent, {});
     }
@@ -81,11 +89,10 @@ struct Hedge : ::testing::Test {
     Recorder logger;
     model::Contract spy;
     model::Portfolios structure;
-    core::BookkeepingEngine book;
-    core::MarketDataEngine market_data{nullptr, structure, nullptr, {}};
+    core::BookkeepingEngine book{nullptr, structure};
     std::vector<model::OrderRequest> sent;
     std::vector<model::CancelRequest> cancels;
-    core::StrategyEngine engine{&logger, structure, book, market_data,
+    core::StrategyEngine engine{&logger, structure, book,
                                 {.send_order =
                                      [this](const model::StrategyRecord&, const model::OrderRequest& r) {
                                          sent.push_back(r);
@@ -170,10 +177,13 @@ TEST_F(Hedge, AnIndexIsHedgedWithWhatTradesAtEqualValue) {
 TEST_F(Hedge, NothingWithoutTheInstrumentToHedgeWith) {
     model::Contract spx;
     spx.symbol = "SPX";
-    portfolio().set_underlying(spx);
-    portfolio().hedge_symbol = "DIA"; // what it hedges with, its contract not loaded
-    EXPECT_FALSE(portfolio().hedge());
-    EXPECT_TRUE(hedge(50.0, 0).empty()); // not the underlying in its place
+    structure.ensure_portfolio(kUnhedged);
+    structure.load_contracts(std::vector{spx}); // DIA's not loaded
+    EXPECT_FALSE(portfolio("UNHEDGED").hedge());
+    engine.add_strategy({.name = "u", .class_name = "HedgeProbe", .portfolio = "UNHEDGED"});
+    strategy("u").register_hedging(1, 0, 0);
+    delta(50.0, "u");
+    EXPECT_TRUE(bar("UNHEDGED").empty()); // not the underlying in its place
 }
 
 TEST_F(Hedge, EveryTriggerBarsOnceABar) {
@@ -191,7 +201,7 @@ TEST_F(Hedge, EveryTriggerBarsOnceABar) {
 
 TEST_F(Hedge, OnlyAStrategyThatHedgesWhileItDoes) {
     engine.add_strategy(
-        {.name = "other", .class_name = "HedgeProbe", .portfolio = "SPY"}); // never hedges
+        {.name = "other", .class_name = "HedgeProbe", .portfolio = "S"}); // never hedges
     delta(50.0, "other");
     EXPECT_TRUE(bar().empty());
     EXPECT_EQ(engine.hedging("other"), nullptr);
@@ -210,7 +220,7 @@ TEST_F(Hedge, OnlyAStrategyThatHedgesWhileItDoes) {
 TEST_F(Hedge, ItsHedgingGoesWithTheStrategy) {
     strategy().register_hedging(1, 0, 0);
     ASSERT_TRUE(engine.remove_strategy("s"));
-    engine.restore_strategy({.name = "s", .class_name = "HedgeProbe", .portfolio = "SPY"});
+    engine.restore_strategy({.name = "s", .class_name = "HedgeProbe", .portfolio = "S"});
     EXPECT_EQ(engine.hedging("s"), nullptr);
 }
 

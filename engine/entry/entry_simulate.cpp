@@ -27,7 +27,6 @@ namespace {
 constexpr const char* kDefaultListenAddress = "localhost:50051";
 /** After the last quote, the engine keeps serving this long, then stops. */
 constexpr auto kAfterSession = std::chrono::minutes(15);
-constexpr double kFeeRate = 1.2; // USD a contract, as the backtest's default
 
 struct SimulateOptions {
     std::string listen_address = kDefaultListenAddress;
@@ -40,7 +39,7 @@ void print_usage(std::FILE* out) {
     std::print(out,
                "Usage: entry_simulate [--listen ADDRESS] [--resume] [--strategies DIR]... DAY.parquet...\n"
                "  Runs the live engine on a simulated market, served like entry_live: the days\n"
-               "  (the backtest's Parquet, under data/<PORTFOLIO>/; one per portfolio) replayed\n"
+               "  (the backtest's Parquet, under data/backtest/<PORTFOLIO>/; one per portfolio) replayed\n"
                "  from their first minute at the wall clock's pace, orders filled at their quotes.\n"
                "  The contracts come from the files; the account is kept in $OPTRA_DB.account.json.\n"
                "  Stops on SIGINT / SIGTERM, or 15 minutes after the last quote.\n"
@@ -87,7 +86,7 @@ auto run(const SimulateOptions& options) -> int {
         auto made = live::make_main(
             [&](utilities::Logger*, const model::Portfolios& portfolios) {
                 auto gateway = std::make_unique<adapters::SimulatedGateway>(
-                    portfolios, options.days, account_file(), clock, kFeeRate);
+                    portfolios, options.days, account_file(), clock);
                 venue = gateway.get();
                 return gateway;
             },

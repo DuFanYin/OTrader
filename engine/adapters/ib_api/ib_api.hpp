@@ -3,6 +3,7 @@
 /** Shared by IbGateway and IbMarketData: IB settings, contract translation, the connection. */
 
 #include "model/object.hpp"
+#include "model/portfolio_spec.hpp"
 #include "utilities/log_level.hpp"
 #include "utilities/log_source.hpp"
 #include "utilities/mpsc_queue.hpp"
@@ -86,6 +87,13 @@ constexpr auto find_listing(std::string_view symbol) -> const IbListing* {
     const auto it = std::ranges::find(kIbListings, symbol, &IbListing::symbol);
     return it != kIbListings.end() ? &*it : nullptr;
 }
+
+// Every portfolio's underlying (an index as IND, a stock as STK) and hedge is listed here.
+static_assert(std::ranges::all_of(model::kPortfolios, [](const model::PortfolioSpec& p) {
+    const IbListing* underlying = find_listing(p.underlying);
+    return underlying != nullptr && find_listing(p.hedge) != nullptr &&
+           (underlying->sec_type == "IND") == (p.underlying_product == model::Product::INDEX);
+}));
 
 /** The platform's symbol for an IB contract. */
 std::string platform_symbol(const Contract& contract);

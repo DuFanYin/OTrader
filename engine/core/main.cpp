@@ -1,10 +1,9 @@
 #include "core/main.hpp"
 
 #include "model/order_builder.hpp"
+#include "model/session_calendar.hpp"
 #include "model/symbol.hpp"
 #include "model/utility.hpp"
-#include "strategy/strategy_registry.hpp"
-#include "strategy/strategy.hpp"
 #include "utilities/text.hpp"
 
 #include <algorithm>
@@ -28,6 +27,12 @@ template <typename T> auto payload(const model::Event& event) -> T* {
     return slot != nullptr ? *slot : nullptr;
 }
 
+/** For a line saying something was asked of the source: how many times, after the first. */
+auto again(int times) -> std::string {
+    return times > 1 ? std::format(" (again: no answer to the {} before)", times - 1)
+                     : std::string{};
+}
+
 } // namespace
 
 Main::Main(Ports ports, utilities::LogLevel log_level)
@@ -36,7 +41,7 @@ Main::Main(Ports ports, utilities::LogLevel log_level)
       clock_(std::move(ports.clock)),
       database_(ports.database(&log_)),
       gateway_(ports.gateway(&log_, portfolios_)),
-      market_data_(&log_, portfolios_, std::move(ports.market_data),
+      market_data_(&log_, portfolios_, strategy_engine_, std::move(ports.market_data),
                    [this](const model::PortfolioSnapshot& s) { event_loop_.put_snapshot(s); }),
       broker_check_warn_only_(ports.broker_check_warn_only) {
     risk_engine_.restore_limits(database_->load_settings());
@@ -53,6 +58,13 @@ Main::Main(Ports ports, utilities::LogLevel log_level)
         event_loop_.put_event(model::Event(
             model::EventType::Task,
             new model::Task([this, underlying, day, close] { settle_at(underlying, day, close); })));
+    });
+    market_data_.on_day_range([this](const std::string& underlying, std::chrono::year_month_day day,
+                                     double open, double high, double low) {
+        event_loop_.put_event(model::Event(
+            model::EventType::Task, new model::Task([this, underlying, day, open, high, low] {
+                restore_day(underlying, day, open, high, low);
+            })));
     });
     gateway_->set_callbacks([this](const model::Order& o) { event_loop_.put_order(o); },
                             [this](const model::Fill& t) { event_loop_.put_fill(t); });
@@ -105,13 +117,10 @@ void Main::apply_snapshot(model::PortfolioSnapshot& snapshot) {
             portfolios_.find_portfolio(std::string(snapshot.portfolio_name))) {
         portfolio->apply(snapshot);
         snapshot_applied(portfolio->frame());
-    } else {
-        snapshot_time_ = snapshot.datetime;
     }
 }
 
 void Main::snapshot_applied(const model::Frame& frame) {
-    snapshot_time_ = frame.datetime;
     strategy_engine_.on_snapshot(frame.portfolio_name);
 }
 
@@ -133,7 +142,13 @@ void Main::order_changed(const model::Order& order) {
     strategy_engine_.on_order(order);
 }
 
-void Main::book_fill(const model::Fill& fill) {
+void Main::book_fill(const model::Fill& reported) {
+    std::optional<model::Fill> stamped;
+    if (reported.datetime == model::DateTime{}) { // IB's carry none: stamped as an order sent is
+        stamped = reported;
+        stamped->datetime = now();
+    }
+    const model::Fill& fill = stamped ? *stamped : reported;
     const std::string* booked = bookkeeping_engine_.book_fill(fill);
     if (booked == nullptr) {
         return; // booked already: IB repeats today's fills when the engine reconnects
@@ -148,7 +163,7 @@ void Main::book_fill(const model::Fill& fill) {
     }
     database_->save_fill(strategy_name, fill);
     if (bookkeeping_engine_.take_held_options_changed()) {
-        market_data_.set_held_options(bookkeeping_engine_.held_options());
+        strategy_engine_.set_held_options(bookkeeping_engine_.held_options());
     }
     strategy_engine_.on_fill(fill);
     if (const std::optional<model::Order> end = bookkeeping_engine_.take_released(fill)) {
@@ -229,8 +244,11 @@ void Main::on_timer(model::DateTime now) {
                   utilities::WARNING);
         order_changed(end);
     }
-    risk_engine_.start_bar(now);
+    for (const auto& [s, portfolio] : strategy_engine_.strategies_and_portfolios()) {
+        risk_engine_.start_bar(s.name, portfolio, now);
+    }
     settle_due(now);
+    ask_day_ranges(now);
     flatten_expiring(now);
     strategy_engine_.on_timer();
     for (const auto& [s, portfolio] : strategy_engine_.strategies_and_portfolios()) {
@@ -260,23 +278,14 @@ void Main::settle_due(model::DateTime now) {
         }
     }
     // What waits for a close the engine did not see (it was not running): asked of the source,
-    // once each, and settled when it answers (settle_at).
-    for (const auto& [name, options] : bookkeeping_engine_.unsettled_options()) {
-        const model::StrategyRecord* s = strategy_engine_.find_record(name);
-        const model::Portfolio* portfolio = s != nullptr ? find_portfolio(s->portfolio) : nullptr;
-        if (portfolio == nullptr) {
-            continue;
-        }
-        for (const std::string& symbol : options) {
-            const auto id = model::parse_option_symbol(symbol);
-            if (!id) {
-                continue;
-            }
-            const std::pair asked{portfolio->underlying_symbol, id->expiry};
-            if (!asked_closes_.contains(asked) && market_data_.ask_close(asked.first, asked.second)) {
-                asked_closes_.insert(asked);
-                write_log(std::format("Asked for {}'s close of {} to settle {}'s expired options",
-                                      asked.first, asked.second, name),
+    // and settled when it answers (settle_at).
+    for (const auto& [s, portfolio] : strategy_engine_.strategies_and_portfolios()) {
+        for (const Asked::Key& close : bookkeeping_engine_.closes_awaited(s.name, portfolio)) {
+            if (closes_asked_.due(close, now) &&
+                market_data_.ask_close(close.first, close.second)) {
+                const int times = closes_asked_.asked(close, now);
+                write_log(std::format("Asked for {}'s close of {} to settle {}'s expired options{}",
+                                      close.first, close.second, s.name, again(times)),
                           utilities::INFO);
             }
         }
@@ -285,13 +294,27 @@ void Main::settle_due(model::DateTime now) {
 
 void Main::use_daily(const model::DailyTable* daily) {
     strategy_engine_.use_daily(daily);
-    risk_engine_.use_daily(daily);
+    bookkeeping_engine_.use_daily(daily);
+    if (daily == nullptr) {
+        return;
+    }
+    // Live prices on the Treasury curve of the day before, as a backtest's day file carries it.
+    const std::chrono::year_month_day today = model::kNyse.date_of(now());
+    if (auto curve = model::RateCurve::treasury(*daily, today)) {
+        write_log(std::format("Pricing on the Treasury curve before {}: {:.4f} at 1 month to {:.4f}"
+                              " at 2 years",
+                              today, curve->rates.front(), curve->rates.back()),
+                  utilities::INFO);
+        market_data_.use_rates(*std::move(curve));
+    } else {
+        write_log("No Treasury curve in the values by day: pricing at 5%", utilities::WARNING);
+    }
 }
 
 void Main::settle_at(const std::string& underlying, std::chrono::year_month_day day,
                      double close) {
     for (const auto& [s, portfolio] : strategy_engine_.strategies_and_portfolios()) {
-        if (portfolio.underlying_symbol == underlying &&
+        if (portfolio.underlying_symbol() == underlying &&
             settle(s.name, day, close, portfolio) > 0) {
             write_log(std::format("{}: settled what expired {} at {}'s close, {}", s.name, day,
                                   underlying, close),
@@ -301,20 +324,70 @@ void Main::settle_at(const std::string& underlying, std::chrono::year_month_day 
     settle_due(now()); // what waits is known again now, not at the next quote
 }
 
+void Main::ask_day_ranges(model::DateTime now) {
+    for (const auto& [s, portfolio] : strategy_engine_.strategies_and_portfolios()) {
+        if (portfolio.saw_open() || portfolio.day_first_minute() < 1) {
+            continue;
+        }
+        const Asked::Key day{std::string(portfolio.underlying_symbol()),
+                             portfolio.calendar().date_of(portfolio.datetime())};
+        if (ranges_asked_.due(day, now) && market_data_.ask_day_range(day.first, day.second)) {
+            const int times = ranges_asked_.asked(day, now);
+            write_log(std::format("{} first quoted {} minutes after the open: asked for {}'s open,"
+                                  " high and low of {}{}",
+                                  portfolio.name, portfolio.day_first_minute(), day.first,
+                                  day.second, again(times)),
+                      utilities::INFO);
+        }
+    }
+}
+
+auto Main::Asked::due(const Key& key, model::DateTime now) const -> bool {
+    const auto found = asking_.find(key);
+    return found == asking_.end() || now >= found->second.again;
+}
+
+auto Main::Asked::asked(const Key& key, model::DateTime now) -> int {
+    Asking& a = asking_[key];
+    if (a.times > 0) {
+        a.wait = std::min(a.wait * 2, kAtMost);
+    }
+    a.again = now + a.wait;
+    return ++a.times;
+}
+
+void Main::restore_day(const std::string& underlying, std::chrono::year_month_day day,
+                       double open, double high, double low) {
+    for (const auto& [s, portfolio] : strategy_engine_.strategies_and_portfolios()) {
+        model::Portfolio* p = portfolios_.find_portfolio(portfolio.name);
+        if (p == nullptr || p->underlying_symbol() != underlying || p->saw_open()) {
+            continue;
+        }
+        p->restore_day(day, open, high, low);
+        if (p->saw_open()) {
+            write_log(std::format("{}: the day's open {}, high {}, low {} from the source",
+                                  p->name, p->day_open(), p->day_high(), p->day_low()),
+                      utilities::INFO);
+        }
+    }
+}
+
 void Main::flatten_expiring(model::DateTime now) {
     for (const auto& [s, portfolio] : strategy_engine_.strategies_and_portfolios()) {
         for (const auto& [combo, options] :
-             risk_engine_.positions_to_flatten(s.name, portfolio, now)) {
+             bookkeeping_engine_.positions_to_close(s.name, portfolio, now,
+                                                    risk_engine_.flatten_minutes())) {
             write_log(std::format("{}: closing {} before the close: it settles in shares today, or"
                                   " a call sold may be exercised for tomorrow's dividend",
                                   s.name, combo),
                       utilities::WARNING);
-            const auto order = model::closing_order(
+            auto order = model::closing_order(
                 options, [&](const std::string& symbol) { return portfolio.contract(symbol); });
             if (!order) {
                 write_log(std::format("{}: {}", s.name, order.error()), utilities::WARNING);
                 continue;
             }
+            order->reference = "Flatten_" + s.name; // the engine's, not the strategy's own
             (void)send_order(s, *order);
         }
     }
@@ -328,10 +401,10 @@ auto Main::send_order(const model::StrategyRecord& strategy, model::OrderRequest
     if (req.reference.empty()) {
         req.reference = "Strategy_" + strategy_name;
     }
-    market_data_.add_ordered_options(req);
     if (!risk_engine_.allow(strategy_name, strategy.portfolio, req, now())) {
         return {};
     }
+    strategy_engine_.note_ordered(req); // its quotes stream: the fill and the holding read them
     // Stored as sent (contract, legs) before any venue update, so that every fill finds its order.
     std::string order_id = gateway_->send_order(req);
     event_loop_.note_order_sent(); // live: the quote -> order latency
@@ -403,7 +476,7 @@ void Main::contracts_rolled(const std::string& portfolio, std::span<const std::s
                               dropped.size(), dropped.empty() ? "" : ": ", utilities::join(dropped)),
                   utilities::INFO);
         strategy_engine_.on_day(portfolio);
-        market_data_.clear_ordered_options();
+        strategy_engine_.clear_ordered();
     });
 }
 
@@ -411,7 +484,13 @@ auto Main::roll_day(std::span<const Synced> portfolios) -> std::vector<model::Co
     const std::scoped_lock lock(roll_mutex_);
     std::vector<std::pair<std::string, std::vector<model::Contract>>> synced;
     for (const auto& [portfolio, max_dte] : portfolios) {
-        synced.emplace_back(portfolio, sync_contracts(portfolio, max_dte)); // throws: none rolled
+        // Throws: none saved, none rolled.
+        synced.emplace_back(portfolio, gateway_->sync_contracts(portfolio, max_dte).get());
+    }
+    for (const auto& [portfolio, contracts] : synced) {
+        database_->save_contracts(contracts);
+        write_log(std::format("Synced {} {} contracts", contracts.size(), portfolio),
+                  utilities::INFO);
     }
     const bool streaming = market_data_.running();
     market_data_.stop(); // it prices the portfolios on its own thread
@@ -507,7 +586,7 @@ void Main::restore_strategy(const std::string& name) {
     event_loop_.on_event_thread([&] {
         strategy_engine_.restore_strategy(*it);
         rebook({name});
-        market_data_.set_held_options(bookkeeping_engine_.held_options());
+        strategy_engine_.set_held_options(bookkeeping_engine_.held_options());
     });
 }
 
@@ -553,7 +632,7 @@ void Main::restore() {
     for (const std::string& name : in_error) {
         strategy_engine_.set_error(name, "In error when the engine stopped: init it again");
     }
-    market_data_.set_held_options(bookkeeping_engine_.held_options());
+    strategy_engine_.set_held_options(bookkeeping_engine_.held_options());
     write_log(std::format("Restored {} strategies ({} inited); start them, or start the run"
                           " (resume)",
                           loaded.size(), to_init.size()),
@@ -704,7 +783,7 @@ auto Main::settle_expired(const std::string& portfolio, std::chrono::year_month_
         if (!expiry.ok() || price <= 0.0) {
             throw std::invalid_argument("Give the expiry date and the underlying's closing price");
         }
-        if (model::option_expiry_time(expiry) > now()) {
+        if (p->calendar().expiry_time(expiry) > now()) {
             throw std::invalid_argument(std::format("{:%F} has not closed yet", expiry));
         }
         int count = 0;

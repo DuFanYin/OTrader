@@ -11,6 +11,8 @@
 //   for_chunks(n, fn): call fn(i) for every i in [0, n), in any order, possibly
 //                      concurrently; return only when all calls have finished.
 
+#include "../kernel.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -27,10 +29,6 @@ struct Output {
     double std_error = 0.0;
     int    n_paths   = 0;
 };
-
-inline double payoff(double s, double k, bool is_call) {
-    return is_call ? std::max(s - k, 0.0) : std::max(k - s, 0.0);
-}
 
 // Solve the 3x3 normal equations A c = y with partial pivoting.
 inline bool solve3(std::array<std::array<double, 3>, 3> A, std::array<double, 3> y, std::array<double, 3>& c) {

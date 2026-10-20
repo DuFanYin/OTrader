@@ -10,6 +10,213 @@
 #include <span>
 #include <vector>
 
+namespace quant {
+
+int simulation_path(
+    int model_code,
+    int n_steps,
+    double dt,
+    double sigma,
+    double kappa,
+    double theta,
+    double x0,
+    std::span<double> out_values
+) {
+    std::mt19937_64 rng(7);
+    std::normal_distribution<double> z(0.0, 1.0);
+    const int n = std::max(n_steps, 1);
+    const double dtt = clamp_positive(dt);
+    ModelParams params{};
+    params.sigma = sigma;
+    params.kappa = kappa;
+    params.theta = theta;
+    auto model = build_model(
+        model_code == 1 ? ModelType::Vasicek : ModelType::GBM,
+        params
+    );
+
+    if (out_values.size() < static_cast<size_t>(n + 1)) return 0;
+    double x = x0;
+    out_values[0] = x;
+    for (int i = 0; i < n; ++i) {
+        x = model->step(x, i * dtt, dtt, z(rng));
+        out_values[i + 1] = x;
+    }
+    return n + 1;
+}
+
+int measure_density_path(
+    double mu,
+    double r,
+    double sigma,
+    double t,
+    int n_steps,
+    std::span<double> out_values
+) {
+    std::mt19937_64 rng(23);
+    std::normal_distribution<double> z(0.0, 1.0);
+    const int n = std::max(n_steps, 20);
+    const double s = clamp_positive(sigma);
+    const double tt = clamp_positive(t);
+    const double dt = tt / static_cast<double>(n);
+    const double theta_mpr = (mu - r) / s;
+    if (out_values.size() < static_cast<size_t>(n + 1)) return 0;
+
+    double w = 0.0;
+    out_values[0] = 1.0;
+    for (int i = 0; i < n; ++i) {
+        w += std::sqrt(dt) * z(rng);
+        out_values[i + 1] = std::exp(-theta_mpr * w - 0.5 * theta_mpr * theta_mpr * ((i + 1) * dt));
+    }
+    return n + 1;
+}
+
+int measure_compare(
+    double  mu,
+    double  r,
+    double  sigma,
+    double  t,
+    int     n_steps,
+    int     n_paths,
+    double  x0,
+    std::span<double> out_stats_10,
+    std::span<double> out_preview,
+    int     preview_len
+) {
+    if (out_stats_10.size() < 10) return 0;
+    const int    N       = std::max(n_steps, 2);
+    const int    NP      = std::max(n_paths, 1);
+    const double s       = clamp_positive(sigma, 1e-10);
+    const double tt      = clamp_positive(t);
+    const double dt      = tt / N;
+    const int    PL      = std::min(preview_len, N);
+    if (out_preview.size() < static_cast<size_t>(2 * PL)) return 0;
+
+    std::mt19937_64 rng(42);
+    std::normal_distribution<double> zdist(0.0, 1.0);
+    ModelParams p_params{};
+    p_params.mu = mu;
+    p_params.sigma = s;
+    ModelParams q_params{};
+    q_params.mu = r;
+    q_params.sigma = s;
+
+    {
+        auto p_model = build_model(ModelType::GBM, p_params);
+        auto q_model = build_model(ModelType::GBM, q_params);
+        double xp = x0, xq = x0;
+        for (int i = 0; i < PL; ++i) {
+            const double zi = zdist(rng);
+            xp = p_model->step(xp, i * dt, dt, zi);
+            xq = q_model->step(xq, i * dt, dt, zi);
+            out_preview[i]      = xp;
+            out_preview[PL + i] = xq;
+        }
+    }
+
+    std::vector<double> fp(NP), fq(NP);
+
+    // A random stream per chunk of paths, not per thread: the result is the same on any number of
+    // threads.
+    constexpr int kChunk = 64;
+    const int chunks = (NP + kChunk - 1) / kChunk;
+    #pragma omp parallel for schedule(dynamic)
+    for (int c = 0; c < chunks; ++c) {
+        std::mt19937_64 lrng(42 + static_cast<unsigned>(c));
+        std::normal_distribution<double> lz(0.0, 1.0);
+        auto p_model = build_model(ModelType::GBM, p_params);
+        auto q_model = build_model(ModelType::GBM, q_params);
+        for (int k = c * kChunk; k < std::min(NP, (c + 1) * kChunk); ++k) {
+            double xp = x0, xq = x0;
+            for (int i = 0; i < N; ++i) {
+                const double zi = lz(lrng);
+                xp = p_model->step(xp, i * dt, dt, zi);
+                xq = q_model->step(xq, i * dt, dt, zi);
+            }
+            fp[k] = xp; fq[k] = xq;
+        }
+    }
+
+    auto stats5 = [&](std::vector<double>& v, std::span<double> out) {
+        std::ranges::sort(v);
+        out[0] = sample_mean(v);
+        out[1] = sample_variance(v);
+        out[2] = interp_quantile_sorted(v, 0.05);
+        out[3] = interp_quantile_sorted(v, 0.50);
+        out[4] = interp_quantile_sorted(v, 0.95);
+    };
+    stats5(fp, out_stats_10.subspan<0, 5>());
+    stats5(fq, out_stats_10.subspan<5, 5>());
+    return PL;
+}
+
+double vol_surface_interp(
+    std::span<const double> strikes,
+    std::span<const double> expiries,
+    std::span<const double> ivs,
+    double spot, double target_strike, double target_expiry
+) {
+    const int n_points = static_cast<int>(strikes.size());
+    if (expiries.size() != strikes.size() || ivs.size() != strikes.size() || n_points < 1 ||
+        spot <= 0.0
+            || target_strike <= 0.0 || target_expiry <= 0.0)
+        return -1.0;
+
+    const double tgt_m = std::log(target_strike / spot);
+    const double tgt_v = std::sqrt(target_expiry);
+    std::vector<double> ms(n_points), vs(n_points);
+    for (int i = 0; i < n_points; ++i) {
+        ms[i] = std::log(strikes[i] / spot);
+        vs[i] = std::sqrt(clamp_positive(expiries[i]));
+    }
+    std::vector<double> um = ms, uv = vs;
+    std::ranges::sort(um);
+    um.erase(std::ranges::unique(um).begin(), um.end());
+    std::ranges::sort(uv);
+    uv.erase(std::ranges::unique(uv).begin(), uv.end());
+
+    if (um.size() < 2 || uv.size() < 2) {
+        int best = 0; double best_d2 = 1e30;
+        for (int i = 0; i < n_points; ++i) {
+            const double dm = ms[i] - tgt_m, dv = vs[i] - tgt_v;
+            const double d2 = dm * dm + dv * dv;
+            if (d2 < best_d2) { best_d2 = d2; best = i; }
+        }
+        return ivs[best];
+    }
+
+    auto bracket = [](const std::vector<double>& axis, double t) -> std::pair<int, int> {
+        if (t <= axis.front()) return {0, 0};
+        if (t >= axis.back())  return {(int)axis.size() - 1, (int)axis.size() - 1};
+        for (int i = 0; i < (int)axis.size() - 1; ++i)
+            if (axis[i] <= t && t <= axis[i + 1]) return {i, i + 1};
+        return {(int)axis.size() - 1, (int)axis.size() - 1};
+    };
+    auto [mi0, mi1] = bracket(um, tgt_m);
+    auto [vi0, vi1] = bracket(uv, tgt_v);
+    const double m0 = um[mi0], m1 = um[mi1];
+    const double v0 = uv[vi0], v1 = uv[vi1];
+    const double wm = (m1 > m0) ? (tgt_m - m0) / (m1 - m0) : 0.0;
+    const double wv = (v1 > v0) ? (tgt_v - v0) / (v1 - v0) : 0.0;
+
+    auto corner_iv = [&](double cm, double cv) -> double {
+        int best = 0; double best_d = 1e30;
+        for (int i = 0; i < n_points; ++i) {
+            const double dm = ms[i] - cm, dv = vs[i] - cv;
+            const double d = dm * dm + dv * dv;
+            if (d < best_d) { best_d = d; best = i; }
+        }
+        return ivs[best];
+    };
+
+    const double q00 = corner_iv(m0, v0), q10 = corner_iv(m1, v0);
+    const double q01 = corner_iv(m0, v1), q11 = corner_iv(m1, v1);
+    const double interp = q00*(1-wm)*(1-wv) + q10*wm*(1-wv) + q01*(1-wm)*wv + q11*wm*wv;
+    return std::isfinite(interp) ? interp : -1.0;
+}
+
+}  // namespace quant
+
 namespace quant::analytics {
 
 namespace {

@@ -1,7 +1,7 @@
 """Research: backtests in bulk, kept count of.
 
-- batch: the one way the server runs backtests (entry_backtest --batch, through the day cache), and a backtest's
-  round trips;
+- runner: the one place a backtest process starts (entry_backtest --batch, through the day cache);
+- batch: a backtest's round trips and the measures of its days and trades;
 - report: strategies over days by the promotion measures, the one way to the holdout;
 - combo: a combo from the lab run as ComboStrategy, and the hedge study;
 - space: a strategy's parameters and the settings an experiment tries;

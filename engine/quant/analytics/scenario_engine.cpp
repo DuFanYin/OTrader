@@ -7,6 +7,27 @@
 #include <cmath>
 #include <ranges>
 
+namespace quant {
+
+void scenario_bs5(
+    double spot, double strike, double rate, double vol,
+    double maturity, double dividend_yield, bool is_call, double* out_prices_5
+) {
+    if (!out_prices_5) return;
+    const double shock_spot[5]  = {1.0, 1.1, 0.9, 1.0, 1.0};
+    const double shock_vol[5]   = {0.0, 0.0, 0.0, 0.05, 0.0};
+    const double shock_rate[5]  = {0.0, 0.0, 0.0, 0.0, 0.01};
+    for (int i = 0; i < 5; ++i) {
+        const double s = spot * shock_spot[i];
+        const double v = std::max(0.0001, vol + shock_vol[i]);
+        const double r = rate + shock_rate[i];
+        out_prices_5[i] = black_price(is_call, spot_forward(s, r, dividend_yield, maturity), strike,
+                                      maturity, r, v);
+    }
+}
+
+}  // namespace quant
+
 namespace quant::analytics {
 
 std::string run_scenario_json(const std::string& src, double t0_ms) {

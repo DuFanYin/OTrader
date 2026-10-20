@@ -1,28 +1,54 @@
 """Where the repository and its data are, and the data files listed."""
 from __future__ import annotations
 
+import functools
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 
 
+@functools.cache
 def repo_root() -> Path:
     """The Optra repository (data/, engine/build/), wherever the server was started from."""
     return Path(__file__).resolve().parents[4]
 
 
+@functools.lru_cache(maxsize=16)
+def _real(root: Path) -> Path:
+    """A root folder resolved, once: a day file is checked against it thousands of times a request."""
+    return root.resolve()
+
+
 def data_root() -> Path:
-    """data/: the backtest days, one folder per underlying (tests point it at a folder of their own)."""
+    """data/: the backtest days, the recorded and synthetic days, the daily values, the databases (tests point it
+    at a folder of their own)."""
     return repo_root() / "data"
+
+
+def backtest_root() -> Path:
+    """data/backtest/: the backtest days, one folder per underlying."""
+    return data_root() / "backtest"
+
+
+def ledger_name(path: Path) -> str:
+    """A day file as the ledger names it: relative to data/backtest/ for a backtest day (SPY/SPY-2025-03/...),
+    to data/ for any other (recorded/SPY/...)."""
+    f, backtest = path.resolve(), _real(backtest_root())
+    return str(f.relative_to(backtest if f.is_relative_to(backtest) else _real(data_root())))
+
+
+def from_ledger_name(name: str) -> Path:
+    """The day file a ledger name is: an underlying's (an upper-case first folder) under data/backtest/."""
+    return (backtest_root() if name.split("/", 1)[0].isupper() else data_root()) / name
 
 
 def inside_data(path: str | Path) -> Path:
     """A path a request named (relative: to the root), resolved; refused unless it is inside data/."""
-    data = data_root().resolve()
+    data = _real(data_root())
     named = Path(path)
     full = (named if named.is_absolute() else repo_root() / named).resolve()
-    if full != data and data not in full.parents:
+    if not full.is_relative_to(data):
         raise ValueError(f"{path} is not under data/")
     return full
 
@@ -85,10 +111,11 @@ def list_files(root: Path | None = None) -> List[FileInfo]:
                 )
             )
 
-        # A symbol's days under data/ (data/SPXW/SPXW-2025-08/20250804.parquet) as one segment;
-        # a folder with no day files (data/raw, the DBN downloads) is none.
-        if dirname == "data":
-            for subdir in sorted(base.iterdir(), key=lambda p: p.name.lower()):
+        # A symbol's days under data/backtest/ (data/backtest/SPXW/SPXW-2025-08/20250804.parquet) as one
+        # segment; a folder with no day files is none.
+        backtest = base / "backtest"
+        if dirname == "data" and backtest.is_dir():
+            for subdir in sorted(backtest.iterdir(), key=lambda p: p.name.lower()):
                 if not subdir.is_dir():
                     continue
                 parquet_files = sorted(

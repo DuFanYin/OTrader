@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from optra.infra import numerics
-from optra.research import analysis, batch, evidence, jobs, ledger, space, store, strategies, versions
+from optra.research import analysis, batch, evidence, jobs, ledger, runner, space, store, strategies, versions
 from optra.data import synthetic_days
 from optra.utils import files
 from optra.utils.files import repo_root
@@ -25,19 +25,49 @@ pytestmark = pytest.mark.skipif(not (repo_root() / "engine" / "build" / "entry_b
 @pytest.fixture
 def days(tmp_path, monkeypatch):
     model = synthetic_days.Model(implied_vol=0.2)
-    synthetic_days.generate(model, date(2025, 3, 3), date(2025, 3, 7), tmp_path, "SPY", False)
+    synthetic_days.generate(model, date(2025, 3, 3), date(2025, 3, 7), tmp_path / "backtest", "SPY", False)
     monkeypatch.setattr(files, "data_root", lambda: tmp_path)
     monkeypatch.setattr(store, "_db", None)
-    return sorted(str(p) for p in (tmp_path / "SPY").rglob("*.parquet"))
+    return sorted(str(p) for p in (tmp_path / "backtest" / "SPY").rglob("*.parquet"))
+
+
+def test_the_ledger_names_a_backtest_day_as_it_did_before_data_backtest(tmp_path, monkeypatch):
+    monkeypatch.setattr(files, "data_root", lambda: tmp_path)
+    day = tmp_path / "backtest" / "SPY" / "SPY-2025-03" / "20250303.parquet"
+    recorded = tmp_path / "recorded" / "SPY" / "SPY-2025-03" / "20250303.parquet"
+    for f in (day, recorded):
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"")
+    assert files.ledger_name(day) == "SPY/SPY-2025-03/20250303.parquet"  # older experiments' days and hashes
+    assert files.ledger_name(recorded) == "recorded/SPY/SPY-2025-03/20250303.parquet"
+    assert [files.from_ledger_name(files.ledger_name(f)) for f in (day, recorded)] == [day, recorded]
+
+
+def test_a_days_values_come_back_with_its_row():
+    rows = runner.rows({"date": [20250303, 20250304], "pnl": [1.0, 2.0], "attribution": {"delta": [0.5, 1.0]},
+                        "values": {"var_day": [1e-4, None], "returns": [389, 389]}})
+    assert rows[0]["values"] == {"var_day": 1e-4, "returns": 389}
+    assert rows[1]["values"] == {"returns": 389}  # a day it wrote no var_day: none
+    assert rows[0]["delta"] == 0.5 and rows[1]["pnl"] == 2.0
+
+
+def test_the_other_underlying_has_the_same_dates_before_its_holdout(tmp_path, monkeypatch):
+    for symbol in ("SPY", "SPXW"):
+        synthetic_days.generate(synthetic_days.Model(), date(2025, 3, 3), date(2025, 3, 5), tmp_path / "backtest",
+                                symbol, False)
+    monkeypatch.setattr(files, "data_root", lambda: tmp_path)
+    monkeypatch.setattr(ledger, "holdout_from", lambda root: date(2025, 3, 5) if root == "SPXW" else None)
+    spy = sorted((tmp_path / "backtest" / "SPY").rglob("*.parquet"))
+    other, found = analysis.other_underlying_days(spy)
+    assert other == "SPXW" and [f.stem for f in found] == ["20250303", "20250304"]
+    assert analysis.other_underlying_days(found)[0] == "SPY"
 
 
 def run_queued() -> int:
     """What a worker does, in-process: lease, run the batch, report, until nothing waits. How many jobs."""
-    from optra.research.worker import run_job
-
     ran = 0
     while (job := jobs.lease("test")) is not None:
-        assert jobs.complete(job["job_id"], "test", run_job(job, threads=2, days_ahead=3))["accepted"]
+        assert jobs.complete(job["job_id"], "test", runner.run_batch(job["batch"], threads=2, days_ahead=3))["accepted"]
         ran += 1
     return ran
 
@@ -89,6 +119,26 @@ def test_the_family_budget_refuses_an_experiment_whole(days):
     with pytest.raises(ValueError, match="has tried 6 of its 8"):
         submit(days, space={"seed": [5, 6, 7]})
     assert ledger.families()["random buys"]["used"] == 6  # nothing of it registered
+
+
+def test_experiments_submitted_together_run_as_one_batch_and_register_all_or_none(days):
+    # A worker waiting takes a job the moment it is queued: experiments on the same days submitted one after another
+    # would each run alone, each reading the days; together, they are one job.
+    a, b = ledger.submit_together([
+        {"family": "random buys", "strategy": "RandomBuyStrategy", "days": days, "settings_list": [{"seed": 1}]},
+        {"family": ledger.CONTROL_FAMILY, "strategy": ledger.CONTROL[0], "days": days,
+         "settings_list": [ledger.CONTROL[1]]}])
+    assert run_queued() == 1
+    for out in (a, b):
+        assert [t["status"] for t in ledger.experiment(out["experiment_id"])["trials"]] == ["done"]
+
+    ledger.set_budget("random buys", 2)
+    with pytest.raises(ValueError, match="has tried 1 of its 2"):
+        ledger.submit_together([
+            {"family": "other buys", "strategy": "RandomBuyStrategy", "days": days, "settings_list": [{"seed": 9}]},
+            {"family": "random buys", "strategy": "RandomBuyStrategy", "days": days,
+             "settings_list": [{"seed": 2}, {"seed": 3}]}])
+    assert "other buys" not in ledger.families() or ledger.families()["other buys"]["used"] == 0
 
 
 def test_holdout_days_cannot_be_in_an_experiment(days, monkeypatch):
@@ -192,15 +242,13 @@ def test_the_page_backtest_runs_through_the_batch_with_its_chart(days):
     from optra.services import backtest
 
     out = backtest.run_backtest({"parquet": "SPY", "strategy": "RandomBuyStrategy", "start_date": "2025-03-03",
-                                 "end_date": "2025-03-07", "costs": {"fee_rate": 1.2}, "strategy_setting": {"seed": 3}})
+                                 "end_date": "2025-03-07", "costs": {"fee_scale": 1.0}, "strategy_setting": {"seed": 3}})
     assert out["status"] == "ok" and out["chart"]["pnl"] and len(out["days"]["date"]) == len(days)
     assert out["day_files"]["date"] == out["days"]["date"] and all(out["day_files"]["bars"])
     assert backtest.cancel_backtest()["message"] == "no active backtest"
 
 
 def test_the_engine_refuses_a_cost_it_does_not_have(days):
-    from optra.research import runner
-
     with pytest.raises(ValueError, match="No cost 'slippage_bps'"):
         runner.run_trials([files.data_root() / d for d in days],
                           [{"id": "t", "strategy": "RandomBuyStrategy", "costs": {"slippage_bps": 5}}])
@@ -338,6 +386,20 @@ def test_a_moved_setting_that_makes_no_trade_is_not_a_neighbour(monkeypatch):
     assert not promotion._plateau("e", True).passed
 
 
+def test_the_holdout_waits_for_the_values_by_day_it_would_read(tmp_path, monkeypatch):
+    from optra.data import daily_values
+    from optra.research import promotion
+
+    monkeypatch.setattr(daily_values, "daily_dir", lambda: tmp_path)
+    kept = {f"2026-03-{d:02d}": 1.0 for d in range(2, 32)}
+    daily_values.write_series(tmp_path / "SPY_gex.csv", kept)  # kept by day, stopped at the holdout
+    daily_values.write_series(tmp_path / "VIX.csv", kept | {"2026-10-14": 20.0})
+    daily_values.write_series(tmp_path / "FOMC.csv", {"2026-03-18": 1.0})  # an event list
+    assert promotion.uncovered_series(date(2026, 4, 1), date(2026, 10, 15)) == ["SPY_gex (last 2026-03-31)"]
+    daily_values.write_series(tmp_path / "SPY_gex.csv", kept | {"2026-10-09": 2.0})
+    assert promotion.uncovered_series(date(2026, 4, 1), date(2026, 10, 15)) == []
+
+
 def test_a_day_is_in_the_holdout_by_its_quotes_not_its_name_or_folder(days, monkeypatch, tmp_path):
     import shutil
 
@@ -346,7 +408,7 @@ def test_a_day_is_in_the_holdout_by_its_quotes_not_its_name_or_folder(days, monk
     monkeypatch.setattr(settings, "config", lambda: {"holdout": {"SPY": "2025-03-06"}})
     with pytest.raises(ValueError, match="holdout"):
         ledger.resolve_days(days)
-    renamed = tmp_path / "SPY" / "SPY-2025-02" / "20250228.parquet"  # the last day, named as a day before
+    renamed = tmp_path / "backtest" / "SPY" / "SPY-2025-02" / "20250228.parquet"  # the last day, named as a day before
     renamed.parent.mkdir()
     shutil.copy(days[-1], renamed)
     with pytest.raises(ValueError, match="holdout"):
@@ -356,7 +418,9 @@ def test_a_day_is_in_the_holdout_by_its_quotes_not_its_name_or_folder(days, monk
     shutil.copy(days[-1], elsewhere)
     with pytest.raises(ValueError, match="holdout"):
         ledger.resolve_days([str(elsewhere)])
-    assert len(ledger.resolve_days(days[:3])) == 3
+    first, reached = ledger.resolve_days(days[:3])
+    assert [str(f) for f in first] == days[:3] and not reached
+    assert ledger.resolve_days(days, reach_holdout=True)[1]  # a person's report may reach it, and it is recorded so
 
 
 QUIET = """#include "strategy_registry.hpp"
@@ -410,7 +474,7 @@ def test_a_trial_that_stopped_before_its_last_day_is_reported_and_fails_review(d
                             family="stops", symbol="SPY", start=None, end=None, costs={})
     assert out["stopped"] == {stopped_id: why}
     gate = next(g for g in out["review"] if g["gate"] == "every trial ran all its days")
-    assert not gate["met"] and gate["value"] == 1
+    assert not gate["met"] and gate["detail"].startswith("1 stopped early")
 
 
 def test_a_strategy_reaches_an_account_only_when_installed_for_it(own_strategy_dirs, days):
@@ -430,8 +494,8 @@ def test_a_strategy_reaches_an_account_only_when_installed_for_it(own_strategy_d
     assert not library.exists() and not installed.exists()
     from optra.research import promotion
 
-    assert promotion.accounts_of("paper") == {"paper"} and promotion.accounts_of("pilot") == {"paper", "live"}
-    assert promotion.accounts_of("review") == set()
+    assert versions.accounts_of("paper") == {"paper"} and versions.accounts_of("pilot") == {"paper", "live"}
+    assert versions.accounts_of("review") == set()
 
 
 def test_the_backtest_tool_answers_whole_and_counts_every_try(days):
@@ -441,8 +505,8 @@ def test_the_backtest_tool_answers_whole_and_counts_every_try(days):
                             family="random buys", symbol="SPY", start=None, end=None, costs={})
     assert len(out["trials"]) == 3 and out["family_tries"] == 3 and out["days"] == len(days)
     assert out["best"]["id"] in {t["id"] for t in out["trials"]} and "expectancy_r" in out["control"]
-    assert [g["gate"] for g in out["review"]] == ["deflated Sharpe", "overfitting probability", "trades",
-                                                  "days with a trade", "every trial ran all its days",
+    assert [g["gate"] for g in out["review"]] == ["deflated Sharpe", "overfitting probability",
+                                                  "every trial ran all its days", "trades", "days with a trade",
                                                   "parameters moved", "costs doubled",
                                                   "fills of the size shown, a minute late"]
     assert out["stopped"] == {}
@@ -451,37 +515,6 @@ def test_the_backtest_tool_answers_whole_and_counts_every_try(days):
     again = backtest.backtest(strategy="RandomBuyStrategy", setting={"seed": 1}, space=None, search={},
                               family="random buys", symbol="SPY", start=None, end=None, costs={})
     assert len(again["trials"]) == 1 and ledger.families()["random buys"]["used"] == 3
-
-
-def test_trials_kept_a_row_a_day_are_kept_a_row_a_trial_each_value_as_it_was(days, monkeypatch):
-    con = store.db()
-    con.execute("INSERT INTO families VALUES ('old', 10)")
-    con.execute("INSERT INTO trials (id, family, strategy, setting, costs, code, status, created_at) "
-                "VALUES ('t', 'old', 'S', '{}', '{}', '{}', 'done', '2026-10-01')")
-    con.executescript("""
-        CREATE TABLE trial_days (trial_id TEXT NOT NULL, day TEXT NOT NULL, pnl REAL NOT NULL, net_pnl REAL NOT NULL,
-            fees REAL NOT NULL, orders INTEGER NOT NULL, flat INTEGER NOT NULL,
-            delta REAL, gamma REAL, theta REAL, vega REAL, other REAL, fills REAL, PRIMARY KEY (trial_id, day));
-        CREATE TABLE trial_trades (trial_id TEXT NOT NULL, opened TEXT NOT NULL, days INTEGER NOT NULL,
-            net REAL NOT NULL, risk REAL NOT NULL, r REAL NOT NULL, hedge_fills INTEGER NOT NULL,
-            delta REAL, gamma REAL, theta REAL, vega REAL, other REAL, fills REAL,
-            fees REAL, entry_cost REAL, exit_cost REAL, settled REAL);""")
-    con.executemany("INSERT INTO trial_days VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    [("t", "2025-03-04", -2.25, -3.4500000000000002, 1.2, 1, 0, 0.1, -0.2, 0.3, 0.0, 1e-17, -2.45),
-                     ("t", "2025-03-03", 1.5, 0.3, 1.2, 2, 1, 0.1, 0.2, 0.3, 0.4, 0.5, 0.0)])
-    con.executemany("INSERT INTO trial_trades VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    [("t", "2025-03-03", 2, -1.15, 500.0, -0.0023, 1, 0.2, 0.0, 0.6, 0.4, 0.5, -2.45, 2.4, 1.0, 0.5,
-                      0.0),
-                     ("t", "2025-03-01", 1, 0.1, 50.0, 0.002, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1, None, None, None,
-                      None)])  # a trade of before the engine costed it
-    days_before = [dict(r) for r in con.execute("SELECT * FROM trial_days ORDER BY day")]
-    trades_before = [dict(r) for r in con.execute("SELECT * FROM trial_trades ORDER BY opened")]
-    monkeypatch.setattr(store, "_db", None)
-    store.db()  # opened again: moved
-    assert ledger.trial_days(["t"])["t"] == days_before
-    assert ledger.trial_trades(["t"])["t"] == trades_before
-    assert store.db().execute("SELECT name FROM sqlite_master WHERE name IN ('trial_days', 'trial_trades')"
-                              ).fetchall() == []
 
 
 def test_the_optimizer_climbs_a_known_hill_without_trying_a_point_twice():
@@ -517,3 +550,27 @@ def test_an_optimizers_rounds_are_counted_and_its_whole_run_is_where_a_version_i
                                       {"hypothesis": "-", "edge": "-", "fails_when": "-"})
     gates = {g.name: g for g in promotion._research(version)}
     assert out["experiment_id"] in gates["deflated Sharpe"].detail  # the whole run, not a round
+
+
+def test_a_versions_underlying_is_its_own_trials_and_one_is_named_when_they_ran_on_several(monkeypatch):
+    from optra.research import promotion
+
+    def trial(root, check=None, parent=None):
+        return {"id": f"{root}{check}", "days": [f"{root}/{root}-2024-01/20240102.parquet"], "holdout": False,
+                "parent": parent, "check": check, "report": False, "costs": {}}
+
+    found = [trial("SPXW"), trial("SPY", "other_underlying", "x")]  # a check on another underlying is not its own
+    monkeypatch.setattr(versions, "version_trials", lambda _: found)
+    assert versions.portfolio("v") == "SPXW"
+    found.append(trial("SPY"))  # the same setting backtested on SPY too
+    with pytest.raises(ValueError, match="name one underlying"):
+        versions.portfolio("v")
+    assert versions.portfolio("v", "SPY") == "SPY"
+    assert promotion._found("v", "SPY")["id"] == "SPYNone"
+    with pytest.raises(ValueError, match="name one underlying"):
+        versions.portfolio("v", "QQQ")
+    held = dict(trial("SPY"), holdout=True)  # its holdout report ran on SPY: what paper then runs on
+    found.append(held)
+    assert versions.portfolio("v") == "SPY"
+    found[:] = [trial("SPXW"), dict(trial("SPY"), report=True)]  # a report shows it there, it was not found there
+    assert versions.portfolio("v") == "SPXW"

@@ -17,17 +17,16 @@ at, not what works.
 
 from __future__ import annotations
 
-import math
 import statistics
 from datetime import date
 from pathlib import Path
 from typing import Any
 
 from optra.infra import access
-from optra.research import evidence, jobs, ledger
+from optra.research import jobs, ledger
 from optra.research.ledger import Costs
+from optra.research import batch
 from optra.research.batch import ATTRIBUTION, Trade, days_of
-from optra.data.days import day_of
 from optra.utils.files import inside_data
 
 COLUMNS = ["trades", "win rate", "avg win R", "avg loss R", "payoff", "expectancy R", "t",
@@ -48,19 +47,14 @@ def measures(trades: list[Trade]) -> dict[str, Any]:
     n = len(trades)
     if n == 0:
         return {"trades": 0}
-    rs = [t.r for t in trades]
     wins = [t for t in trades if t.net > 0]
     losses = [t for t in trades if t.net <= 0]
-    mean = statistics.fmean(rs)
-    sd = statistics.stdev(rs) if n > 1 else 0.0
+    mean, t_r = batch.r_stats([t.r for t in trades])
     streak = longest = 0
-    equity = peak = drawdown = 0.0
     for t in trades:
         streak = streak + 1 if t.net <= 0 else 0
         longest = max(longest, streak)
-        equity += t.net
-        peak = max(peak, equity)
-        drawdown = min(drawdown, equity - peak)
+    drawdown = batch.drawdown(t.net for t in trades)
     avg_win = statistics.fmean(t.net for t in wins) if wins else 0.0
     avg_loss = statistics.fmean(t.net for t in losses) if losses else 0.0
     return {
@@ -70,7 +64,7 @@ def measures(trades: list[Trade]) -> dict[str, Any]:
         "avg loss R": f"{statistics.fmean(t.r for t in losses):+.2f}" if losses else "-",
         "payoff": f"{avg_win / abs(avg_loss):.2f}" if avg_loss else "-",
         "expectancy R": f"{mean:+.3f}",
-        "t": f"{mean / sd * math.sqrt(n):+.2f}" if sd > 0 else "-",
+        "t": f"{t_r:+.2f}" if t_r is not None else "-",
         "net USD": f"{sum(t.net for t in trades):+,.0f}",
         "losing streak": longest,
         "drawdown USD": f"{drawdown:,.0f}",
@@ -97,10 +91,7 @@ def table(rows: list[dict[str, Any]], control: float | None) -> str:
 def trades_in_ledger(trial_id: str) -> list[Trade]:
     """A finished trial's round trips, as the ledger keeps them."""
     return [Trade(date.fromisoformat(t["opened"]), t["risk"], t["net"], {k: t[k] for k in ATTRIBUTION},
-                  t["hedge_fills"], t["days"],
-                  # trades of before the engine costed them: their fees as the attribution less the net
-                  t["fees"] if t["fees"] is not None else sum(t[k] for k in ATTRIBUTION) - t["net"],
-                  t["entry_cost"] or 0.0, t["exit_cost"] or 0.0, t["settled"] or 0.0)
+                  t["hedge_fills"], t["days"], t["fees"], t["entry_cost"], t["exit_cost"], t["settled"])
             for t in ledger.trial_trades([trial_id])[trial_id]]
 
 
@@ -119,17 +110,19 @@ def report(days: Path | list[Path], runs: dict[str, tuple[str, dict[str, float]]
         files = days_of(days)
     if not files:
         raise ValueError(f"no backtest days under {days}")
-    strategies = list(runs)  # each run's name: the rows', the trades', the holdout record's
+    strategies = list(runs)  # each run's name: the rows' and the trades'
     by_class: dict[str, list[str]] = {}
     for spec, (cls, _) in runs.items():
         by_class.setdefault(cls, []).append(spec)
     trial_of: dict[str, str] = {}
     experiments = []
-    for cls, specs in by_class.items():  # all submitted before any is waited for: the same days run as one batch
-        out = ledger.submit(family=ledger.CONTROL_FAMILY if cls == ledger.CONTROL[0] else family or cls, strategy=cls,
-                            days=[str(f) for f in files], costs=costs,
-                            settings_list=[runs[spec][1] for spec in specs], holdout=access.trusted(),
-                            note="promotion report", priority=jobs.PRIORITY_REPORT, **(pricing or {}))
+    submitted = ledger.submit_together([  # together: on the same days, they run as one batch
+        dict(family=ledger.CONTROL_FAMILY if cls == ledger.CONTROL[0] else family or cls, strategy=cls,
+             days=[str(f) for f in files], costs=costs, settings_list=[runs[spec][1] for spec in specs],
+             reach_holdout=access.trusted(), report=True, note="promotion report", priority=jobs.PRIORITY_REPORT,
+             **(pricing or {}))
+        for cls, specs in by_class.items()])
+    for specs, out in zip(by_class.values(), submitted):
         experiments.append(out["experiment_id"])
         trial_of.update(zip(specs, out["trial_ids"]))
     for experiment_id in experiments:
@@ -137,10 +130,6 @@ def report(days: Path | list[Path], runs: dict[str, tuple[str, dict[str, float]]
     results = {spec: trades_in_ledger(trial_of[spec]) for spec in strategies}
     failed = ledger.trial_errors(trial_of.values())
     errors = {spec: failed[trial_of[spec]].split("; ") for spec in strategies if trial_of[spec] in failed}
-    if holdout_from is not None and access.trusted():
-        held = [f for f in files if (d := day_of(f)) and d >= holdout_from]
-        if held:
-            evidence.record_holdout_use(strategies, held[0].name, held[-1].name)
 
     def period(trades: list[Trade], which: str) -> list[Trade]:
         if holdout_from is None or which == "all":

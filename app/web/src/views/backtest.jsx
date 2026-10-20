@@ -75,7 +75,7 @@ function Params() {
     <>
       <Group title="Data">
         <Select label="Symbol" value={p.btSymbol} onChange={chooseSymbol} options={symbols}
-          placeholder={files.value.state === "loading" ? "Loading…" : symbols.length ? undefined : "No data under data/"} />
+          placeholder={files.value.state === "loading" ? "Loading…" : symbols.length ? undefined : "No data under data/backtest/"} />
         {s && <Line>{s.date_start} to {s.date_end} · {s.number_of_days} days · {bytes(s.size_bytes)}</Line>}
         <Day k="btStart" label="First day" min={s?.date_start} max={s?.date_end} />
         <Day k="btEnd" label="Last day" min={s?.date_start} max={s?.date_end} />
@@ -225,7 +225,7 @@ export const backtest = {
   id: "backtest",
   label: "Backtest",
   about: "Run a strategy over recorded or synthetic option chains, one engine per day, with the code the live engine runs. "
-    + "Days live under data/<SYMBOL>/; with none recorded, POST /api/data/synthetic with out: \"data\" writes days from a known model there.",
+    + "Days live under data/backtest/<SYMBOL>/; with none recorded, POST /api/data/synthetic with out: \"data/backtest\" writes days from a known model there.",
   enter,
   Params,
   Results,

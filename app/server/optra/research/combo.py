@@ -16,7 +16,6 @@ variants are trials of the class's family, counted like any.
 
 from __future__ import annotations
 
-import math
 import statistics
 from datetime import date
 from pathlib import Path
@@ -91,14 +90,13 @@ def distribution(trades: list[batch.Trade]) -> dict[str, Any]:
     n = len(nets)
     if n == 0:
         return {"days": 0}
-    tail = nets[:max(1, math.ceil(0.05 * n))]
     return {
         "days": n,
         "mean": statistics.fmean(nets),
         "std": statistics.stdev(nets) if n > 1 else 0.0,
         "q05": quantile(nets, 0.05), "q50": quantile(nets, 0.5), "q95": quantile(nets, 0.95),
         "var95": -quantile(nets, 0.05),
-        "es95": -statistics.fmean(tail),
+        "es95": -batch.es95(nets),
         "hedge_fills": sum(t.hedge_fills for t in trades),
         "fees": round(sum(t.fees for t in trades), 2),
         "attribution": {k: round(sum(t.attribution[k] for t in trades), 2) for k in batch.ATTRIBUTION},
@@ -113,8 +111,8 @@ def hedge_study(values: dict[str, float], files: list[Path], delta_ranges: list[
     variants = [("unhedged", {"hedge": 0})] + [
         (f"within {r} shares", {"hedge": 1, "delta_range": r, "hedge_timer": hedge_timer}) for r in delta_ranges]
     out = ledger.submit(family=CLASS, strategy=CLASS, days=[str(f) for f in files], costs=costs,
-                        settings_list=[{**values, **hedge} for _, hedge in variants], holdout=access.trusted(),
-                        note="hedge study", priority=jobs.PRIORITY_REPORT)
+                        settings_list=[{**values, **hedge} for _, hedge in variants], reach_holdout=access.trusted(),
+                        report=True, note="hedge study", priority=jobs.PRIORITY_REPORT)
     jobs.wait(ref=out["experiment_id"])
     failed = ledger.trial_errors(out["trial_ids"])
     for (label, hedge), trial_id in zip(variants, out["trial_ids"]):

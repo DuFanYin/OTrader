@@ -1,0 +1,14 @@
+# What the image builds for itself, and what is this machine's
+.git
+.env
+local/
+data/
+**/build/
+**/node_modules/
+**/.venv/
+**/__pycache__/
+**/thirdparty/
+dist/
+*.log
+strategy/*
+!strategy/demo/

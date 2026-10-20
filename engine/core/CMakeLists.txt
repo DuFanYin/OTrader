@@ -14,17 +14,18 @@ add_library(bookkeeping_engine bookkeeping/bookkeeping_engine.cpp)
 target_link_libraries(bookkeeping_engine PUBLIC model)
 
 add_library(risk_engine risk/risk_engine.cpp)
-target_link_libraries(risk_engine PUBLIC bookkeeping_engine strategies)
+target_link_libraries(risk_engine PUBLIC bookkeeping_engine)
 
 add_library(strategy_engine strategy/strategy_engine.cpp)
-target_link_libraries(strategy_engine PUBLIC bookkeeping_engine market_data_engine strategies)
+target_link_libraries(strategy_engine PUBLIC bookkeeping_engine strategies)
 
 # I/O engines, each on its own thread.
 add_library(log_engine log/log_engine.cpp)
 target_link_libraries(log_engine PUBLIC model PRIVATE Threads::Threads)
 
+# Plans what to stream from what the strategies want (StrategyEngine::wanted), prices with pricing/.
 add_library(market_data_engine market_data/market_data_engine.cpp)
-target_link_libraries(market_data_engine PUBLIC model PRIVATE Threads::Threads)
+target_link_libraries(market_data_engine PUBLIC strategy_engine PRIVATE pricing Threads::Threads)
 
 # The event thread: hands events to the handler it is given (Main::process_event).
 add_library(event_loop event_loop.cpp)

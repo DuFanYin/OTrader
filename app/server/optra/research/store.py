@@ -8,9 +8,7 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
-import orjson
 
 from optra.utils import files
 
@@ -61,7 +59,7 @@ SCHEMA = """
                 card       TEXT NOT NULL,   -- JSON: the hypothesis, where the edge comes from, when it fails
                 stage      TEXT NOT NULL,   -- promotion.STAGES
                 created_at TEXT NOT NULL,
-                pending       TEXT,         -- a move under way: the stage it goes to (promotion.advance)
+                pending       TEXT,         -- a move under way: the stage it goes to (versions.advance)
                 pending_note  TEXT,         -- who approved it and why, or why it goes back
                 pending_error TEXT          -- why its last step failed (it is tried again)
             );
@@ -139,11 +137,6 @@ SCHEMA = """
                 close REAL NOT NULL,
                 PRIMARY KEY (day, root)
             );
-            CREATE TABLE IF NOT EXISTS holdout_uses (
-                at       TEXT NOT NULL,
-                strategy TEXT NOT NULL,   -- class:setting, as the report names it
-                days     TEXT NOT NULL    -- the holdout days, first and last
-            );
         """
 
 
@@ -162,67 +155,8 @@ def db() -> sqlite3.Connection:
         _db.execute("PRAGMA journal_mode=WAL")
         _db.execute("PRAGMA foreign_keys=ON")
         _db.executescript(SCHEMA)
-        _migrate(_db)
         _db_path = path
     return _db
-
-
-def _migrate(con: sqlite3.Connection) -> None:
-    """Versions of before a move between stages was written before it ran; paper days of before they said the code
-    that traded, or what their fills paid over the mids; the experiments' tasks of before the queue became jobs;
-    jobs of before they ran in batches together; trials' days and trades of before they were kept a trial a row."""
-    version_columns = {r["name"] for r in con.execute("PRAGMA table_info(strategy_versions)")}
-    for column in ("pending", "pending_note", "pending_error"):
-        if column not in version_columns:
-            con.execute(f"ALTER TABLE strategy_versions ADD COLUMN {column} TEXT")
-    paper_columns = {r["name"] for r in con.execute("PRAGMA table_info(paper_days)")}
-    if "code" not in paper_columns:
-        con.execute("ALTER TABLE paper_days ADD COLUMN code TEXT NOT NULL DEFAULT '{}'")
-    for column in ("backtest_slippage", "paper_slippage"):
-        if column not in paper_columns:
-            con.execute(f"ALTER TABLE paper_days ADD COLUMN {column} REAL")
-    job_columns = {r["name"] for r in con.execute("PRAGMA table_info(jobs)")}
-    for column, kind in (("batch_key", "TEXT"), ("lead", "INTEGER")):
-        if column not in job_columns:
-            con.execute(f"ALTER TABLE jobs ADD COLUMN {column} {kind}")
-    if con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks'").fetchone() is not None:
-        con.execute("BEGIN IMMEDIATE")
-        con.execute("""INSERT INTO jobs (id, kind, ref, priority, payload, status, worker, lease_until, attempts,
-                                         created_at, finished_at, error)
-                       SELECT id, 'trials', experiment_id, 0, json_object('trial_ids', json(trial_ids)), status,
-                              worker, lease_until, attempts, created_at, finished_at, error FROM tasks""")
-        con.execute("DROP TABLE tasks")
-        con.execute("COMMIT")
-    if con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'trial_days'").fetchone() is not None:
-        _trial_rows_to_columns(con)
-
-
-def _trial_rows_to_columns(con: sqlite3.Connection) -> None:
-    """trial_days and trial_trades (a row a trial's day, a row a trade) into trial_results, a trial a row, each value
-    as it was; a trade of before the engine costed it has no fees, entry_cost, exit_cost or settled (None)."""
-    by_source = ("delta", "gamma", "theta", "vega", "other", "fills")
-    con.execute("BEGIN IMMEDIATE")
-    days: dict[str, list[sqlite3.Row]] = {}
-    for r in con.execute("SELECT * FROM trial_days ORDER BY trial_id, day"):
-        days.setdefault(r["trial_id"], []).append(r)
-    trades: dict[str, list[sqlite3.Row]] = {}
-    for r in con.execute("SELECT * FROM trial_trades ORDER BY trial_id, opened, rowid"):
-        trades.setdefault(r["trial_id"], []).append(r)
-
-    def columns(rows: list[sqlite3.Row], names: tuple[str, ...]) -> dict[str, Any]:
-        return ({n: [r[n] if n in r.keys() else None for r in rows] for n in names}
-                | {"attribution": {k: [r[k] for r in rows] for k in by_source}})
-    for trial_id in sorted(days.keys() | trades.keys()):
-        d = days.get(trial_id, [])
-        day_columns = {"date": [int(r["day"].replace("-", "")) for r in d],
-                       **columns(d, ("pnl", "net_pnl", "fees", "orders")), "flat": [bool(r["flat"]) for r in d]}
-        trade_columns = columns(trades.get(trial_id, []), ("opened", "days", "net", "risk", "r", "hedge_fills", "fees",
-                                                           "entry_cost", "exit_cost", "settled"))
-        con.execute("INSERT OR REPLACE INTO trial_results VALUES (?, ?, ?)",
-                    (trial_id, orjson.dumps(day_columns).decode(), orjson.dumps(trade_columns).decode()))
-    con.execute("DROP TABLE trial_trades")
-    con.execute("DROP TABLE trial_days")
-    con.execute("COMMIT")
 
 
 def now() -> str:

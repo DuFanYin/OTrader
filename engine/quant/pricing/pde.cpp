@@ -9,10 +9,6 @@ namespace quant {
 
 namespace {
 
-double intrinsic(double s, double k, bool is_call) {
-    return is_call ? std::max(s - k, 0.0) : std::max(k - s, 0.0);
-}
-
 // Thomas algorithm for a[i] x[i-1] + b[i] x[i] + c[i] x[i+1] = d[i] (a[0], c[n-1] unused).
 bool solve_tridiagonal(const std::vector<double>& a, const std::vector<double>& b,
                        const std::vector<double>& c, const std::vector<double>& d,
@@ -64,7 +60,7 @@ PdeOutcome pde_solve(const PdeSpec& p) {
     std::vector<double> s(M + 1), v(M + 1), intr(M + 1);
     for (int i = 0; i <= M; ++i) {
         s[i]    = i * ds;
-        intr[i] = intrinsic(s[i], p.strike, p.is_call);
+        intr[i] = payoff(s[i], p.strike, p.is_call);
         v[i]    = intr[i];
     }
 
@@ -146,82 +142,6 @@ PdeOutcome pde_solve(const PdeSpec& p) {
     out.price = v[si] * (1.0 - w) + v[si + 1] * w;
     if (!std::isfinite(out.price)) out.price = 0.0;
     return out;
-}
-
-// Backward-compatible entry point: European call, method 0 = Crank-Nicolson, 1 = implicit.
-double pde_price(
-    double spot, double strike, double rate, double vol, double maturity,
-    double dividend_yield, int s_steps, int t_steps, int method
-) {
-    PdeSpec spec;
-    spec.spot = spot; spec.strike = strike; spec.rate = rate; spec.dividend_yield = dividend_yield;
-    spec.vol = vol; spec.maturity = maturity; spec.s_steps = s_steps; spec.t_steps = t_steps;
-    spec.method = method;
-    return pde_solve(spec).price;
-}
-
-double vol_surface_interp(
-    std::span<const double> strikes,
-    std::span<const double> expiries,
-    std::span<const double> ivs,
-    double spot, double target_strike, double target_expiry
-) {
-    const int n_points = static_cast<int>(strikes.size());
-    if (expiries.size() != strikes.size() || ivs.size() != strikes.size() || n_points < 1 || spot <= 0.0
-            || target_strike <= 0.0 || target_expiry <= 0.0)
-        return -1.0;
-
-    const double tgt_m = std::log(target_strike / spot);
-    const double tgt_v = std::sqrt(target_expiry);
-    std::vector<double> ms(n_points), vs(n_points);
-    for (int i = 0; i < n_points; ++i) {
-        ms[i] = std::log(strikes[i] / spot);
-        vs[i] = std::sqrt(clamp_positive(expiries[i]));
-    }
-    std::vector<double> um = ms, uv = vs;
-    std::ranges::sort(um);
-    um.erase(std::ranges::unique(um).begin(), um.end());
-    std::ranges::sort(uv);
-    uv.erase(std::ranges::unique(uv).begin(), uv.end());
-
-    if (um.size() < 2 || uv.size() < 2) {
-        int best = 0; double best_d2 = 1e30;
-        for (int i = 0; i < n_points; ++i) {
-            const double dm = ms[i] - tgt_m, dv = vs[i] - tgt_v;
-            const double d2 = dm * dm + dv * dv;
-            if (d2 < best_d2) { best_d2 = d2; best = i; }
-        }
-        return ivs[best];
-    }
-
-    auto bracket = [](const std::vector<double>& axis, double t) -> std::pair<int, int> {
-        if (t <= axis.front()) return {0, 0};
-        if (t >= axis.back())  return {(int)axis.size() - 1, (int)axis.size() - 1};
-        for (int i = 0; i < (int)axis.size() - 1; ++i)
-            if (axis[i] <= t && t <= axis[i + 1]) return {i, i + 1};
-        return {(int)axis.size() - 1, (int)axis.size() - 1};
-    };
-    auto [mi0, mi1] = bracket(um, tgt_m);
-    auto [vi0, vi1] = bracket(uv, tgt_v);
-    const double m0 = um[mi0], m1 = um[mi1];
-    const double v0 = uv[vi0], v1 = uv[vi1];
-    const double wm = (m1 > m0) ? (tgt_m - m0) / (m1 - m0) : 0.0;
-    const double wv = (v1 > v0) ? (tgt_v - v0) / (v1 - v0) : 0.0;
-
-    auto corner_iv = [&](double cm, double cv) -> double {
-        int best = 0; double best_d = 1e30;
-        for (int i = 0; i < n_points; ++i) {
-            const double dm = ms[i] - cm, dv = vs[i] - cv;
-            const double d = dm * dm + dv * dv;
-            if (d < best_d) { best_d = d; best = i; }
-        }
-        return ivs[best];
-    };
-
-    const double q00 = corner_iv(m0, v0), q10 = corner_iv(m1, v0);
-    const double q01 = corner_iv(m0, v1), q11 = corner_iv(m1, v1);
-    const double interp = q00*(1-wm)*(1-wv) + q10*wm*(1-wv) + q01*(1-wm)*wv + q11*wm*wv;
-    return std::isfinite(interp) ? interp : -1.0;
 }
 
 }  // namespace quant

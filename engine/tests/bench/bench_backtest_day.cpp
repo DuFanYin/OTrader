@@ -17,6 +17,7 @@
 #include "tests/bench/bench_util.hpp"
 
 #include "tests/lone_backtest.hpp"
+#include "pricing/pricing.hpp"
 
 #include <sys/resource.h>
 
@@ -90,7 +91,7 @@ int main(int argc, char** argv) {
 
     test::LoneBacktest backtest;
     core::Main& engine = backtest.main();
-    backtest.configure_execution({.fee_rate = 1.2});
+    backtest.configure_execution({.fee_scale = 1.0});
     std::string name;
     Step total_load;
     Step total_price;
@@ -124,7 +125,7 @@ int main(int argc, char** argv) {
             std::filesystem::remove(adapters::stored_day(cache_dir, path));
             for (const std::string& chain : day->loaded_chains()) {
                 std::filesystem::remove(adapters::stored_chain(
-                    cache_dir, path, chain, adapters::pricing_fingerprint(), 0.05, "mid"));
+                    cache_dir, path, chain, pricing::fingerprint(), 0.05, "mid"));
             }
             adapters::HistoricalData cold;
             save = timed([&] {

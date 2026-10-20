@@ -4,7 +4,7 @@
 # queues) and the page (Vite dev server, :5173).
 #
 #   ./scripts/dev.sh sim   the engine on a simulated market (engine/build/entry_simulate): synthetic SPY
-#                          days are written to data/SPY when there are none (the three months before
+#                          days are written to data/backtest/SPY when there are none (the three months before
 #                          today, for backtests and experiments, and today's, which the engine replays
 #                          at the wall clock's pace), orders fill at the simulated quotes, and the
 #                          account is kept in data/sim/. Nothing to connect to, no account needed.
@@ -23,6 +23,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 [[ -f .env ]] && set -a && source .env && set +a
 PORT="${PORT:-8080}"
+WEB_HOST="${WEB_HOST:-localhost}"  # where the page listens: 0.0.0.0 in a container (compose.yaml)
 MODE="${1:-live}"
 export LIVE_GRPC_TARGET="${LIVE_GRPC_TARGET:-localhost:50051}"
 UV="$(command -v uv || echo "$HOME/.local/bin/uv")"
@@ -51,17 +52,17 @@ cleanup() {
 }
 trap cleanup SIGINT SIGTERM
 
-# Synthetic SPY days from FIRST to LAST that data/SPY lacks (the generator refuses a day already there),
+# Synthetic SPY days from FIRST to LAST that data/backtest/SPY lacks (the generator refuses a day already there),
 # priced rich (implied 18% against a realised 13%: the premium a seller earns).
 synthetic_days() {
   (cd "$ROOT/app/server" && "$UV" run -q python -m optra.data.synthetic_days --start "$1" --end "$2" \
-    --out ../../data --symbol SPY --seed "${3:-1}" --implied-vol 0.18 --realized-vol 0.13 > /dev/null)
+    --out ../../data/backtest --symbol SPY --seed "${3:-1}" --implied-vol 0.18 --realized-vol 0.13 > /dev/null)
 }
 
 if [ "$MODE" = sim ]; then
-  SPY="$ROOT/data/SPY"
+  SPY="$ROOT/data/backtest/SPY"
   if ls "$SPY"/SPY-*/*.parquet > /dev/null 2>&1 && ! ls "$SPY"/synthetic-*.json > /dev/null 2>&1; then
-    echo "Error: data/SPY holds days that are not synthetic; sim writes synthetic days there. Use a clone of its own."
+    echo "Error: data/backtest/SPY holds days that are not synthetic; sim writes synthetic days there. Use a clone of its own."
     exit 1
   fi
   # The three months before today, from the day after the last one there.
@@ -118,7 +119,8 @@ WORKER_PID=$!
 
 echo "Starting the page..."
 (cd "$ROOT/app/web" && OPTRA_SERVER="http://127.0.0.1:$PORT" \
-  OPTRA_KEY_FILE="${OPTRA_HOME:-$HOME/.optra}/access.key" exec npm run dev > /tmp/optra-web.log 2>&1) &
+  OPTRA_KEY_FILE="${OPTRA_HOME:-$HOME/.optra}/access.key" exec npm run dev -- --host "$WEB_HOST" \
+  > /tmp/optra-web.log 2>&1) &
 FRONTEND_PID=$!
 
 echo ""

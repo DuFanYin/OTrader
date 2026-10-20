@@ -37,8 +37,8 @@ std::unique_ptr<core::Main> make_main(const MakeGateway& make_gateway,
 
 /**
  * Schedules the live trading days around a core::Main that outlives it: start() connects and begins the
- * day, then a thread rolls in each day's contracts at kRollTime. Each step connects first when the
- * broker is not connected, so an engine started before its gateway (or while it cannot log in)
+ * day, then a thread rolls in each day's contracts at its calendar's roll (08:45 New York). Each
+ * step connects first when the broker is not connected, so an engine started before its gateway (or while it cannot log in)
  * joins it within a minute of its coming up; a connection lost later is the gateway's own to
  * restore. stop() leaves strategies as they are so they resume on the next start. The work itself
  * is core::Main's; this only keeps time.
@@ -54,8 +54,6 @@ class TradingDays {
     TradingDays& operator=(const TradingDays&) = delete;
 
     /** New York time, before the open. */
-    static constexpr std::chrono::minutes kRollTime{8 * 60 + 45};
-
     /** Once only. Begins the day before returning; if it cannot connect or the contracts do not
      * come in, nothing starts and the thread retries each minute. */
     void start(std::vector<Synced> portfolios, bool resume);
@@ -72,7 +70,7 @@ class TradingDays {
     bool connected();
     /** False (logged, nothing started) when not connected or the contracts did not come in. */
     bool begin_day(std::span<const Synced> portfolios, bool resume);
-    /** Begins the first day if start() could not, then rolls at kRollTime. */
+    /** Begins the first day if start() could not, then rolls at the calendars' roll. */
     void run_days(std::stop_token stop, std::vector<Synced> portfolios, bool resume, bool begun);
 
     core::Main& main_;

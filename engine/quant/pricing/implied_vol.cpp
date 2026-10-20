@@ -9,10 +9,10 @@ double bs_implied_vol(
     double rate, double maturity, double dividend_yield
 ) {
     if (market_price <= 0.0 || spot <= 0.0 || strike <= 0.0 || maturity <= 0.0)
-        return -1.0;
+        return 0.0;
     const double forward = spot_forward(spot, rate, dividend_yield, maturity);
     const double iv = black_implied_vol(market_price, forward, strike, maturity, rate, true);
-    return (iv >= 1e-4 && iv < 5.0) ? iv : -1.0;
+    return (iv >= 1e-4 && iv < 5.0) ? iv : 0.0;
 }
 
 void implied_vol_batch(

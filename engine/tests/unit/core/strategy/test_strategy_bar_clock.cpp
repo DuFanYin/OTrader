@@ -8,6 +8,7 @@
 #include "tests/lone_backtest.hpp"
 #include "strategy/strategy_registry.hpp"
 #include "strategy/strategy.hpp"
+#include "model/session_calendar.hpp"
 #include "model/event.hpp"
 #include "model/utility.hpp"
 #include <chrono>
@@ -148,11 +149,11 @@ TEST(StrategyCallbackBudget, StopsAStrategyOnlyAfterTenCallbacksInARowOverIt) {
 }
 
 TEST(StrategyBarClock, MinutesSinceOpenFollowsNewYorkTime) {
-    EXPECT_EQ(model::minutes_since_open(kOpen), 0);
-    EXPECT_EQ(model::minutes_since_open(kOpen - 1min), -1);
-    EXPECT_EQ(model::minutes_since_open(kOpen + 15min + 59s), 15);
+    EXPECT_EQ(model::kNyse.minutes_since_open(kOpen), 0);
+    EXPECT_EQ(model::kNyse.minutes_since_open(kOpen - 1min), -1);
+    EXPECT_EQ(model::kNyse.minutes_since_open(kOpen + 15min + 59s), 15);
     // Summer (EDT): the open is 13:30 UTC.
-    EXPECT_EQ(model::minutes_since_open(sys_days{2025y / August / 4} + 13h + 30min), 0);
+    EXPECT_EQ(model::kNyse.minutes_since_open(sys_days{2025y / August / 4} + 13h + 30min), 0);
 }
 
 } // namespace

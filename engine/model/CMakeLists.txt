@@ -4,7 +4,9 @@
 add_library(model
   object.cpp
   symbol.cpp
+  expiry.cpp
   utility.cpp
+  session_calendar.cpp
   portfolio.cpp
   portfolios.cpp
   order_builder.cpp

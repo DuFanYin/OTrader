@@ -1,4 +1,5 @@
 #include "core/bookkeeping/bookkeeping_engine.hpp"
+#include "tests/lone_bookkeeping.hpp"
 #include "model/constant.hpp"
 #include "model/object.hpp"
 #include "model/portfolio.hpp"
@@ -66,7 +67,7 @@ static model::Order combo_order(std::string id,
 }
 
 TEST(BookkeepingHoldings, UnderlyingAvgCostAndRealizedPnlOnCloseAndReverse) {
-    core::BookkeepingEngine pe;
+    test::LoneBookkeeping pe;
     const std::string strat = "s1";
     auto buy10_100 = make_trade("OID", "TID-1", "AAPL", Side::BUY, 100.0, 10);
     auto buy10_110 = make_trade("OID", "TID-2", "AAPL", Side::BUY, 110.0, 10);
@@ -97,7 +98,7 @@ TEST(BookkeepingHoldings, UnderlyingAvgCostAndRealizedPnlOnCloseAndReverse) {
 }
  
 TEST(BookkeepingHoldings, AFillIsAnOptionWhenItsSymbolNamesOne) {
-    core::BookkeepingEngine pe;
+    test::LoneBookkeeping pe;
     const std::string strat = "s1";
 
     book(pe, strat, make_trade("OID", "TID-1", "SPY", Side::BUY, 580.0, 3), nullptr);
@@ -111,7 +112,7 @@ TEST(BookkeepingHoldings, AFillIsAnOptionWhenItsSymbolNamesOne) {
 }
 
 TEST(BookkeepingHoldings, SingleLegOptionUsesMultiplierAndRealizedPnl) {
-    core::BookkeepingEngine pe;
+    test::LoneBookkeeping pe;
     const std::string strat = "s1";
  
     // Buy 2 contracts @1.00, then sell 1 @1.50 => realized = (1.5-1.0)*1*100 = 50
@@ -153,7 +154,7 @@ static model::Order make_combo_order(std::string order_id, std::string symbol,
 // A straddle opened by one order and closed by another of another type over the same legs: flat
 // in each contract, each still saying what it was opened in.
 TEST(BookkeepingHoldings, AStraddleClosedByAnotherOrderIsFlatInEachContract) {
-    core::BookkeepingEngine pe;
+    test::LoneBookkeeping pe;
     const std::string strat = "s1";
     const std::string call = "SPXW-20250804-C-6325";
     const std::string put = "SPXW-20250804-P-6325";
@@ -190,7 +191,7 @@ TEST(BookkeepingHoldings, AStraddleClosedByAnotherOrderIsFlatInEachContract) {
 // cost_value is signed like current_value(): a short's premium is a credit, so
 // unrealized = current_value() - cost_value is right for both directions.
 TEST(BookkeepingHoldings, ShortCostValueIsSignedSoUnrealizedPnlIsCorrect) {
-    core::BookkeepingEngine pe;
+    test::LoneBookkeeping pe;
     const std::string strat = "s1";
     const std::string sym = "SPXW-20250804-C-5000";
     book(pe, strat, make_trade("OID", "T1", sym, Side::SELL, 2.00, 1), nullptr);
@@ -205,7 +206,7 @@ TEST(BookkeepingHoldings, ShortCostValueIsSignedSoUnrealizedPnlIsCorrect) {
 /** A combo order fills as its contracts: each held by itself, opened in that combo (its legs'
  * symbols, sorted). */
 TEST(BookkeepingHoldings, AComboIsHeldAsItsContracts) {
-    core::BookkeepingEngine pe;
+    test::LoneBookkeeping pe;
     const std::string strat = "s";
     const std::string call = "SPY-20991218-C-600";
     const std::string put = "SPY-20991218-P-600";
@@ -260,7 +261,7 @@ TEST(BookkeepingHoldings, HoldingIsIndependentOfFillOrder) {
         {make_trade("2", "2b", put, Side::SELL, 3.0, 1), &close},
     };
     const auto held_after = [&](std::vector<int> sequence) {
-        core::BookkeepingEngine pe;
+        test::LoneBookkeeping pe;
         for (int i : sequence) {
             book(pe, "s", fills[i].first, fills[i].second);
         }
@@ -279,7 +280,7 @@ TEST(BookkeepingHoldings, HoldingIsIndependentOfFillOrder) {
 // then the move by the Greeks the position had, with what they do not explain as other.
 TEST(BookkeepingHoldings, PnlIsAttributedToItsSourcesAndAddsUp) {
     using namespace std::chrono;
-    core::BookkeepingEngine pe;
+    test::LoneBookkeeping pe;
     const std::string strat = "s1";
     const std::string call = model::option_symbol({.root = "SPY",
                                                    .expiry = 2099y / December / 18,
@@ -333,7 +334,7 @@ TEST(BookkeepingHoldings, PnlIsAttributedToItsSourcesAndAddsUp) {
 
 /** A fill of no leg of its combo order, or without its order, opens its contract as alone. */
 TEST(BookkeepingHoldings, AFillOutsideItsCombosLegsOpensItsContractAlone) {
-    core::BookkeepingEngine pe;
+    test::LoneBookkeeping pe;
     const std::string call = "SPY-20991218-C-600";
     const std::string put = "SPY-20991218-P-600";
     const std::string stray = "SPY-20991218-C-650";
@@ -353,7 +354,7 @@ TEST(BookkeepingHoldings, AFillOutsideItsCombosLegsOpensItsContractAlone) {
 
 // Sold as a one-leg combo, bought back as a plain order: one position, flat.
 TEST(BookkeepingHoldings, AOneLegComboAndAPlainOrderOfItsOptionShareOnePosition) {
-    core::BookkeepingEngine pe;
+    test::LoneBookkeeping pe;
     const std::string call = "SPXW-20991218-C-7735";
     const auto single = combo_order("1", {{call, Side::SELL}});
     book(pe, "s", make_trade("1", "1a", call, Side::SELL, 19.4, 1), &single);
@@ -368,7 +369,7 @@ TEST(BookkeepingHoldings, AOneLegComboAndAPlainOrderOfItsOptionShareOnePosition)
 }
 
 TEST(BookkeepingHoldings, HoldsOnlyWhatIsOpenSharesOptionsAndComboLegs) {
-    core::BookkeepingEngine pe;
+    test::LoneBookkeeping pe;
     const std::string call = "SPY-20991218-C-600";
     const std::string put = "SPY-20991218-P-600";
     const auto straddle =
@@ -392,7 +393,7 @@ struct Recorder final : utilities::Logger {
 /** The account page checks on each refresh: a check is logged only when its outcome changes. */
 TEST(BookkeepingHoldings, TheBrokerCheckIsLoggedWhenItsOutcomeChanges) {
     Recorder logger;
-    core::BookkeepingEngine pe(&logger);
+    test::LoneBookkeeping pe(&logger);
     EXPECT_EQ(pe.broker_check().first, "not yet");
     const std::vector<core::BrokerCheckRow> agree{
         {.symbol = "AAPL", .engine = 0, .broker = 5, .traded_here = false},
@@ -423,7 +424,7 @@ TEST(BookkeepingHoldings, TheBrokerCheckIsLoggedWhenItsOutcomeChanges) {
 }
 
 TEST(BookkeepingHoldings, APartCloseOfAShortKeepsItsSideAndItsCost) {
-    core::BookkeepingEngine pe;
+    test::LoneBookkeeping pe;
     book(pe, "s", make_trade("1", "1", "SPY", Side::SELL, 100.0, 5), nullptr);
     book(pe, "s", make_trade("2", "2", "SPY", Side::BUY, 90.0, 2), nullptr);
     const auto& shares = pe.ensure_holding("s").shares;
@@ -435,7 +436,7 @@ TEST(BookkeepingHoldings, APartCloseOfAShortKeepsItsSideAndItsCost) {
 
 /** What a contract was opened in is set as it opens from flat, by the order that opened it. */
 TEST(BookkeepingHoldings, WhatAContractWasOpenedInIsSetAsItOpensFromFlat) {
-    core::BookkeepingEngine pe;
+    test::LoneBookkeeping pe;
     const std::string call = "SPY-20991218-C-600";
     const std::string put = "SPY-20991218-P-600";
     const std::string wing = "SPY-20991218-C-650";
@@ -463,7 +464,7 @@ TEST(BookkeepingHoldings, WhatAContractWasOpenedInIsSetAsItOpensFromFlat) {
 }
 
 TEST(BookkeepingHoldings, SharesAreMarkedWithoutAQuoteAndTheirRealizedPnlCountsWhenFlat) {
-    core::BookkeepingEngine pe;
+    test::LoneBookkeeping pe;
     model::Portfolio bare("SPY"); // no underlying quoted
     model::PortfolioSnapshot at = bare.snapshot();
     at.datetime = std::chrono::sys_days{std::chrono::year{2099} / 1 / 5};
@@ -485,10 +486,10 @@ TEST(BookkeepingHoldings, SharesAreMarkedWithoutAQuoteAndTheirRealizedPnlCountsW
     EXPECT_DOUBLE_EQ(flat.delta, 0.0);
 }
 
-TEST(BookkeepingHoldings, PnlOfSharesIsTheirDeltaAndAnUnmarkedOptionsIsTheFills) {
+TEST(BookkeepingHoldings, PnlOfSharesIsTheirDeltaAndAnOptionUnquotedNowKeepsItsLastMark) {
     using namespace std::chrono;
     const model::DateTime day = sys_days{2099y / January / 5};
-    core::BookkeepingEngine pe;
+    test::LoneBookkeeping pe;
     model::Portfolio spy("SPY");
     model::Contract contract;
     contract.symbol = "SPY";
@@ -521,7 +522,7 @@ TEST(BookkeepingHoldings, PnlOfSharesIsTheirDeltaAndAnUnmarkedOptionsIsTheFills)
     EXPECT_NEAR(shares.pnl, 20.0, 1e-9);
 
     // A call with no implied vol at the start and no underlying quote: no move, no vol change.
-    core::BookkeepingEngine options;
+    test::LoneBookkeeping options;
     model::Portfolio unquoted("SPY");
     const std::string call = "SPY-20991218-C-600";
     model::Contract option;
@@ -543,15 +544,16 @@ TEST(BookkeepingHoldings, PnlOfSharesIsTheirDeltaAndAnUnmarkedOptionsIsTheFills)
     EXPECT_NEAR(s.pnl_other, 100.0, 1e-9);
     EXPECT_NEAR(s.pnl_fills, 0.0, 1e-9);
 
-    quote(unquoted, 0.0, 0.0, 0.2); // no mark now: its change comes in with the fills
+    quote(unquoted, 0.0, 0.0, 0.2); // no quote now: valued at its last mark, not at nothing
     options.value_holding("s", unquoted);
-    EXPECT_NEAR(s.pnl, -1000.0, 1e-9);
+    EXPECT_NEAR(s.pnl, 100.0, 1e-9);
     EXPECT_NEAR(s.pnl_other, 100.0, 1e-9);
-    EXPECT_NEAR(s.pnl_fills, -1100.0, 1e-9);
+    EXPECT_NEAR(s.pnl_fills, 0.0, 1e-9);
+    EXPECT_DOUBLE_EQ(options.find_holding("s")->options.at(call).mid_price, 11.0);
 }
 
 TEST(BookkeepingHoldings, AStartWaitsForExpiredOptionsSettledAndTheBrokerAgreeing) {
-    core::BookkeepingEngine pe;
+    test::LoneBookkeeping pe;
     const model::DateTime now = std::chrono::sys_days{std::chrono::year{2099} / 1 / 5};
     const auto refusal = [&](bool required) { return pe.start_refusal("s", now, required); };
     EXPECT_EQ(refusal(false), std::nullopt);
@@ -595,7 +597,7 @@ TEST(BookkeepingHoldings, SharesOfTheHedgeCountInTheUnderlyingsUnits) {
     quotes.hedge_mark = 600.0;
     spxw.apply(quotes);
 
-    core::BookkeepingEngine pe;
+    test::LoneBookkeeping pe;
     book(pe, "s", make_trade("1", "1", "SPY", Side::SELL, 600.0, 500), nullptr);
     pe.value_holding("s", spxw);
 

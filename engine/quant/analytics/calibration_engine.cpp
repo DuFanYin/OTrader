@@ -56,8 +56,10 @@ std::string run_heston_price_json(const std::string& src, double t0_ms) {
     if (!req) return req.error();
     const json& j = *req;
     const double price = heston_call_price(jv(j, "spot", 0.0), jv(j, "strike", 0.0), jv(j, "rate", 0.0),
-                                           jv(j, "maturity", 1.0), jv(j, "v0", 0.04), jv(j, "kappa", 1.5),
-                                           jv(j, "theta", 0.04), jv(j, "xi", 0.5), jv(j, "rho", -0.7));
+                                           jv(j, "maturity", 1.0),
+                                           {jv(j, "v0", 0.04), jv(j, "kappa", 1.5),
+                                            jv(j, "theta", 0.04), jv(j, "xi", 0.5),
+                                            jv(j, "rho", -0.7)});
     return ok_response({{"heston_price", price}}, json::object(), t0_ms);
 }
 
@@ -73,7 +75,6 @@ std::string run_heston_calibrate_json(const std::string& src, double t0_ms) {
     const auto prices = j["market_prices"].get<std::vector<double>>();
     if (prices.empty()) return err_response("calibration_data_empty");
     const double spot = jv(j, "spot", 0.0), rate = jv(j, "rate", 0.0);
-    // The fit is quant's, the one the trading engine's strategies use.
     const HestonFit fit = heston_calibrate(spot, rate, strikes, maturities, prices,
                                            {jv(j, "init_v0", 0.04), jv(j, "init_kappa", 1.5), jv(j, "init_theta", 0.04),
                                             jv(j, "init_xi", 0.5), jv(j, "init_rho", -0.7)},
@@ -81,16 +82,15 @@ std::string run_heston_calibrate_json(const std::string& src, double t0_ms) {
     const HestonParams& h = fit.params;
     const std::size_t n = prices.size();
     std::vector<double> model(n), residuals(n);
-    double max_err = 0.0, squares = 0.0;
+    double max_err = 0.0;
     for (std::size_t i = 0; i < n; ++i) {
-        model[i] = heston_call_price(spot, strikes[i], rate, maturities[i], h.v0, h.kappa, h.theta, h.xi, h.rho);
+        model[i] = heston_call_price(spot, strikes[i], rate, maturities[i], h);
         residuals[i] = model[i] - prices[i];
         max_err = std::max(max_err, std::abs(residuals[i]));
-        squares += residuals[i] * residuals[i];
     }
     json summary = {{"v0", h.v0},       {"kappa", h.kappa},
                     {"theta", h.theta}, {"xi", h.xi},
-                    {"rho", h.rho},     {"rmse", std::sqrt(squares / n)},
+                    {"rho", h.rho},     {"rmse", fit.rmse},
                     {"max_abs_error", max_err}, {"iterations", fit.iterations},
                     {"converged", fit.converged}};
     return ok_response(std::move(summary), {{"model_prices", model}, {"residuals", residuals}}, t0_ms);

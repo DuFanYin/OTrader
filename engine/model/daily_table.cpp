@@ -67,6 +67,15 @@ auto DailyTable::before(std::string_view series, Day day, std::size_t n) const
     return out;
 }
 
+auto DailyTable::last_before(std::string_view series, Day day) const -> std::optional<Day> {
+    const auto found = series_.find(series);
+    if (found == series_.end()) {
+        return std::nullopt;
+    }
+    const auto it = std::ranges::lower_bound(found->second, day, {}, &std::pair<Day, double>::first);
+    return it != found->second.begin() ? std::optional(std::prev(it)->first) : std::nullopt;
+}
+
 auto DailyTable::next(std::string_view series, Day day) const -> std::optional<Day> {
     const auto found = series_.find(series);
     if (found == series_.end()) {

@@ -41,7 +41,7 @@ export const DEFAULTS = {
   pdeSSteps: 160, pdeTSteps: 160, pdeMethod: "crank_nicolson", measureMode: "pq",
   cmpSteps: 400, cmpPaths: 10000, measureN: 500, convSteps: "10,20,40,80,120,200,320,500", benchmarkBase: "pde",
   // validation
-  pickStats: true, pickIto: true, pickSimulation: true, pickLattice: false, precheck: true, blockOnFail: false,
+  pickStats: true, pickIto: true, pickSimulation: true, pickLattice: false, pickSmile: false, precheck: true, blockOnFail: false,
   statsTheta: 1.0, statsN: 50000, itoTheta: 0.7, itoT: 1.0, itoN: 5000, itoFunction: "exp_martingale",
   simSteps: 300, simDt: 0.01, simKappa: 1.2, simTheta: 0.03, simModel: "brownian",
   // screener

@@ -3,8 +3,9 @@
 /** A pool of T objects, lock-free: a free list (a Treiber stack of slot indices, tagged against
  * ABA) over chunks that are allocated as it grows and kept until the pool goes. Each object is
  * constructed once, with its chunk, and destroyed with the pool: acquire() hands one out set to
- * T{} (a string keeps its buffer, so a payload copied in allocates nothing once warm). A second
- * release of the same object is ignored. Destroy the pool once no thread uses it. */
+ * T{}, take() as it was released, its buffers kept (strings' and vectors' alike), so a payload
+ * copied in whole allocates nothing once warm. A second release of the same object is ignored.
+ * Destroy the pool once no thread uses it. */
 
 #include <algorithm>
 #include <array>
@@ -55,25 +56,23 @@ template <typename T> class ObjectPool {
     T* acquire() { return emplace(); }
     /** An object set to T(args...); null once closed. */
     template <typename... Args> T* emplace(Args&&... args) {
-        if (closed_.load(std::memory_order_acquire)) {
+        Slot* s = free_slot();
+        if (s == nullptr) {
             return nullptr;
         }
-        Slot* s = pop();
-        if (s == nullptr) {
-            s = grow();
-            if (s == nullptr) {
-                return nullptr;
-            }
-        }
-        T* p = object_of(s);
         try {
-            *p = T(std::forward<Args>(args)...);
+            *object_of(s) = T(std::forward<Args>(args)...);
         } catch (...) {
             push(s);
             throw;
         }
-        s->out.store(true, std::memory_order_relaxed);
-        return p;
+        return hand_out(s);
+    }
+    /** An object as it was released, with its values and buffers, for one assigned whole; null
+     * once closed. */
+    T* take() {
+        Slot* s = free_slot();
+        return s != nullptr ? hand_out(s) : nullptr;
     }
 
     void release(T* p) noexcept {
@@ -145,6 +144,20 @@ template <typename T> class ObjectPool {
             }
         }
         return nullptr;
+    }
+
+    /** A slot off the free list, or a new chunk's; null once closed or every chunk is used. */
+    Slot* free_slot() {
+        if (closed_.load(std::memory_order_acquire)) {
+            return nullptr;
+        }
+        Slot* s = pop();
+        return s != nullptr ? s : grow();
+    }
+
+    T* hand_out(Slot* s) {
+        s->out.store(true, std::memory_order_relaxed);
+        return object_of(s);
     }
 
     Slot* pop() {

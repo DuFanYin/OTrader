@@ -28,12 +28,18 @@ pytestmark = pytest.mark.skipif(not (repo_root() / "engine" / "build" / "entry_b
                                 reason="entry_backtest is not built")
 
 OPTION = re.compile(r"-(\d{8})-([CP])-([\d.]+)$")
-FEE, POSITION = 1.2, 0.6  # a fill position inside the spread: the rule, not only the quotes
+POSITION = 0.6  # a fill position inside the spread: the rule, not only the quotes
+
+
+def fee(price: float, contracts: float) -> float:
+    """IBKR's commission on an ETF option, an order of one fill: by the price, at least 1 an order."""
+    each = 0.25 if price < 0.05 else 0.50 if price < 0.10 else 0.65
+    return max(contracts * each, 1.0)
 
 
 def run(files_: list, strategy: str, setting: dict, log: bool = False) -> dict:
     trial = {"id": "t", "strategy": strategy, "setting": setting,
-             "costs": {"fee_rate": FEE, "fill_position": POSITION}, "fills": True, "log": log}
+             "costs": {"fee_scale": 1.0, "fill_position": POSITION}, "fills": True, "log": log}
     return jobs.run({"files": [str(f) for f in files_], "risk_free_rate": 0.05, "iv_price_mode": "mid",
                      "trials": [trial]}, jobs.PRIORITY_REPORT)[1][0]
 
@@ -56,11 +62,11 @@ def spots(m: synthetic_days.Model, days: list[date]) -> dict[datetime, float]:
 def test_a_backtest_makes_what_the_model_says_to_the_cent(tmp_path, monkeypatch):
     m = synthetic_days.Model(realized_vol=0.0, drift=3.0, expiries=1, strikes=10)
     days = synthetic_days.trading_days(date(2023, 1, 2), date(2023, 1, 13))
-    synthetic_days.generate(m, days[0], days[-1], tmp_path, "SPY", False)
+    synthetic_days.generate(m, days[0], days[-1], tmp_path / "backtest", "SPY", False)
     monkeypatch.setattr(files, "data_root", lambda: tmp_path)
     mid = spots(m, days)
     setting = {"signal_minutes": 30, "entry_minute": 360, "exit_minute": 380}
-    out = run(sorted((tmp_path / "SPY").rglob("*.parquet")), "SyntheticMomentumStrategy", setting)
+    out = run(sorted((tmp_path / "backtest" / "SPY").rglob("*.parquet")), "SyntheticMomentumStrategy", setting)
     assert not out["errors"], out["errors"]
 
     def quoted(symbol: str, at: datetime) -> tuple[float, float]:
@@ -89,7 +95,7 @@ def test_a_backtest_makes_what_the_model_says_to_the_cent(tmp_path, monkeypatch)
                 seen = quoted(f["symbol"], session[minute - 1].astimezone(timezone.utc))[1]
                 assert f["quantity"] == math.floor(1500 / (seen * 100))
                 assert OPTION.search(f["symbol"]).group(2) == "C"  # the underlying rose: a call
-            cash += (-1 if buying else 1) * f["price"] * f["quantity"] * 100 - FEE * f["quantity"]
+            cash += (-1 if buying else 1) * f["price"] * f["quantity"] * 100 - fee(f["price"], f["quantity"])
         assert day["net_pnl"] == pytest.approx(cash, abs=0.01)
         traded += 1
     assert traded == len(days)

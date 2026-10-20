@@ -25,12 +25,12 @@ STRADDLE = {"leg1_ratio": 1, "leg2_ratio": 1, "leg2_right": 1, "entry_minute": 3
 @pytest.fixture
 def week(tmp_path, monkeypatch):
     """Synthetic SPY days Wednesday to Friday (an expiry every day), a ledger and a config folder of their own."""
-    synthetic_days.generate(synthetic_days.Model(implied_vol=0.2), date(2025, 3, 5), date(2025, 3, 7), tmp_path,
-                            "SPY", False)
+    synthetic_days.generate(synthetic_days.Model(implied_vol=0.2), date(2025, 3, 5), date(2025, 3, 7),
+                            tmp_path / "backtest", "SPY", False)
     monkeypatch.setattr(files, "data_root", lambda: tmp_path)
     monkeypatch.setattr(store, "_db", None)
     monkeypatch.setattr(configs, "config_dir", lambda: tmp_path / "configs")
-    return sorted(str(p) for p in (tmp_path / "SPY").rglob("*.parquet"))
+    return sorted(str(p) for p in (tmp_path / "backtest" / "SPY").rglob("*.parquet"))
 
 
 def put(name: str, **request) -> engine.Result:
@@ -78,7 +78,7 @@ def _run(days: list[str], daily: Path | None = None, **setting) -> dict:
     """ComboStrategy on these days (with the values by day in `daily`): entry_backtest's answer, the trial's line
     (runner.read)."""
     args = [f"{k}={v}" for k, v in setting.items()] + (["--daily", str(daily)] if daily else [])
-    out = subprocess.run([str(ENTRY), "--files", *days, "ComboStrategy", *args], capture_output=True,
+    out = subprocess.run([str(ENTRY), "--json", "--files", *days, "ComboStrategy", *args], capture_output=True,
                          timeout=120, check=True)
     return next(runner.read(out.stdout)[1])
 

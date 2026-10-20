@@ -1,5 +1,6 @@
 #include "core/risk/risk_engine.hpp"
 
+#include "model/expiry.hpp"
 #include "model/symbol.hpp"
 #include "model/utility.hpp"
 #include <algorithm>
@@ -9,7 +10,6 @@
 #include <format>
 #include <iterator>
 #include <map>
-#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -25,14 +25,12 @@ auto spot_of(const model::Portfolio& portfolio) -> double {
     return u ? u->mid() : 0.0;
 }
 
-constexpr double kOptionMultiplier = 100.0;
-
 // The names the storage keeps the limits (the prefix, then the limit's name) and the halt under.
 constexpr std::string_view kSavedLimit = "risk.limit.";
 constexpr std::string_view kSavedHalted = "risk.halted";
 constexpr std::string_view kSavedHaltReason = "risk.halt_reason";
 constexpr std::string_view kSavedHaltedAt = "risk.halted_at";
-constexpr std::string_view kSavedDay = "risk.day";             // the New York day the starts are of
+// Saved before calendars: the one day the starts were of.
 constexpr std::string_view kSavedDayStart = "risk.day_start."; // then the strategy's name
 constexpr double kUncoveredCall = 0.2;   // of the underlying, for each call sold uncovered
 constexpr double kShareMargin = 0.5;     // of the shares' value
@@ -49,10 +47,6 @@ void for_each_change(const Order& order, double quantity, Fn&& fn) {
             fn(leg.symbol, sign(leg.side) * std::abs(static_cast<double>(leg.ratio)) * quantity);
         }
     }
-}
-
-auto is_option(std::string_view symbol) -> bool {
-    return model::parse_option_symbol(symbol).has_value();
 }
 
 /** The New York time of day, for a refusal's line. */
@@ -111,12 +105,10 @@ auto RiskEngine::saved_limits() const -> std::vector<std::pair<std::string, std:
 
 auto RiskEngine::saved_day() const -> std::vector<std::pair<std::string, std::string>> {
     std::vector<std::pair<std::string, std::string>> out;
-    out.emplace_back(kSavedDay, day_.ok() ? std::format("{:%F}", std::chrono::sys_days{day_})
-                                          : std::string{});
     for (const auto& [name, e] : exposure_) {
-        if (e.day_start) {
+        if (e.day_start && e.day.ok()) {
             out.emplace_back(std::format("{}{}", kSavedDayStart, name),
-                             std::format("{}", *e.day_start));
+                             std::format("{:%F} {}", std::chrono::sys_days{e.day}, *e.day_start));
         }
     }
     return out;
@@ -148,18 +140,19 @@ void RiskEngine::restore_limits(const std::unordered_map<std::string, std::strin
         const auto it = saved.find(std::string(name));
         return it != saved.end() ? it->second : std::string{};
     };
-    // The day's starts, so a restart keeps counting the day's loss from the morning.
-    std::istringstream day_text(text(kSavedDay));
-    std::chrono::sys_days day{};
-    if (day_text >> std::chrono::parse("%F", day)) {
-        day_ = std::chrono::year_month_day{day};
-        for (const auto& [name, value] : saved) {
-            if (name.starts_with(kSavedDayStart)) {
-                try {
-                    exposure_[name.substr(kSavedDayStart.size())].day_start = std::stod(value);
-                } catch (const std::exception&) {
-                }
-            }
+    // Each strategy's day and its start, so a restart keeps counting the day's loss from the
+    // morning: "<date> <pnl>".
+    for (const auto& [name, value] : saved) {
+        if (!name.starts_with(kSavedDayStart)) {
+            continue;
+        }
+        std::istringstream in(value);
+        std::chrono::sys_days day{};
+        double start = 0.0;
+        if (in >> std::chrono::parse("%F", day) >> start) {
+            Exposure& e = exposure_[name.substr(kSavedDayStart.size())];
+            e.day = std::chrono::year_month_day{day};
+            e.day_start = start;
         }
     }
     if (text(kSavedHalted) != "1") {
@@ -194,11 +187,13 @@ auto RiskEngine::book(const std::string& strategy_name, const model::StrategyHol
     // A book is a few contracts: found by comparing, not hashing.
     const auto line = [&out](const std::string& symbol, bool add) -> Line* {
         const auto it =
-            std::ranges::find_if(out, [&](const Line& l) { return *l.symbol == symbol; });
+            std::ranges::find_if(out, [&](const Line& l) { return l.symbol == symbol; });
         if (it != out.end()) {
             return &*it;
         }
-        return add ? &out.emplace_back(Line{.symbol = &symbol}) : nullptr;
+        return add ? &out.emplace_back(
+                         Line{.symbol = symbol, .option = model::parse_option_symbol(symbol)})
+                   : nullptr;
     };
     if (req != nullptr) {
         for_each_change(*req, req->quantity, [&](const std::string& symbol, double quantity) {
@@ -229,13 +224,13 @@ auto RiskEngine::book(const std::string& strategy_name, const model::StrategyHol
     return ordered;
 }
 
-auto RiskEngine::portfolio_of(const std::string& portfolio, const std::string& symbol) const
+auto RiskEngine::portfolio_of(const std::string& portfolio, std::string_view symbol) const
     -> const model::Portfolio* {
     return !portfolio.empty() ? portfolios_.find_portfolio(portfolio)
                               : portfolios_.portfolio_of(symbol);
 }
 
-auto RiskEngine::quote(const model::Portfolio* portfolio, const std::string& symbol) const
+auto RiskEngine::quote(const model::Portfolio* portfolio, std::string_view symbol) const
     -> std::optional<std::array<double, 3>> {
     if (portfolio == nullptr) {
         return std::nullopt;
@@ -252,72 +247,27 @@ auto RiskEngine::quote(const model::Portfolio* portfolio, const std::string& sym
 auto RiskEngine::in_flatten_window(const std::string& option_symbol,
                                    const model::Portfolio* portfolio,
                                    model::DateTime now) const -> bool {
-    const double minutes = limits_.flatten_minutes;
-    if (minutes <= 0.0 || portfolio == nullptr || !portfolio->physical) {
-        return false;
-    }
     const std::optional<model::OptionId> id = model::parse_option_symbol(option_symbol);
-    if (!id || id->expiry != model::new_york_date(now)) {
-        return false;
-    }
-    const auto close = model::option_expiry_time(id->expiry);
-    return now >= close - std::chrono::minutes(static_cast<int>(minutes));
-}
-
-auto RiskEngine::positions_to_flatten(const std::string& strategy_name,
-                                      const model::Portfolio& portfolio,
-                                      model::DateTime now) const
-    -> std::map<std::string, std::vector<model::OptionPosition>> {
-    const model::StrategyHolding* holding = bookkeeping_.find_holding(strategy_name);
-    if (limits_.flatten_minutes <= 0.0 || holding == nullptr) {
-        return {};
-    }
-    std::set<std::string> active;
-    bookkeeping_.for_each_active_order(strategy_name, [&](const model::Order& o) {
-        for (const model::Leg& leg : o.legs) {
-            active.insert(leg.symbol);
-        }
-    });
-    // The day before an ex-dividend day, in the window before today's close: combos with a call
-    // sold.
-    std::set<std::string> before_dividend;
-    const auto today = model::new_york_date(now);
-    if (daily_ != nullptr && portfolio.physical &&
-        daily_->next(portfolio.underlying_symbol + "_ex_dividend",
-                     std::chrono::sys_days{today} + std::chrono::days{1}) ==
-            model::next_trading_day(today) &&
-        now >= model::new_york_time(today, model::session_close(today)) -
-                   std::chrono::minutes(static_cast<int>(limits_.flatten_minutes))) {
-        holding->for_each_open_option([&](const model::OptionPosition& p) {
-            const std::optional<model::OptionId> id = model::parse_option_symbol(p.symbol);
-            if (id && id->type == model::OptionType::CALL && p.quantity < 0) {
-                before_dividend.insert(p.combo.empty() ? p.symbol : p.combo);
-            }
-        });
-    }
-    return holding->open_options_by_combo([&](const model::OptionPosition& p) {
-        return !active.contains(p.symbol) &&
-               (in_flatten_window(p.symbol, &portfolio, now) ||
-                before_dividend.contains(p.combo.empty() ? p.symbol : p.combo));
-    });
+    return id && BookkeepingEngine::in_flatten_window(*id, portfolio, now, limits_.flatten_minutes);
 }
 
 auto RiskEngine::refusal(const std::string& strategy_name, const std::string& portfolio,
                          const model::OrderRequest& req, model::DateTime now)
     -> std::optional<std::string> {
     const Limits& l = limits_;
-    const bool sells_option = std::ranges::any_of(req.legs, [](const model::Leg& leg) {
-        return leg.side == model::Side::SELL && is_option(leg.symbol);
-    });
+    const bool sells = std::ranges::any_of(
+        req.legs, [](const model::Leg& leg) { return leg.side == model::Side::SELL; });
     // The whole book only for the checks that look past the order's contracts.
-    const bool whole = (l.short_options < 1.0 && sells_option) || l.max_strategy_positions > 0.0 ||
-                       l.max_margin > 0.0;
+    const bool whole =
+        (l.short_options < 1.0 && sells) || l.max_strategy_positions > 0.0 || l.max_margin > 0.0;
     const std::size_t ordered = book(strategy_name, bookkeeping_.find_holding(strategy_name), &req,
                                      whole, lines_);
     if (ordered == 0 || req.quantity <= 0.0) {
         return "nothing to fill";
     }
     const std::span<const Line> order(lines_.data(), ordered);
+    const bool sells_option =
+        std::ranges::any_of(order, [](const Line& c) { return c.option && c.change < 0.0; });
     // Only closing: every contract moves toward zero, and no further than it.
     bool reduces = !strategy_name.empty();
     for (const Line& c : order) {
@@ -327,7 +277,7 @@ auto RiskEngine::refusal(const std::string& strategy_name, const std::string& po
         return std::format("trading is halted ({}): only closing orders go", halt_reason_);
     }
 
-    const model::Portfolio* where = portfolio_of(portfolio, *order.front().symbol);
+    const model::Portfolio* where = portfolio_of(portfolio, order.front().symbol);
     if (!reduces) {
         if (const auto stop = day_stops_.find(strategy_name); stop != day_stops_.end()) {
             return std::format("{}: only closing orders until tomorrow", stop->second);
@@ -344,12 +294,13 @@ auto RiskEngine::refusal(const std::string& strategy_name, const std::string& po
             }
         }
     }
-    double premium = 0.0; // USD paid for options per unit, at the market
+    double premium = 0.0; // paid for options per unit, at the market, per share of a contract
+    std::string_view an_option; // its multiplier makes the premium USD
     double net_mid = 0.0;
     bool mids = true;
     for (const Line& c : order) {
-        const std::string& symbol = *c.symbol;
-        const bool option = is_option(symbol);
+        const std::string_view symbol = c.symbol;
+        const bool option = c.option.has_value();
         const double max_order = option ? l.max_option_order : l.max_share_order;
         if (std::abs(c.change) > max_order) {
             return std::format("{} {} in one order: over {} {}", std::abs(c.change), symbol,
@@ -371,6 +322,7 @@ auto RiskEngine::refusal(const std::string& strategy_name, const std::string& po
         mids = mids && mid > 0.0;
         if (option) {
             premium += per_unit * (per_unit > 0 ? ask : bid);
+            an_option = symbol;
         }
 
         const double before = c.held + c.active;
@@ -382,7 +334,8 @@ auto RiskEngine::refusal(const std::string& strategy_name, const std::string& po
                                option ? "max_option_position" : "max_share_position",
                                max_position);
         }
-        if (option && std::abs(after) > std::abs(before) && in_flatten_window(symbol, where, now)) {
+        if (option && std::abs(after) > std::abs(before) &&
+            BookkeepingEngine::in_flatten_window(*c.option, where, now, l.flatten_minutes)) {
             return std::format("{} expires at the close: only closing it from {} minutes before",
                                symbol, l.flatten_minutes);
         }
@@ -398,7 +351,7 @@ auto RiskEngine::refusal(const std::string& strategy_name, const std::string& po
         }
     }
     if (!strategy_name.empty() && l.short_options < 1.0 && sells_option) {
-        if (std::optional<std::string> why = uncovered(quantities(lines_, true))) {
+        if (std::optional<std::string> why = uncovered(lines_)) {
             return std::format("{} would hold {}: uncovered (short_options 0)", strategy_name,
                                *why);
         }
@@ -412,7 +365,8 @@ auto RiskEngine::refusal(const std::string& strategy_name, const std::string& po
         const double per_unit = req.type == model::OrderType::LIMIT && premium > 0.0
                                     ? std::abs(req.price)
                                     : premium;
-        const double paid = per_unit * req.quantity * kOptionMultiplier;
+        const double paid =
+            per_unit * req.quantity * (an_option.empty() ? 1.0 : portfolios_.multiplier(an_option));
         if (premium > 0.0 && paid > l.max_order_premium) {
             return std::format("it pays {:.0f} USD for options: over max_order_premium {:.0f}",
                                paid, l.max_order_premium);
@@ -421,41 +375,23 @@ auto RiskEngine::refusal(const std::string& strategy_name, const std::string& po
     return std::nullopt;
 }
 
-auto RiskEngine::quantities(std::span<const Line> book, bool after)
-    -> std::span<const std::pair<std::string_view, double>> {
-    quantities_.clear();
-    for (const Line& c : book) {
-        quantities_.emplace_back(*c.symbol, after ? c.held + c.active + c.change : c.held);
-    }
-    return quantities_;
-}
-
-void RiskEngine::start_bar(model::DateTime now) {
-    if (day_begins_ <= now && now < day_ends_) {
-        return; // within the New York day found last
-    }
-    const std::chrono::year_month_day today = model::new_york_date(now);
-    using namespace std::chrono_literals;
-    day_begins_ = model::new_york_time(today, 0min);
-    day_ends_ = model::new_york_time(
-        std::chrono::year_month_day{std::chrono::sys_days{today} + std::chrono::days{1}}, 0min);
-    if (today == day_) {
+void RiskEngine::start_bar(const std::string& strategy_name, const model::Portfolio& portfolio,
+                           model::DateTime now) {
+    const model::SessionCalendar& calendar = portfolio.calendar();
+    const std::chrono::year_month_day today = calendar.date_of(now);
+    Exposure& e = exposure_[strategy_name];
+    if (today == e.day) {
         return;
     }
-    day_ = today;
-    day_changed_ = true;
-    for (auto& [name, e] : exposure_) {
-        e.day_start.reset();
-    }
-    day_stops_.clear();
-    bookkeeping_.for_each_holding([&](const std::string& name, const model::StrategyHolding& h) {
-        exposure_[name].day_start = h.summary.pnl;
-    });
-}
-
-auto RiskEngine::trading_day() const -> bool {
+    e.day = today;
     // A closed day moves only the marks (quotes refreshed, or none yet): nothing to stop.
-    return !day_.ok() || model::is_trading_day(day_);
+    e.trading_day = calendar.is_trading_day(today);
+    day_changed_ = true;
+    day_stops_.erase(strategy_name);
+    // Where the holding was valued last; else (a position unquoted since a restart) where it is
+    // first valued whole (measure_exposure).
+    const model::StrategyHolding* h = bookkeeping_.find_holding(strategy_name);
+    e.day_start = h != nullptr && h->valued() ? std::optional(h->summary.pnl) : std::nullopt;
 }
 
 void RiskEngine::measure_exposure(const std::string& strategy_name,
@@ -470,11 +406,17 @@ void RiskEngine::measure_exposure(const std::string& strategy_name,
     e.delta = h->summary.delta * spot;
     e.gamma = h->summary.gamma * spot * spot / 100.0;
     e.vega = h->summary.vega;
-    e.margin = margin(quantities(lines_, false), portfolio);
-    const double start = e.day_start ? *e.day_start : *(e.day_start = h->summary.pnl);
-    const double loss = start - h->summary.pnl;
+    e.margin = margin(lines_, false, portfolio);
+    if (!e.day_start) {
+        if (!h->valued()) {
+            return; // not from a summary that values a position at nothing
+        }
+        e.day_start = h->summary.pnl;
+        day_changed_ = true; // saved: a restart today keeps counting from it
+    }
+    const double loss = *e.day_start - h->summary.pnl;
     const double limit = limits_.max_strategy_daily_loss;
-    if (limit > 0.0 && loss >= limit && trading_day() && !day_stops_.contains(strategy_name)) {
+    if (limit > 0.0 && loss >= limit && e.trading_day && !day_stops_.contains(strategy_name)) {
         day_stops_[strategy_name] =
             std::format("{} lost {:.0f} USD today: over max_strategy_daily_loss {:.0f}",
                         strategy_name, loss, limit);
@@ -485,12 +427,13 @@ void RiskEngine::measure_exposure(const std::string& strategy_name,
 
 auto RiskEngine::day_loss() const -> std::optional<std::string> {
     const double limit = limits_.max_daily_loss;
-    if (limit <= 0.0 || halted_ || !trading_day()) {
+    if (limit <= 0.0 || halted_) {
         return std::nullopt;
     }
     double loss = 0.0;
     bookkeeping_.for_each_holding([&](const std::string& name, const model::StrategyHolding& h) {
-        if (const auto it = exposure_.find(name); it != exposure_.end() && it->second.day_start) {
+        if (const auto it = exposure_.find(name);
+            it != exposure_.end() && it->second.trading_day && it->second.day_start) {
             loss += *it->second.day_start - h.summary.pnl;
         }
     });
@@ -508,54 +451,45 @@ auto RiskEngine::margin(const std::string& strategy_name) const -> double {
 
 auto RiskEngine::margin(std::span<const std::pair<std::string_view, double>> holding,
                         const model::Portfolio& portfolio) -> double {
-    const double spot = spot_of(portfolio);
-    struct Leg {
-        model::OptionType type;
-        double strike;
-        double contracts; // shares: quantity times the multiplier, bought +
-    };
-    std::map<std::chrono::year_month_day, std::vector<Leg>> expiries;
-    double total = 0.0;
+    std::vector<Line> book;
     for (const auto& [symbol, quantity] : holding) {
+        book.push_back({.symbol = symbol, .option = model::parse_option_symbol(symbol),
+                        .held = quantity});
+    }
+    return margin(book, false, portfolio);
+}
+
+auto RiskEngine::margin(std::span<const Line> book, bool after, const model::Portfolio& portfolio)
+    -> double {
+    const double spot = spot_of(portfolio);
+    std::map<std::chrono::year_month_day, std::vector<model::ExpiryLeg>> expiries;
+    double total = 0.0;
+    for (const Line& c : book) {
+        const double quantity = after ? c.after() : c.held;
         if (quantity == 0.0) {
             continue;
         }
-        if (const std::optional<model::OptionId> id = model::parse_option_symbol(symbol)) {
-            const std::optional<model::Option> option = portfolio.option(symbol);
-            const double multiplier = option ? option->multiplier() : kOptionMultiplier;
+        if (const std::optional<model::OptionId>& id = c.option) {
+            const std::optional<model::Option> option = portfolio.option(c.symbol);
+            const double multiplier = option ? option->multiplier()
+                                             : model::Contract::kOptionMultiplierDefault;
             expiries[id->expiry].push_back({id->type, id->strike, quantity * multiplier});
         } else {
             total += std::abs(quantity) * spot * kShareMargin;
         }
     }
     for (const auto& [expiry, legs] : expiries) {
-        const auto value = [&](double s) {
-            double v = 0.0;
-            for (const Leg& leg : legs) {
-                const double intrinsic = leg.type == model::OptionType::CALL
-                                             ? std::max(s - leg.strike, 0.0)
-                                             : std::max(leg.strike - s, 0.0);
-                v += leg.contracts * intrinsic;
-            }
-            return v;
-        };
-        double worst = value(0.0);
-        double calls = 0.0; // past the last strike, the value's slope
-        for (const Leg& leg : legs) {
-            worst = std::min(worst, value(leg.strike));
-            calls += leg.type == model::OptionType::CALL ? leg.contracts : 0.0;
-        }
-        total += std::max(-worst, 0.0) + std::max(-calls, 0.0) * spot * kUncoveredCall;
+        const model::ExpiryWorst w = model::worst_at_expiry(legs);
+        total += std::max(-w.worst, 0.0) + std::max(-w.calls_net, 0.0) * spot * kUncoveredCall;
     }
     return total;
 }
 
-auto RiskEngine::uncovered(std::span<const std::pair<std::string_view, double>> holding)
-    -> std::optional<std::string> {
+auto RiskEngine::uncovered(std::span<const Line> book) -> std::optional<std::string> {
     std::map<std::pair<std::chrono::year_month_day, model::OptionType>, double> net;
-    for (const auto& [symbol, quantity] : holding) {
-        if (const std::optional<model::OptionId> id = model::parse_option_symbol(symbol)) {
-            net[{id->expiry, id->type}] += quantity;
+    for (const Line& c : book) {
+        if (c.option) {
+            net[{c.option->expiry, c.option->type}] += c.after();
         }
     }
     for (const auto& [kind, quantity] : net) {
@@ -574,12 +508,12 @@ auto RiskEngine::exposure_refusal(const std::string& strategy_name,
     const double spot = spot_of(portfolio);
     Exposure added; // the order's
     for (const Line& c : std::span(lines_).first(ordered)) {
-        if (const std::optional<model::Option> option = portfolio.option(*c.symbol)) {
+        if (const std::optional<model::Option> option = portfolio.option(c.symbol)) {
             const model::Greeks g = option->greeks();
             added.delta += c.change * g.delta * spot;
             added.gamma += c.change * g.gamma * spot * spot / 100.0;
             added.vega += c.change * g.vega;
-        } else if (!is_option(*c.symbol)) {
+        } else if (!c.option) {
             added.delta += c.change * spot;
         }
     }
@@ -618,11 +552,9 @@ auto RiskEngine::exposure_refusal(const std::string& strategy_name,
     if (max_positions <= 0.0 && max_margin <= 0.0) {
         return std::nullopt;
     }
-    const auto after = quantities(lines_, true);
     if (max_positions > 0.0) {
-        const auto options = std::ranges::count_if(after, [](const auto& p) {
-            return p.second != 0.0 && is_option(p.first);
-        });
+        const auto options = std::ranges::count_if(
+            lines_, [](const Line& c) { return c.after() != 0.0 && c.option; });
         if (static_cast<double>(options) > max_positions) {
             return std::format("{} would hold {} options with its working orders: over "
                                "max_strategy_positions {}",
@@ -630,7 +562,7 @@ auto RiskEngine::exposure_refusal(const std::string& strategy_name,
         }
     }
     if (max_margin > 0.0) {
-        const double needed = margin(after, portfolio);
+        const double needed = margin(lines_, true, portfolio);
         if (needed > max_margin && needed > before.margin) {
             return std::format("{} would take {:.0f} USD of margin: over max_margin {:.0f}",
                                strategy_name, needed, max_margin);

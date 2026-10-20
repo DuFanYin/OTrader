@@ -61,7 +61,7 @@ class TemplateOrders : public ::testing::Test {
         }
         quotes.priced = true;
         p.apply(quotes);
-        backtest.configure_execution({.fee_rate = 0.0});
+        backtest.configure_execution({});
         name_ = main.add_strategy("TemplateOrderProbe", "SPY", {});
         main.init_strategy(name_);
         main.start_strategy(name_);

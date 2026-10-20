@@ -33,17 +33,6 @@ from optra.research import jobs, runner
 LANES = {"interactive": jobs.PRIORITY_REPORT, "bulk": jobs.PRIORITY_EXPERIMENT}  # the lowest priority each takes
 
 
-def run_job(job: dict[str, Any], threads: int, days_ahead: int, name: str | None = None) -> bytes:
-    """The job's batch through runner.run_trials: what the server takes back, the engine's output as it wrote it, or
-    {"status": "error", "error"}."""
-    b = job["batch"]
-    try:
-        return runner.run_trials(b["files"], b["trials"], b["risk_free_rate"], b["iv_price_mode"], threads,
-                                 days_ahead, name=name)
-    except ValueError as e:
-        return orjson.dumps({"status": "error", "error": str(e)})
-
-
 def keep_lease(client: httpx.Client, job: dict[str, Any], worker: str, run_name: str, done: threading.Event) -> None:
     """Renews the job's lease until done; stops the run when the server says it is cancelled or no longer ours."""
     while not done.wait(job["renew_seconds"]):
@@ -108,7 +97,7 @@ def main() -> int:
         started = time.time()
         running["name"] = run_name
         try:
-            result = run_job(job, args.threads, args.days_ahead, run_name)
+            result = runner.run_batch(job["batch"], args.threads, args.days_ahead, run_name)
         except runner.Cancelled:
             print(f"job {job_id}: stopped in {time.time() - started:.0f} s", flush=True)
             if stopping.is_set():

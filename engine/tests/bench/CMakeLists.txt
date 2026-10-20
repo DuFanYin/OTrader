@@ -11,6 +11,7 @@ endfunction()
 add_bench(bench_ring bench_ring.cpp)
 add_bench(bench_object_pool bench_object_pool.cpp)
 add_bench(bench_event_dispatch bench_event_dispatch.cpp)
+target_link_libraries(bench_event_dispatch PRIVATE pricing)
 
 set(BENCH_TARGETS bench_ring bench_object_pool bench_event_dispatch)
 
@@ -25,14 +26,18 @@ if(TARGET backtest)
 
   add_engine_bench(bench_replay bench_replay.cpp)
   add_engine_bench(bench_order_lifecycle bench_order_lifecycle.cpp)
+  add_engine_bench(bench_fit bench_fit.cpp)
+  target_link_libraries(bench_fit PRIVATE pricing)
   add_engine_bench(bench_backtest_day bench_backtest_day.cpp)
+  target_link_libraries(bench_backtest_day PRIVATE pricing)
   optra_strategy_host(bench_backtest_day LOAD)
-  # The live paths (a day of data/SPY, or OPTRA_TEST_DAY)
+  # The live paths (a day of data/backtest/SPY, or OPTRA_TEST_DAY)
   add_engine_bench(bench_live_paths bench_live_paths.cpp)
-  target_link_libraries(bench_live_paths PRIVATE sqlite_database) # its live assembly's storage
+  target_link_libraries(bench_live_paths PRIVATE sqlite_database pricing) # storage, its pricing
   target_compile_definitions(bench_live_paths PRIVATE
                              OPTRA_DATA_DIR="${CMAKE_SOURCE_DIR}/../data")
-  list(APPEND BENCH_TARGETS bench_replay bench_order_lifecycle bench_backtest_day bench_live_paths)
+  list(APPEND BENCH_TARGETS bench_replay bench_order_lifecycle bench_fit bench_backtest_day
+       bench_live_paths)
 else()
   message(STATUS "bench_replay/order_lifecycle/live_paths skipped (needs BUILD_BACKTEST=ON)")
 endif()

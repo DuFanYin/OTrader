@@ -2,7 +2,8 @@
 
 /** StrategyEngine: hosts the strategies (backtest and live). It creates each with a context bound
  * to it, keeps its state (added, inited, running, in error), drives its callbacks, each timed and
- * kept from throwing past it, and hedges its delta when it asks. State only, event thread. */
+ * kept from throwing past it, hedges its delta when it asks, and keeps what they want streamed
+ * (wanted: what live market data plans and a backtest's day loads). State only, event thread. */
 
 #include "model/daily_table.hpp"
 #include "model/object.hpp"
@@ -10,17 +11,19 @@
 #include "model/utility.hpp"
 #include "utilities/latency.hpp"
 #include "utilities/log_source.hpp"
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
-#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -31,7 +34,6 @@ class Strategy;
 namespace core {
 
 class BookkeepingEngine;
-class MarketDataEngine;
 
 class StrategyEngine {
   public:
@@ -56,8 +58,16 @@ class StrategyEngine {
         int delta_range = 0;
     };
 
+    /** What the strategies want streamed, as one immutable set: each change publishes another,
+     * so any thread reads it without a lock. */
+    struct Wanted {
+        std::vector<std::string> subscribed; // the chains strategies subscribe; sorted, each once
+        std::vector<std::string> options;    // held, and ordered today; sorted, each once
+        std::vector<std::string> chains;     // subscribed, and the chains of those options
+    };
+
     StrategyEngine(utilities::Logger* logger, const model::Portfolios& portfolios,
-                   BookkeepingEngine& book, MarketDataEngine& market_data, Callbacks callbacks);
+                   BookkeepingEngine& book, Callbacks callbacks);
     ~StrategyEngine();
     StrategyEngine(const StrategyEngine&) = delete;
     StrategyEngine& operator=(const StrategyEngine&) = delete;
@@ -85,7 +95,7 @@ class StrategyEngine {
     void init_strategy(const std::string& strategy_name);
     /** Inited: running. */
     void start_strategy(const std::string& strategy_name);
-    /** Running: inited again, then its on_stop. */
+    /** Running: inited again, then its on_stop; a throw puts it in error, not passed on. */
     void stop_strategy(const std::string& strategy_name);
     /** In error until inited again; the first cause stays. */
     void set_error(const std::string& strategy_name, const std::string& msg);
@@ -97,7 +107,8 @@ class StrategyEngine {
     /** The values by day its strategies read; it must outlive them. nullptr: none. */
     void use_daily(const model::DailyTable* daily) { daily_ = daily != nullptr ? daily : &kNoDaily; }
     /** Made again from its class and setting, as a restart makes it: its members start over, its
-     * holding and orders stay; inited or running, its on_init and the day's on_day again. */
+     * holding and orders stay; inited or running, its on_init and the day's on_day again (a throw
+     * puts it in error, not passed on). */
     void make_again(const std::string& strategy_name);
 
     // ---- What it hosts
@@ -121,8 +132,28 @@ class StrategyEngine {
     std::string error(const std::string& strategy_name) const;
     /** Each strategy in error, and why. */
     std::vector<std::pair<std::string, std::string>> errors() const;
+    /** The values it wrote since they were taken last (Strategy::write_value), by name, taken:
+     * a backtest's day takes them at its close. Empty when there is no such strategy. */
+    std::map<std::string, double, std::less<>> take_values(const std::string& strategy_name);
     /** The strategy itself (tests, benchmarks); none when there is no such strategy. */
     strategy::Strategy* find_strategy(const std::string& strategy_name) const;
+
+    // ---- What they want streamed
+
+    /** Any thread. */
+    [[nodiscard]] std::shared_ptr<const Wanted> wanted() const {
+        return wanted_.load(std::memory_order_acquire);
+    }
+    /** How many times wanted() changed: a new count, wanted() again. */
+    [[nodiscard]] std::uint64_t wanted_changes() const { return wanted_changes_; }
+    /** The strategy's chains in place of those before; none when there is no such strategy. */
+    void subscribe_chains(const std::string& strategy_name, std::span<const std::string> chains);
+    /** Its options stream for the rest of the day: the fill and the holding read them. */
+    void note_ordered(const model::OrderRequest& request);
+    /** At a contract roll: the day before's orders are done. */
+    void clear_ordered();
+    /** The options held, in place of those before. */
+    void set_held_options(std::span<const std::string> options);
 
     // ---- Its hedging
 
@@ -168,6 +199,8 @@ class StrategyEngine {
         std::unique_ptr<Context> context;
         std::unique_ptr<strategy::Strategy> strategy;
         std::chrono::year_month_day day{}; // the trading day its on_day last ran for
+        std::vector<std::string> chains;   // it subscribes
+        std::map<std::string, double, std::less<>> values; // written since taken (write_value)
         model::BarGate timer;              // its on_timer, every timer_trigger bars
         std::optional<Hedging> hedging;
         model::BarGate hedge_timer;
@@ -193,6 +226,10 @@ class StrategyEngine {
                                                    const model::StrategyHolding& holding) const;
     /** h's callback, timed; a throw puts the strategy in error. See set_callback_budget. */
     template <typename F> void timed(Hosted& h, std::string_view callback, F&& f);
+    /** Its chains in place of those before. */
+    void subscribe(Hosted& h, std::span<const std::string> chains);
+    /** Wanted made again from the strategies' chains and the options, and published. */
+    void wanted_changed();
 
     utilities::Logger* logger_; // the strategies' own lines, under their names
     utilities::LogSource log_;  // the engine's
@@ -201,10 +238,13 @@ class StrategyEngine {
     static inline const model::DailyTable kNoDaily{};
     const model::DailyTable* daily_ = &kNoDaily; // not owned
     std::function<bool(const model::StrategyRecord& record)> approved_; // approve_only's; empty: any
-    MarketDataEngine& market_data_;
     Callbacks callbacks_;
     std::vector<std::unique_ptr<Hosted>> hosted_;
     std::chrono::microseconds callback_budget_{0}; // zero: timed only
+    std::vector<std::string> held_options_;
+    std::unordered_set<std::string> ordered_options_;
+    std::atomic<std::shared_ptr<const Wanted>> wanted_{std::make_shared<const Wanted>()};
+    std::uint64_t wanted_changes_ = 0;
 };
 
 } // namespace core

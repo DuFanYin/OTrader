@@ -9,7 +9,6 @@
  * thread.
  */
 
-#include "model/daily_table.hpp"
 #include "model/object.hpp"
 #include "model/portfolios.hpp"
 #include "model/parameters.hpp"
@@ -21,9 +20,7 @@
 #include <chrono>
 #include <deque>
 #include <functional>
-#include <map>
 #include <optional>
-#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -116,17 +113,23 @@ class RiskEngine {
     /** While it says false, only closing orders go (live: the broker's connection). */
     void watch_broker(std::function<bool()> connected) { broker_connected_ = std::move(connected); }
 
-    /** At each bar, first: a new New York day starts every strategy's day P&L from where it is.
-     * On a day the market is closed the day's losses stop nothing. */
-    void start_bar(model::DateTime now);
-    /** After the strategy's metrics are updated: its exposure, and the day's loss checked. */
+    /** At each bar, first, for each strategy: a new day on its portfolio's calendar clears its
+     * day's stop and starts its day P&L from where it was valued last (StrategyHolding::valued).
+     * On a day its market is closed its losses stop nothing. */
+    void start_bar(const std::string& strategy_name, const model::Portfolio& portfolio,
+                   model::DateTime now);
+    /** After the strategy's metrics are updated: its exposure, and the day's loss checked from its
+     * start (taken now when it has none and its holding is valued). */
     void measure_exposure(const std::string& strategy_name, const model::Portfolio& portfolio);
     /** Its exposure leaves the totals. Its day's start and stop stay: removed and restored the
      * same day, it is where it was against its daily loss. */
-    void remove_strategy(const std::string& strategy_name) { exposure_.erase(strategy_name); }
+    void remove_strategy(const std::string& strategy_name) {
+        Exposure& e = exposure_[strategy_name];
+        e = {.day = e.day, .trading_day = e.trading_day, .day_start = e.day_start};
+    }
     /** Why trading should halt now (max_daily_loss), or nullopt. */
     [[nodiscard]] std::optional<std::string> day_loss() const;
-    /** True once after a new day started: the day's starts are to be saved. */
+    /** True once after a new day started or a day's start was taken: they are to be saved. */
     bool take_day_changed() { return std::exchange(day_changed_, false); }
     /** The strategies trading only to close for the rest of the day, and why. */
     [[nodiscard]] const std::unordered_map<std::string, std::string>& day_stops() const {
@@ -152,81 +155,71 @@ class RiskEngine {
         return recent_refusals_;
     }
 
-    /** A share-settled option expiring today, within flatten_minutes of the close. */
+    /** A share-settled option expiring today, within flatten_minutes of the close: no order
+     * opens more of it (BookkeepingEngine::positions_to_close closes it). */
     [[nodiscard]] bool in_flatten_window(const std::string& option_symbol,
                                          const model::Portfolio* portfolio,
                                          model::DateTime now) const;
-    /** Where ex-dividend days are (the series <underlying>_ex_dividend); it must outlive the
-     * engine. nullptr: none. */
-    void use_daily(const model::DailyTable* daily) { daily_ = daily; }
-    /** The options to close now, by the combo each was opened in: those of the window above, and,
-     * the day before an ex-dividend day of a share-settled underlying, every combo with a call
-     * sold (it may be exercised early for the dividend), within flatten_minutes of the close.
-     * Skips those with an active order (the close sent a tick ago) so closes are not stacked. */
-    [[nodiscard]] std::map<std::string, std::vector<model::OptionPosition>>
-    positions_to_flatten(const std::string& strategy_name, const model::Portfolio& portfolio,
-                         model::DateTime now) const;
+    /** flatten_minutes: before an expiry or an ex-dividend day, the window closes are sent in. */
+    [[nodiscard]] double flatten_minutes() const { return limits_.flatten_minutes; }
 
   private:
-    /** The New York day found last is one the market opens (or none is found yet). */
-    [[nodiscard]] bool trading_day() const;
-    /** A strategy's exposure as marked: signed USD; and its pnl when the day began. */
+    /** A strategy's exposure as marked: signed USD; its day on its portfolio's calendar, whether
+     * its market trades that day (none found yet: it does), and its pnl when the day began (none
+     * until its summary values all it holds: a position unquoted since a restart). */
     struct Exposure {
         double delta = 0.0;
         double gamma = 0.0;
         double vega = 0.0;
         double margin = 0.0;
+        std::chrono::year_month_day day{};
+        bool trading_day = true;
         std::optional<double> day_start;
     };
     /** One contract of a strategy's book: what it holds, what its active orders would still trade
      * and what the order checked trades, signed. */
     struct Line {
-        const std::string* symbol = nullptr; // the order's, the holding's or an active order's
+        std::string_view symbol; // the order's, the holding's or an active order's
+        std::optional<model::OptionId> option; // parsed once, for every check
         double held = 0.0;
         double active = 0.0;
         double change = 0.0;
+        [[nodiscard]] double after() const { return held + active + change; }
     };
     /** The order's contracts first, in its order (the count returned); with `whole`, then every
      * other contract the strategy holds (`holding`, its) or has active orders in. None of the
      * strategy's without one. */
     std::size_t book(const std::string& strategy_name, const model::StrategyHolding* holding,
                      const model::OrderRequest* req, bool whole, std::vector<Line>& out) const;
-    /** Each contract's quantity, held or (after) with the active orders and the order; into
-     * quantities_. */
-    std::span<const std::pair<std::string_view, double>> quantities(std::span<const Line> book,
-                                                                     bool after);
     /** The order's exposure checks (Greeks, positions, margin) over lines_, built whole by
      * refusal(); its first `ordered` lines the order's. */
     std::optional<std::string> exposure_refusal(const std::string& strategy_name,
                                                 const model::Portfolio& portfolio,
                                                 std::size_t ordered);
-    /** On some expiry, more calls or puts sold than bought: what, or nullopt. */
-    static std::optional<std::string>
-    uncovered(std::span<const std::pair<std::string_view, double>> holding);
+    /** On some expiry, more calls or puts sold than bought (after the order): what, or nullopt. */
+    static std::optional<std::string> uncovered(std::span<const Line> book);
+    /** margin() of the book, held or (after) with the active orders and the order. */
+    static double margin(std::span<const Line> book, bool after,
+                         const model::Portfolio& portfolio);
     const model::Portfolio* portfolio_of(const std::string& portfolio,
-                                             const std::string& symbol) const;
+                                         std::string_view symbol) const;
     /** bid, ask, mid; nullopt when unquoted. */
     std::optional<std::array<double, 3>> quote(const model::Portfolio* portfolio,
-                                               const std::string& symbol) const;
+                                               std::string_view symbol) const;
 
     utilities::LogSource log_;
     const model::Portfolios& portfolios_;
     const BookkeepingEngine& bookkeeping_;
-    const model::DailyTable* daily_ = nullptr; // not owned
     model::Values limit_values_; // every limit, by name
     Limits limits_;              // the same, read
     // Reused from one check to the next.
     std::vector<Line> lines_;
-    std::vector<std::pair<std::string_view, double>> quantities_;
     bool halted_ = false;
     std::string halt_reason_;
     model::DateTime halted_at_{};
     std::uint64_t refused_ = 0;
     std::deque<std::string> recent_refusals_;
     std::function<bool()> broker_connected_;
-    std::chrono::year_month_day day_{};
-    model::DateTime day_begins_{}; // the New York day the last bar was in, as instants
-    model::DateTime day_ends_{};
     bool day_changed_ = false;
     std::unordered_map<std::string, std::string> day_stops_;
     std::unordered_map<std::string, Exposure> exposure_; // by strategy

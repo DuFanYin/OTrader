@@ -1,4 +1,5 @@
-#include "../kernel.h"
+#include "screener.h"
+#include "quant/kernel.h"
 
 #include <cmath>
 #include <omp.h>
@@ -12,18 +13,13 @@ constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 // ── Black-76 ──────────────────────────────────────────────────────────────────
 
 double black76_price(double forward, double strike, double rate, double vol, double years, bool is_call) {
-    if (forward <= 0.0 || strike <= 0.0) return kNaN;
+    if (forward <= 0.0 || strike <= 0.0) return 0.0;
     if (years <= 0.0) return std::max(is_call ? forward - strike : strike - forward, 0.0);
-    if (vol <= 0.0) return kNaN;
     return black_price(is_call, forward, strike, years, rate, vol);
 }
 
 void black76_greeks(double forward, double strike, double rate, double vol, double years, bool is_call,
                     double* out_delta, double* out_gamma, double* out_theta_day, double* out_vega_pt) {
-    if (forward <= 0.0 || strike <= 0.0 || vol <= 0.0 || years <= 0.0) {
-        *out_delta = *out_gamma = *out_theta_day = *out_vega_pt = kNaN;
-        return;
-    }
     // to the forward: black_greeks with the spot at the forward
     const BlackGreeks g = black_greeks(is_call, forward, forward, strike, years, rate, vol);
     *out_delta     = g.delta;
@@ -78,6 +74,10 @@ void screen_compute_greeks(std::span<ChainOption> chain, std::span<const int> in
 #pragma omp parallel for schedule(static)
     for (int k = 0; k < n; ++k) {
         ChainOption& o = chain[indices[k]];
+        if (o.forward <= 0.0 || o.strike <= 0.0 || o.iv <= 0.0 || o.years <= 0.0) {
+            o.delta = o.gamma = o.theta = o.vega = kNaN; // none: null in the answer
+            continue;
+        }
         black76_greeks(o.forward, o.strike, rate, o.iv, o.years, o.is_call,
                        &o.delta, &o.gamma, &o.theta, &o.vega);
     }

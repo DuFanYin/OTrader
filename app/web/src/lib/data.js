@@ -1,4 +1,4 @@
-// What there is to backtest on (data/<SYMBOL>/... day files, by symbol) and the live engine's contracts.
+// What there is to backtest on (data/backtest/<SYMBOL>/... day files, by symbol) and the live engine's contracts.
 import { signal } from "@preact/signals";
 import { get } from "./api.js";
 

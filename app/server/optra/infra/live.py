@@ -28,7 +28,7 @@ RECENT_LINES = 500
 CLIENT_QUEUE = 2000  # lines waiting for a slow page; past it the oldest go
 STATE_SECONDS = 2.0
 UNCHANGED_SECONDS = 15.0  # a watching page hears at least this often that its state still holds
-ACCOUNTS = ("paper", "live")  # promotion.accounts_of's
+ACCOUNTS = ("paper", "live")  # versions.accounts_of's
 
 
 class Live:

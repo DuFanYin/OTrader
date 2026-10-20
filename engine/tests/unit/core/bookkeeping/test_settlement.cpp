@@ -4,6 +4,8 @@
  * holdings summed by contract meet the broker's, each difference marked.
  */
 #include "core/bookkeeping/bookkeeping_engine.hpp"
+#include "tests/lone_bookkeeping.hpp"
+#include "model/session_calendar.hpp"
 #include "model/portfolio.hpp"
 #include "model/portfolios.hpp"
 #include "model/symbol.hpp"
@@ -36,23 +38,19 @@ auto option(const std::string& root, year_month_day expiry, OptionType type, dou
 }
 
 auto single(model::StrategyHolding& h, const std::string& symbol, int quantity) {
-    model::OptionPosition p(symbol);
+    model::OptionPosition p(symbol, 100.0);
     p.quantity = quantity;
     h.options.insert_or_assign(symbol, p);
 }
 
-/** A portfolio as settlement reads it: its underlying, and how its options settle. */
-auto portfolio(const std::string& name, const std::string& underlying, bool physical)
-    -> std::unique_ptr<model::Portfolio> {
-    auto p = std::make_unique<model::Portfolio>(name);
-    p->underlying_symbol = underlying;
-    p->physical = physical;
-    return p;
+/** A portfolio as settlement reads it: its underlying, and how its options settle (its spec). */
+auto portfolio(const std::string& name) -> std::unique_ptr<model::Portfolio> {
+    return std::make_unique<model::Portfolio>(name, model::find_portfolio(name));
 }
 
 /** A portfolio whose underlying was last quoted at mid, at `at`. */
 auto quoted(double mid, model::DateTime at) -> std::unique_ptr<model::Portfolio> {
-    auto p = portfolio("SPY", "SPY", true);
+    auto p = portfolio("SPY");
     model::Contract spy;
     spy.symbol = "SPY";
     p->set_underlying(spy);
@@ -89,7 +87,7 @@ class Settlement : public ::testing::Test {
     void SetUp() override { engine_.ensure_holding("s"); }
     model::StrategyHolding& holding() { return engine_.ensure_holding("s"); }
 
-    core::BookkeepingEngine engine_;
+    test::LoneBookkeeping engine_;
 };
 
 TEST_F(Settlement, CashClosesAtIntrinsicValue) {
@@ -100,7 +98,7 @@ TEST_F(Settlement, CashClosesAtIntrinsicValue) {
     single(holding(), put, -1);
     single(holding(), otm, 3);
 
-    const auto out = settle(engine_, kFriday, 5850.0, *portfolio("SPXW", "SPX", false));
+    const auto out = settle(engine_, kFriday, 5850.0, *portfolio("SPXW"));
     ASSERT_EQ(out.size(), 3U); // no shares change hands
     const auto& c = for_symbol(out, call);
     EXPECT_EQ(c.order.status, model::Status::FILLED);
@@ -109,7 +107,7 @@ TEST_F(Settlement, CashClosesAtIntrinsicValue) {
     EXPECT_EQ(c.fills[0].side, Side::SELL);
     EXPECT_EQ(c.fills[0].quantity, 2.0);
     EXPECT_DOUBLE_EQ(c.fills[0].price, 50.0);
-    EXPECT_EQ(c.fills[0].datetime, model::option_expiry_time(kFriday));
+    EXPECT_EQ(c.fills[0].datetime, model::kNyse.expiry_time(kFriday));
     const auto& p = for_symbol(out, put);
     EXPECT_EQ(p.fills[0].side, Side::BUY); // a short put bought back
     EXPECT_DOUBLE_EQ(p.fills[0].price, 50.0);
@@ -126,7 +124,7 @@ TEST_F(Settlement, InSharesTheMoneyOptionsDeliverAtTheirStrike) {
     single(holding(), otm_call, 1);
     single(holding(), by_a_hair, 1); // in the money by half a cent: not exercised
 
-    const auto out = settle(engine_, kFriday, 585.0, *portfolio("SPY", "SPY", true));
+    const auto out = settle(engine_, kFriday, 585.0, *portfolio("SPY"));
     for (const std::string& o : {long_call, short_put, otm_call, by_a_hair}) {
         EXPECT_DOUBLE_EQ(for_symbol(out, o).fills.at(0).price, 0.0) << o; // the option is gone
     }
@@ -153,7 +151,7 @@ TEST_F(Settlement, OnlyTheExpiryAskedForAndOnlyOncePastTheClose) {
     single(holding(), later, 1);
     single(holding(), option("SPY", kFriday, OptionType::PUT, 570), 0); // closed: nothing to settle
 
-    const auto close = model::option_expiry_time(kFriday);
+    const auto close = model::kNyse.expiry_time(kFriday);
     // No portfolio, no closing price: the expired wait, unsettled.
     EXPECT_TRUE(engine_.expiries_to_settle("s", nullptr, close - seconds(1)).empty());
     EXPECT_TRUE(engine_.unsettled_options().empty());
@@ -161,7 +159,7 @@ TEST_F(Settlement, OnlyTheExpiryAskedForAndOnlyOncePastTheClose) {
     EXPECT_EQ(engine_.unsettled_options().at("s"), std::vector<std::string>{friday});
     EXPECT_TRUE(engine_.expiries_to_settle("nobody", nullptr, close).empty());
 
-    const auto out = settle(engine_, kFriday, 575.0, *portfolio("SPY", "SPY", true));
+    const auto out = settle(engine_, kFriday, 575.0, *portfolio("SPY"));
     ASSERT_EQ(out.size(), 1U);
     EXPECT_EQ(out[0].order.symbol, friday);
 }
@@ -172,7 +170,7 @@ TEST_F(Settlement, EachContractOfAComboSettlesByItself) {
     single(holding(), call, -2); // two straddles sold
     single(holding(), put, -2);
 
-    const auto out = settle(engine_, kFriday, 5830.0, *portfolio("SPXW", "SPX", false));
+    const auto out = settle(engine_, kFriday, 5830.0, *portfolio("SPXW"));
     ASSERT_EQ(out.size(), 2U);
     for (const auto& [symbol, price] : {std::pair{call, 30.0}, std::pair{put, 0.0}}) {
         const Booked& s = for_symbol(out, symbol);
@@ -192,7 +190,7 @@ TEST_F(Settlement, OnlyTheContractsOpenAndExpiringNowSettle) {
     single(holding(), put, 0); // sold back already
     single(holding(), far, -1); // a calendar's later leg: still open
 
-    const auto out = settle(engine_, kFriday, 5850.0, *portfolio("SPXW", "SPX", false));
+    const auto out = settle(engine_, kFriday, 5850.0, *portfolio("SPXW"));
     ASSERT_EQ(out.size(), 1U);
     EXPECT_EQ(out[0].order.symbol, call);
     EXPECT_DOUBLE_EQ(out[0].fills[0].price, 50.0);
@@ -203,7 +201,7 @@ TEST_F(Settlement, AnExpiryQuotedAtItsCloseSettlesAndOneWithoutAClosingPriceWait
     const std::string later = option("SPY", kNextFriday, OptionType::PUT, 570);
     single(holding(), friday, 1);
     single(holding(), later, -1);
-    const auto close = model::option_expiry_time(kNextFriday);
+    const auto close = model::kNyse.expiry_time(kNextFriday);
     const auto spy = quoted(585.0, close + minutes(5)); // a week after Friday's
 
     const auto due = engine_.expiries_to_settle("s", spy.get(), close + minutes(10));
@@ -216,7 +214,7 @@ TEST_F(Settlement, AnExpiryQuotedAtItsCloseSettlesAndOneWithoutAClosingPriceWait
 TEST_F(Settlement, AQuoteOutsideTheWindowIsNoClosingPrice) {
     const std::string friday = option("SPY", kFriday, OptionType::CALL, 580);
     single(holding(), friday, 1);
-    const auto close = model::option_expiry_time(kFriday);
+    const auto close = model::kNyse.expiry_time(kFriday);
     const auto window = minutes(15); // the engine's settlement window
 
     const auto before = quoted(585.0, close - window);
@@ -234,7 +232,7 @@ TEST_F(Settlement, AQuoteOutsideTheWindowIsNoClosingPrice) {
 TEST_F(Settlement, AnUnsettledOptionGoesOnceTheHoldingIsFlat) {
     const std::string friday = option("SPY", kFriday, OptionType::CALL, 580);
     single(holding(), friday, 2);
-    const auto after = model::option_expiry_time(kFriday) + hours(1);
+    const auto after = model::kNyse.expiry_time(kFriday) + hours(1);
     EXPECT_TRUE(engine_.expiries_to_settle("s", nullptr, after).empty());
     EXPECT_EQ(engine_.unsettled_options(), (Unsettled{{"s", {friday}}}));
 
@@ -251,7 +249,7 @@ TEST_F(Settlement, WithoutAPortfolioEveryExpiredOptionWaitsUntilTheHoldingIsRemo
     single(holding(), later, 1);
     single(holding(), open, 1); // not expired: never waits
 
-    const auto after = model::option_expiry_time(kNextFriday) + minutes(1);
+    const auto after = model::kNyse.expiry_time(kNextFriday) + minutes(1);
     EXPECT_TRUE(engine_.expiries_to_settle("s", nullptr, after).empty());
     EXPECT_EQ(engine_.unsettled_options(), (Unsettled{{"s", {friday, later}}}));
 
@@ -262,14 +260,14 @@ TEST_F(Settlement, WithoutAPortfolioEveryExpiredOptionWaitsUntilTheHoldingIsRemo
 
 TEST_F(Settlement, NothingSettlesForAStrategyThatHoldsNothing) {
     EXPECT_TRUE(engine_.settle_expiry("nobody", kFriday, 5850.0,
-                                      *portfolio("SPXW", "SPX", false))
+                                      *portfolio("SPXW"))
                     .empty());
 }
 
 TEST(BrokerCheckRow, HoldingsSumByContractAndMeetTheBrokers) {
     const std::string call = option("SPY", kNextFriday, OptionType::CALL, 580);
     const std::string put = option("SPY", kNextFriday, OptionType::PUT, 580);
-    core::BookkeepingEngine engine;
+    test::LoneBookkeeping engine;
     model::StrategyHolding& a = engine.ensure_holding("a");
     a.shares.symbol = "SPY";
     a.shares.quantity = -30;

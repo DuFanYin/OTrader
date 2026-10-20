@@ -5,6 +5,7 @@
  * would still trade is kept by contract, as they fill and end.
  */
 #include "core/bookkeeping/bookkeeping_engine.hpp"
+#include "tests/lone_bookkeeping.hpp"
 #include "model/constant.hpp"
 #include "model/object.hpp"
 #include <chrono>
@@ -60,7 +61,7 @@ model::Fill fill(const std::string& id, const std::string& symbol, double quanti
 }
 
 TEST(BookkeepingOrders, AStrategysOrderIsActiveUntilTheVenueEndsIt) {
-    core::BookkeepingEngine ex;
+    test::LoneBookkeeping ex;
     ex.add_order("s1", sent("OID-1"));
     ex.add_order("s1", sent("OID-2"));
     EXPECT_EQ(ex.strategy_of("OID-1"), "s1");
@@ -79,7 +80,7 @@ TEST(BookkeepingOrders, AStrategysOrderIsActiveUntilTheVenueEndsIt) {
 }
 
 TEST(BookkeepingOrders, AnOrderWithACancelSentIsActiveUntilTheVenueEndsIt) {
-    core::BookkeepingEngine ex;
+    test::LoneBookkeeping ex;
     ex.add_order("s1", sent("OID-1", "SPY", 2));
     EXPECT_TRUE(ex.cancel_sent("OID-1"));
     EXPECT_FALSE(ex.cancel_sent("OID-1")) << "one cancel an order";
@@ -94,7 +95,7 @@ TEST(BookkeepingOrders, AnOrderWithACancelSentIsActiveUntilTheVenueEndsIt) {
 }
 
 TEST(BookkeepingOrders, ActiveOrdersAreListedByStrategy) {
-    core::BookkeepingEngine ex;
+    test::LoneBookkeeping ex;
     ex.add_order("s1", sent("B"));
     ex.add_order("s1", sent("A"));
     ex.add_order("s2", sent("C"));
@@ -108,7 +109,7 @@ TEST(BookkeepingOrders, ActiveOrdersAreListedByStrategy) {
 }
 
 TEST(BookkeepingOrders, RemovingAStrategyForgetsItsOrdersAndFills) {
-    core::BookkeepingEngine ex;
+    test::LoneBookkeeping ex;
     ex.add_order("s1", sent("OID-1"));
     ex.add_order("s2", sent("OID-3"));
     ex.book_fill(fill("T1", "SPY", 1, "OID-1"));
@@ -123,14 +124,14 @@ TEST(BookkeepingOrders, RemovingAStrategyForgetsItsOrdersAndFills) {
 }
 
 TEST(BookkeepingOrders, AnOrderWithoutAnIdIsNotKept) {
-    core::BookkeepingEngine ex;
+    test::LoneBookkeeping ex;
     ex.add_order("s1", sent(""));
     EXPECT_EQ(ex.order_count(), 0U);
     EXPECT_FALSE(ex.has_active_order("s1"));
 }
 
 TEST(BookkeepingOrders, AnotherClientsOrderIsKeptAsReportedButNeverActiveHere) {
-    core::BookkeepingEngine ex;
+    test::LoneBookkeeping ex;
     const auto known = ex.update_order(with(sent("X1"), Status::WORKING), {});
     ASSERT_TRUE(known);
     EXPECT_EQ(known->order_id, "X1");
@@ -140,7 +141,7 @@ TEST(BookkeepingOrders, AnotherClientsOrderIsKeptAsReportedButNeverActiveHere) {
 }
 
 TEST(BookkeepingOrders, ARestoredOrderIsActiveOnlyIfItWas) {
-    core::BookkeepingEngine ex;
+    test::LoneBookkeeping ex;
     ex.add_order("s1", with(sent("D1"), Status::FILLED, 1));
     EXPECT_FALSE(ex.is_active("D1"));
     EXPECT_FALSE(ex.has_active_order("s1"));
@@ -151,7 +152,7 @@ TEST(BookkeepingOrders, ARestoredOrderIsActiveOnlyIfItWas) {
 }
 
 TEST(BookkeepingOrders, AFillIsKeptOnce) {
-    core::BookkeepingEngine ex;
+    test::LoneBookkeeping ex;
     ex.add_order("s1", sent("OID-1"));
     EXPECT_TRUE(ex.book_fill(fill("T1", "SPY", 1, "OID-1")));
     EXPECT_FALSE(ex.book_fill(fill("T1", "SPY", 1, "OID-1"))) << "reported again";
@@ -159,7 +160,7 @@ TEST(BookkeepingOrders, AFillIsKeptOnce) {
 }
 
 TEST(BookkeepingTerminalUpdates, AnEndWaitsUntilEveryLegIsBooked) {
-    core::BookkeepingEngine ex;
+    test::LoneBookkeeping ex;
     const Order spread = sent_spread(ex);
     EXPECT_FALSE(ex.update_order(with(spread, Status::FILLED, 2), {})) << "held back";
     EXPECT_TRUE(ex.is_active("C1"));
@@ -174,7 +175,7 @@ TEST(BookkeepingTerminalUpdates, AnEndWaitsUntilEveryLegIsBooked) {
 }
 
 TEST(BookkeepingTerminalUpdates, AnEndWhoseFillsAreBookedIsToldAtOnce) {
-    core::BookkeepingEngine ex;
+    test::LoneBookkeeping ex;
     const Order spread = sent_spread(ex);
     ex.book_fill(fill("t1", "B", 2));
     ex.book_fill(fill("t2", "A", 2));
@@ -182,7 +183,7 @@ TEST(BookkeepingTerminalUpdates, AnEndWhoseFillsAreBookedIsToldAtOnce) {
 }
 
 TEST(BookkeepingTerminalUpdates, RepeatedAndOutOfDateUpdatesAreIgnored) {
-    core::BookkeepingEngine ex;
+    test::LoneBookkeeping ex;
     const Order spread = sent_spread(ex);
     const Order part = with(spread, Status::PARTLY_FILLED, 1);
     ex.book_fill(fill("t1", "A", 2));
@@ -197,7 +198,7 @@ TEST(BookkeepingTerminalUpdates, RepeatedAndOutOfDateUpdatesAreIgnored) {
 }
 
 TEST(BookkeepingTerminalUpdates, AnEndHeldBackIsToldAfterTheTimeoutOnce) {
-    core::BookkeepingEngine ex;
+    test::LoneBookkeeping ex;
     const Order spread = sent_spread(ex);
     const model::DateTime t0{};
     ASSERT_FALSE(ex.update_order(with(spread, Status::CANCELLED, 1), t0));
@@ -214,19 +215,19 @@ TEST(BookkeepingTerminalUpdates, AnEndHeldBackIsToldAfterTheTimeoutOnce) {
 }
 
 TEST(BookkeepingTerminalUpdates, OnlyAStrategysEndWithFillsToComeIsHeldBack) {
-    core::BookkeepingEngine ex;
+    test::LoneBookkeeping ex;
     const Order spread = sent_spread(ex);
     EXPECT_TRUE(ex.update_order(with(spread, Status::PARTLY_FILLED, 1), {})) << "not an end";
     EXPECT_TRUE(ex.update_order(with(sent("X1"), Status::FILLED, 1), {}))
         << "another client's";
-    core::BookkeepingEngine fresh;
+    test::LoneBookkeeping fresh;
     fresh.add_order("s1", spread);
     EXPECT_TRUE(fresh.update_order(with(spread, Status::CANCELLED), {}))
         << "nothing filled: no fill to wait for";
 }
 
 TEST(BookkeepingTerminalUpdates, AFillReportedAfterTheEndRaisesWhatWasTradedNotTheStatus) {
-    core::BookkeepingEngine ex;
+    test::LoneBookkeeping ex;
     ex.add_order("s1", sent("O1", "SPY", 2));
     ex.book_fill(fill("t1", "SPY", 1, "O1"));
     ASSERT_TRUE(ex.update_order(with(sent("O1", "SPY", 2), Status::CANCELLED, 1), {}));
@@ -239,7 +240,7 @@ TEST(BookkeepingTerminalUpdates, AFillReportedAfterTheEndRaisesWhatWasTradedNotT
 }
 
 TEST(BookkeepingTerminalUpdates, AContractsOwnOrderWaitsForItsOwnFills) {
-    core::BookkeepingEngine ex;
+    test::LoneBookkeeping ex;
     ex.add_order("s1", sent("O1", "SPY", 3));
     EXPECT_FALSE(ex.update_order(with(sent("O1", "SPY", 3), Status::FILLED, 3), {}));
     ex.book_fill(fill("t1", "SPY", 2, "O1"));
@@ -249,7 +250,7 @@ TEST(BookkeepingTerminalUpdates, AContractsOwnOrderWaitsForItsOwnFills) {
 }
 
 TEST(BookkeepingForgetting, OnlyOrdersDoneWithAndTheirFillsAreForgotten) {
-    core::BookkeepingEngine ex;
+    test::LoneBookkeeping ex;
     ex.add_order("s1", sent("DONE"));
     ex.add_order("s1", sent("OPEN"));
     ex.book_fill(fill("T1", "SPY", 1, "DONE"));
@@ -269,7 +270,7 @@ std::map<std::string, double> working(const core::BookkeepingEngine& ex, const s
 }
 
 TEST(BookkeepingWorking, AStrategysActiveOrdersCountByContractAsTheyFillAndEnd) {
-    core::BookkeepingEngine ex;
+    test::LoneBookkeeping ex;
     Order spread = sent("C1", "spread_A|B", 2);
     spread.legs = {{.ratio = 1, .side = model::Side::BUY, .symbol = "A"},
                    {.ratio = 2, .side = model::Side::SELL, .symbol = "B"}};

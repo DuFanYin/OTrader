@@ -21,6 +21,7 @@
  * rate barely moves its delta.
  */
 
+#include "model/utility.hpp"
 #include "quant/kernel.h"
 #include "tests/lone_backtest.hpp"
 #include "strategy/strategy.hpp"
@@ -39,7 +40,7 @@
 
 namespace {
 
-constexpr double kYearSeconds = 365.25 * 24 * 3600; // model::years_to_expiry's year
+constexpr double kYearSeconds = model::kSecondsAYear;
 
 struct Options {
     double iv = 0.0;
@@ -118,7 +119,7 @@ auto run_day(const Options& o, const std::string& file) -> Day {
     day.file = file;
     test::LoneBacktest backtest;
     core::Main& engine = backtest.main();
-    backtest.configure_execution({.fee_rate = 0.0}); // no fees: the P&L is the hedging's
+    backtest.configure_execution({}); // no fees: the P&L is the hedging's
     engine.log_engine()->set_level(utilities::DISABLED);
     backtest.load_backtest_data(file);
     if (backtest.historical_data() == nullptr || !backtest.historical_data()->has_data()) {

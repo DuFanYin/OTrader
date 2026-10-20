@@ -26,7 +26,7 @@ BlackGreeks black_greeks(bool is_call, double spot, double forward, double strik
     const double df = std::exp(-rate * t);
     const double per_spot = df * forward / spot; // what the discounted forward moves per unit of spot
 
-    g.delta = per_spot * (is_call ? norm_cdf(d1) : norm_cdf(d1) - 1.0);
+    g.delta = per_spot * (is_call ? norm_cdf(d1) : -norm_cdf(-d1));
     g.gamma = per_spot * pdf / (spot * sd);
     const double price = black_price(is_call, forward, strike, t, rate, vol);
     g.theta = ((rate * price) - (df * forward * pdf * vol / (2.0 * sqrt_t))) / 365.0;

@@ -1,8 +1,7 @@
 #include "adapters/market_data/historical_data.hpp"
-#include "model/portfolio_spec.hpp"
 #include "model/symbol.hpp"
 #include "model/utility.hpp"
-#include "utilities/fnv.hpp"
+#include "pricing/pricing.hpp"
 #include "utilities/thread_pool.hpp"
 #include <algorithm>
 #include <array>
@@ -97,7 +96,7 @@ void HistoricalData::price_minutes() {
         for (std::size_t e = 0; e < expiries.size(); ++e) {
             const double t = model::years_to_expiry(time, expiries[e]);
             expiry_years_[(i * expiries.size()) + e] = t;
-            expiry_rate_[(i * expiries.size()) + e] = rates_.at(t); // as price_snapshot has it
+            expiry_rate_[(i * expiries.size()) + e] = rates_.at(t); // as pricing has it
         }
     }
 }
@@ -152,7 +151,7 @@ void HistoricalData::load_chain(std::size_t c) {
         const std::string stored =
             cache_dir_.empty() ? std::string{}
                                : stored_chain(cache_dir_, path_, listed.symbol,
-                                              pricing_fingerprint(), risk_free_rate_,
+                                              pricing::fingerprint(), risk_free_rate_,
                                               iv_price_mode_);
         chain.stored = stored.empty() ? std::nullopt
                                       : StoredChain::read(stored, listed.symbol, options,
@@ -164,7 +163,7 @@ void HistoricalData::load_chain(std::size_t c) {
                 throw std::runtime_error(quoted.error());
             }
             price_chain(c, made);
-            if (!stored.empty()) {
+            if (!stored.empty() && store_chains_ && priced_minutes_.empty()) {
                 made.store(stored);
             }
             chain.stored = std::move(made);
@@ -190,9 +189,14 @@ void HistoricalData::price_chain(std::size_t c, StoredChain& stored) const {
     const auto alone = std::make_shared<const model::Listing>(std::move(contracts));
     constexpr std::size_t kIv = 4; // the IV's column
     const auto& option_columns = model::PortfolioSnapshot::kOptionColumns;
+    const std::size_t n = priced_minutes_.empty() ? index_.times.size() : priced_minutes_.size();
     utilities::shared_pool().parallel_for(
-        0, index_.times.size(),
-        [&](std::size_t i) {
+        0, n,
+        [&](std::size_t m) {
+            const std::size_t i = priced_minutes_.empty() ? m : priced_minutes_[m];
+            if (i >= index_.times.size()) {
+                return;
+            }
             model::Frame f;
             f.listing = alone.get();
             f.portfolio_name = index_.portfolio;
@@ -205,32 +209,27 @@ void HistoricalData::price_chain(std::size_t c, StoredChain& stored) const {
             }
             model::PortfolioSnapshot s(alone, index_.portfolio);
             s.assign(f);
-            model::price_snapshot(s, rates_, iv_price_mode_);
+            pricing::price_snapshot(s, rates_, iv_price_mode_); // on the pool already
+            pricing::fit_smiles(s);
             std::ranges::copy(s.iv, stored.row(kIv, i).begin());
             stored.set_forward(i, s.forward[0]);
+            std::ranges::copy(s.smile, stored.smile(i).begin());
         },
         /*inline_threshold=*/1);
 }
 
 void HistoricalData::build_portfolio(model::Portfolios& target) const {
     const std::string& name = index_.portfolio;
-    target.ensure_portfolio(name);
+    target.ensure_portfolio(name); // a hedge its spec names is not in the day: none
     model::Portfolio* port = target.find_portfolio(name);
-    if (const model::PortfolioSpec* spec = model::find_portfolio(name)) {
-        port->physical = spec->physical;
-        if (spec->hedge != spec->underlying) {
-            port->hedge_symbol = spec->hedge; // its quotes are not in the day: no hedge
-        }
-    }
     target.replace_contracts(name, index_.underlying, index_.listing);
     if (index_.day) {
         port->set_trading_day(*index_.day);
     }
-    port->set_rates(rates_);
-    port->set_iv_price_mode(iv_price_mode_);
 }
 
-void HistoricalData::fill(std::size_t i, model::PortfolioSnapshot& minute) const {
+void HistoricalData::fill(std::size_t i, model::PortfolioSnapshot& minute,
+                          const std::vector<std::uint32_t>* chains) const {
     if (minute.shared_listing() != index_.listing) {
         minute = model::PortfolioSnapshot(index_.listing, index_.portfolio);
     }
@@ -243,10 +242,11 @@ void HistoricalData::fill(std::size_t i, model::PortfolioSnapshot& minute) const
     minute.underlying_mark = model::mark(minute.underlying_bid, minute.underlying_ask);
     const auto& option_columns = model::PortfolioSnapshot::kOptionColumns;
     const std::span<double> forward = minute.values(&model::Frame::forward);
-    for (std::size_t c = 0; c < chains_.size(); ++c) {
+    const std::span<double> smile = minute.values(&model::Frame::smile);
+    const auto fill_chain = [&](std::size_t c) {
         const Chain& chain = *chains_[c];
         if (!chain.loaded.load(std::memory_order_acquire) || !chain.stored) {
-            continue;
+            return;
         }
         const std::uint32_t first = index_.listing->chains()[c].first;
         for (std::size_t q = 0; q < StoredChain::kColumns; ++q) {
@@ -254,6 +254,14 @@ void HistoricalData::fill(std::size_t i, model::PortfolioSnapshot& minute) const
                               minute.values(option_columns[q]).begin() + first);
         }
         forward[c] = chain.stored->forward(i);
+        std::ranges::copy(chain.stored->smile(i), smile.begin() + (c * model::kSmileValues));
+    };
+    if (chains != nullptr) {
+        std::ranges::for_each(*chains, fill_chain);
+    } else {
+        for (std::size_t c = 0; c < chains_.size(); ++c) {
+            fill_chain(c);
+        }
     }
     const std::size_t expiries = index_.listing->expiries().size();
     const auto at = static_cast<std::ptrdiff_t>(i * expiries);
@@ -267,77 +275,83 @@ void HistoricalData::fill(std::size_t i, model::PortfolioSnapshot& minute) const
 }
 
 LoadedDay load_day(const std::string& parquet_path, double risk_free_rate,
-                   std::string_view iv_price_mode, const std::string& cache_dir) {
+                   std::string_view iv_price_mode, const std::string& cache_dir,
+                   bool store_chains) {
     LoadedDay day = std::make_shared<HistoricalData>();
     day->set_risk_free_rate(risk_free_rate);
     day->set_iv_price_mode(iv_price_mode);
+    day->set_store_chains(store_chains);
     day->load(parquet_path, cache_dir);
     return day;
 }
 
-auto pricing_fingerprint() -> std::uint64_t {
-    static const std::uint64_t fingerprint = [] {
-        // SPY on 2025-03-03: three expiries, strikes 560 to 600, quotes with holes (none, one
-        // side, crossed), at three times, the last with no underlying quote (its mark kept); each
-        // IV mode.
-        using namespace std::chrono;
-        std::vector<model::Contract> contracts;
-        for (const year_month_day expiry : {2025y / March / 3d, 2025y / March / 7d,
-                                            2025y / March / 21d}) {
-            for (double k = 560.0; k <= 600.0; k += 2.5) {
-                for (const model::OptionType type : {model::OptionType::CALL,
-                                                     model::OptionType::PUT}) {
-                    model::Contract c;
-                    c.symbol = model::option_symbol(
-                        {.root = "SPY", .expiry = expiry, .type = type, .strike = k});
-                    c.multiplier = 100.0;
-                    contracts.push_back(std::move(c));
-                }
-            }
+// ---- Replay
+
+auto Replay::roll(const HistoricalData& day) -> std::vector<std::string> {
+    const std::string& name = day.portfolio_name();
+    if (structure_.find_portfolio(name) == nullptr) {
+        day.build_portfolio(structure_);
+        return {};
+    }
+    // The portfolio's frame, and the snapshot it reads, hold the values of the chains filled since
+    // the last day was rolled in: only theirs are carried over, or cleared. Not known (a day rolled
+    // in and never filled): all are carried, and the snapshot is laid out anew at the next bar.
+    model::Portfolio* portfolio = structure_.find_portfolio(name);
+    const auto found = minutes_.find(portfolio);
+    Minute* minute = found != minutes_.end() ? &found->second : nullptr;
+    const model::Listing* filled =
+        minute != nullptr ? minute->snapshot.shared_listing().get() : nullptr;
+    const bool known = minute == nullptr || (filled != nullptr && filled == minute->listed);
+    std::vector<std::string> valued;
+    if (minute != nullptr && known) {
+        for (const std::uint32_t c : minute->chains) {
+            valued.push_back(filled->chains()[c].symbol);
         }
-        const auto listing = std::make_shared<const model::Listing>(std::move(contracts));
-        const sys_days day{2025y / March / 3d};
-        const std::array<model::DateTime, 3> times{day + 15h, day + 20h + 30min, day + 20h + 59min};
-        utilities::Fnv hash;
-        for (const std::string_view mode : {"mid", "bid", "ask"}) {
-            for (std::size_t t = 0; t < times.size(); ++t) {
-                model::PortfolioSnapshot s(listing, "SPY");
-                s.datetime = times[t];
-                if (t + 1 < times.size()) {
-                    s.underlying_bid = 580.0 + (0.37 * static_cast<double>(t));
-                    s.underlying_ask = s.underlying_bid + 0.02;
-                }
-                s.underlying_mark = 580.5;
-                const std::span<double> bid = s.values(&model::Frame::bid);
-                const std::span<double> ask = s.values(&model::Frame::ask);
-                for (std::size_t i = 0; i < listing->size(); ++i) {
-                    if ((i + t) % 7 == 3) {
-                        continue; // not quoted
-                    }
-                    const double k = listing->strike(i);
-                    const bool call = listing->type(i) == model::OptionType::CALL;
-                    const double value = std::max(call ? 580.0 - k : k - 580.0, 0.0) +
-                                         (2.0 + listing->chain_of(i)) *
-                                             std::exp(-std::abs(k - 580.0) / 15.0);
-                    bid[i] = i % 11 == 5 ? 0.0 : std::max(value - 0.05, 0.01);
-                    ask[i] = value + 0.05;
-                    if (i % 13 == 6) {
-                        std::swap(bid[i], ask[i]); // crossed
-                    }
-                }
-                model::price_snapshot(s, model::RateCurve::flat(0.05), mode);
-                for (const auto column : model::PortfolioSnapshot::kOptionColumns) {
-                    hash.add(s.*column);
-                }
-                hash.add(s.forward);
-                hash.add(s.expiry_years);
-                hash.add(s.priced);
-                hash.add(s.greeks_spot);
-            }
+    }
+    std::vector<std::string> dropped = structure_.replace_contracts(
+        name, day.underlying(), day.listing(),
+        known ? std::optional<std::span<const std::string>>(valued) : std::nullopt);
+    portfolio->set_trading_day(std::chrono::floor<std::chrono::days>(day.day()));
+    if (minute != nullptr) {
+        if (known) {
+            minute->snapshot.relist(day.listing(), minute->chains);
         }
-        return hash.value();
-    }();
-    return fingerprint;
+        minute->chains.clear();
+        minute->listed = day.listing().get();
+    }
+    return dropped;
+}
+
+void Replay::load(HistoricalData& day, std::span<const std::string> chains) {
+    day.load_chains(chains);
+    model::Portfolio* portfolio = structure_.find_portfolio(day.portfolio_name());
+    if (portfolio == nullptr) {
+        return;
+    }
+    Minute& minute = minutes_[portfolio];
+    if (minute.listed != day.listing().get()) {
+        minute.chains.clear(); // of another day's
+        minute.listed = day.listing().get();
+    }
+    for (const std::string& symbol : chains) {
+        if (const std::optional<std::uint32_t> c = day.listing()->chain(symbol);
+            c && !std::ranges::contains(minute.chains, *c)) {
+            minute.chains.push_back(*c);
+        }
+    }
+}
+
+void Replay::apply(const std::shared_ptr<const HistoricalData>& day, std::size_t i) {
+    if (model::Portfolio* portfolio = structure_.find_portfolio(day->portfolio_name())) {
+        Minute& minute = minutes_[portfolio];
+        if (minute.listed != day->listing().get()) { // none asked for on this day yet
+            minute.chains.clear();
+            minute.listed = day->listing().get();
+        }
+        day->fill(i, minute.snapshot, &minute.chains);
+        portfolio->apply(minute.snapshot,
+                         std::shared_ptr<const void>(day, &minute.snapshot)); // read where it is
+    }
 }
 
 } // namespace adapters

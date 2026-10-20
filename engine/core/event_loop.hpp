@@ -56,7 +56,7 @@ class EventLoop {
     EventLoop& operator=(const EventLoop&) = delete;
 
     /** Before start(): spin before sleeping, and pin to a core (-1: any). Spinning burns a core
-     * but takes the futex wake-up (about 5 us per hand-off) off the hot path. */
+     * but takes the futex wake-up (about 11 us per hand-off) off the hot path. */
     void set_spin(std::chrono::microseconds spin) { wakeup_.set_spin(spin); }
     void set_cpu(int cpu) { cpu_ = cpu; }
     /** Before start(). */

@@ -110,17 +110,17 @@ class ComboRequest(DayRange):
     quantity: int = Field(1, ge=1, le=100, description="Combo units.")
     take_profit: float = Field(0, ge=0, le=100, description="Close once the P&L reaches this times the premium; 0: never.")
     stop_loss: float = Field(0, ge=0, le=100, description="Close once it loses this times the premium; 0: never.")
-    model: Literal["none", "heston"] = Field("none", description=(
-        "heston: open only when the combo's value under Heston, calibrated to each leg's chain at entry, less its cost "
-        "at the executable prices is at least min_edge (the screener's edge with model_vol heston)."))
-    min_edge: float = Field(0, description="USD a combo unit, with model heston.")
+    model: Literal["none", "smile"] = Field("none", description=(
+        "smile: open only when the legs' value at the IVs on their chains' smiles (an SVI fitted to each chain's quotes "
+        "every minute) less the cost at the executable prices is at least min_edge."))
+    min_edge: float = Field(0, description="USD a combo unit, with a model.")
     holdout_from: date | None = HOLDOUT
 
     def setting(self, **hedge: float) -> dict[str, float]:
         return combo.setting([leg.model_dump(mode="json") for leg in self.legs], self.as_of,
                              entry_minute=self.entry_minute, exit_minute=self.exit_minute, quantity=self.quantity,
                              take_profit=self.take_profit, stop_loss=self.stop_loss,
-                             model=1 if self.model == "heston" else 0, min_edge=self.min_edge, **hedge)
+                             model=1 if self.model == "smile" else 0, min_edge=self.min_edge, **hedge)
 
     def files(self) -> list[Path]:
         return combo.days(self.symbol, self.start, self.end, self.source)
@@ -360,7 +360,8 @@ TOOLS = [
          "net USD, drawdown), the control's (RandomBuyStrategy) on the same days and the best's gap to it, the deflated "
          "Sharpe and the overfitting probability given every trial in the ledger, a walk-forward, the best without its "
          "five best days and by the underlying's move; and when the best beats the control, its robustness checks "
-         "(costs doubled, fills of the size shown a minute late, each parameter moved 20%), run then too. review "
+         "(costs doubled, fills of the size shown a minute late, each parameter moved 20%, the other underlying: "
+         "other_underlying, not a gate), run then too. review "
          "lists, met or not, what a version needs to move to review.",
          BacktestRequest, backtest, "/backtest", cost="heavy", engine=False,
          example={"strategy": "RandomBuyStrategy", "space": {"seed": [1, 2]}, "symbol": "SPXW",

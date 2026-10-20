@@ -1,4 +1,7 @@
 #include "../kernel.h"
+#include "quant/optimizer/nelder_mead.h"
+
+#include <array>
 #include <cmath>
 #include <complex>
 #include <numbers>
@@ -89,11 +92,9 @@ double heston_P(
 
 }  // namespace
 
-double heston_call_price(
-    double spot, double strike, double rate, double maturity,
-    double v0, double kappa, double theta, double xi, double rho,
-    int /*quad_points*/
-) {
+double heston_call_price(double spot, double strike, double rate, double maturity,
+                         const HestonParams& h) {
+    const auto [v0, kappa, theta, xi, rho] = h;
     if (spot <= 0.0 || strike <= 0.0 || maturity <= 0.0 || v0 <= 0.0)
         return std::max(spot - strike, 0.0);
 
@@ -104,22 +105,6 @@ double heston_call_price(
     // Heston (1993) Eq.(10): C = S*P1 - K*e^{-rT}*P2
     const double price = spot * P1 - strike * disc * P2;
     return std::max(price, 0.0);
-}
-
-void heston_price_batch(
-    double spot, double rate,
-    std::span<const double> strikes,
-    std::span<const double> maturities,
-    double v0, double kappa, double theta, double xi, double rho,
-    std::span<double> out_prices
-) {
-    const int n = static_cast<int>(strikes.size());
-#pragma omp parallel for schedule(static)
-    for (int i = 0; i < n; ++i) {
-        out_prices[i] = heston_call_price(
-            spot, strikes[i], rate, maturities[i],
-            v0, kappa, theta, xi, rho);
-    }
 }
 
 HestonFit heston_calibrate(
@@ -138,22 +123,22 @@ HestonFit heston_calibrate(
         double sse = 0.0;
         for (int i = 0; i < n; ++i) {
             const double err = heston_call_price(spot, strikes[i], rate, maturities[i],
-                                                 x[0], x[1], x[2], x[3], x[4])
+                                                 {x[0], x[1], x[2], x[3], x[4]})
                                - call_prices[i];
             sse += err * err;
         }
-        return sse / n;
+        return std::isfinite(sse) ? sse / n : 1e300; // a characteristic function that overflowed
     };
 
-    const std::vector<double> x0    = {init.v0, init.kappa, init.theta, init.xi, init.rho};
-    const std::vector<double> lower = {1e-4, 1e-3, 1e-4, 1e-4, -0.999};
-    const std::vector<double> upper = {2.0,  20.0,  2.0,  3.0,  0.999};
-    const OptResult opt = nelder_mead(objective, std::span<const double>(x0),
-                                      std::span<const double>(lower),
-                                      std::span<const double>(upper), 1e-8, max_iter);
-    if (opt.x.size() == 5) {
-        fit.params = {opt.x[0], opt.x[1], opt.x[2], opt.x[3], opt.x[4]};
-    }
+    const std::array<double, 5> x0    = {init.v0, init.kappa, init.theta, init.xi, init.rho};
+    const std::array<double, 5> lower = {1e-4, 1e-3, 1e-4, 1e-4, -0.999};
+    const std::array<double, 5> upper = {2.0,  20.0,  2.0,  3.0,  0.999};
+    std::array<double, 5> step{};  // a first step of 15% of each, 0.1 for one near zero
+    for (std::size_t i = 0; i < step.size(); ++i)
+        step[i] = std::abs(x0[i]) > 1e-8 ? 0.15 * x0[i] : 0.1;
+    const auto opt = minimise([&](const std::array<double, 5>& x) { return objective(x); }, x0,
+                              step, lower, upper, 1e-8, max_iter);
+    fit.params     = {opt.x[0], opt.x[1], opt.x[2], opt.x[3], opt.x[4]};
     fit.iterations = opt.iterations;
     fit.converged  = opt.converged;
     const double x[] = {fit.params.v0, fit.params.kappa, fit.params.theta, fit.params.xi,

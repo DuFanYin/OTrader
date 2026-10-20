@@ -11,21 +11,27 @@ namespace {
 
 constexpr int PATH_CHUNK = 64;   // paths per random stream: results do not depend on the number of threads
 
-struct ValueDelta { double value, delta; };
-
-// Black-Scholes value and delta of one option on a spot that carries a continuous yield.
-ValueDelta bs_value_delta(double s, double k, double r, double y, double vol, double tau, bool is_call) {
-    if (tau <= 0.0) {
-        const double in = is_call ? s - k : k - s;
-        return {std::max(in, 0.0), in > 0.0 ? (is_call ? 1.0 : -1.0) : 0.0};
-    }
-    const double forward = spot_forward(s, r, y, tau);
-    return {black_price(is_call, forward, k, tau, r, vol),
-            black_greeks(is_call, s, forward, k, tau, r, vol).delta};
+// Black-Scholes value of one option on a spot that carries a continuous yield.
+double bs_value(double s, double k, double r, double y, double vol, double tau, bool is_call) {
+    return tau <= 0.0 ? payoff(s, k, is_call)
+                      : black_price(is_call, spot_forward(s, r, y, tau), k, tau, r, vol);
 }
 
-double payoff(const HedgeLeg& leg, double s) {
-    return std::max(leg.is_call ? s - leg.strike : leg.strike - s, 0.0);
+// Its delta, as black_greeks works it out (the same operations, bit for bit), without pricing
+// it: the hedge asks it of every leg at every step of every path.
+double bs_delta(double s, double k, double r, double y, double vol, double tau, bool is_call) {
+    if (tau <= 0.0) {
+        const double in = is_call ? s - k : k - s;
+        return in > 0.0 ? (is_call ? 1.0 : -1.0) : 0.0;
+    }
+    const double forward = spot_forward(s, r, y, tau);
+    if (s <= 0.0 || forward <= 0.0 || k <= 0.0 || vol <= 0.0) {
+        return 0.0;
+    }
+    const double sd = vol * std::sqrt(tau);
+    const double d1 = (std::log(forward / k) / sd) + (0.5 * sd);
+    const double per_spot = std::exp(-r * tau) * forward / s;
+    return per_spot * (is_call ? norm_cdf(d1) : -norm_cdf(-d1));
 }
 
 }  // namespace
@@ -62,14 +68,15 @@ std::array<HedgeStrategy, 4> hedge_position(
         for (size_t i = 0; i < legs.size(); ++i) {
             if (j >= expiry_step[i] || legs[i].quantity == 0.0) continue;
             const double tau = std::max(legs[i].maturity - j * dt, 1e-10);
-            d += legs[i].quantity * bs_value_delta(s, legs[i].strike, rate, legs[i].yield, legs[i].vol * mult, tau,
-                                                   legs[i].is_call).delta;
+            d += legs[i].quantity * bs_delta(s, legs[i].strike, rate, legs[i].yield,
+                                             legs[i].vol * mult, tau, legs[i].is_call);
         }
         return d;
     };
     double position_cost = 0.0;
     for (const auto& leg : legs)
-        position_cost += leg.quantity * bs_value_delta(spot, leg.strike, rate, leg.yield, leg.vol, leg.maturity, leg.is_call).value;
+        position_cost += leg.quantity * bs_value(spot, leg.strike, rate, leg.yield, leg.vol,
+                                                 leg.maturity, leg.is_call);
 
     std::array<HedgeStrategy, 4> out;
     for (int st = 0; st < 4; ++st) {
@@ -104,7 +111,8 @@ std::array<HedgeStrategy, 4> hedge_position(
                 double settled = 0.0;
                 bool alive = false;
                 for (size_t i = 0; i < legs.size(); ++i) {
-                    if (expiry_step[i] == j) settled += legs[i].quantity * payoff(legs[i], s);
+                    if (expiry_step[i] == j)
+                        settled += legs[i].quantity * payoff(s, legs[i].strike, legs[i].is_call);
                     alive |= expiry_step[i] > j;
                 }
                 // once every leg has expired the target is no shares at all

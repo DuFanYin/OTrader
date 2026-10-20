@@ -6,8 +6,9 @@ report's trials that reached the holdout, its paper days. This module reads that
 gates of the next stage, and moves the version only when they pass; the stages that put money at risk also need a
 person's approval, given in words, and only the person may give it (infra/access.py): the agent asks for review,
 the person approves paper, pilot and live. Going back (or retiring) needs only a reason, and anyone may. A move is
-written before it is carried out (versions.set_pending), then done step by step, each step safe to repeat (advance):
-one that fails leaves it under way, and the session check carries it out again (advance_pending).
+written before it is carried out (versions.set_pending), then done step by step, each step safe to repeat
+(versions.advance): one that fails leaves it under way, and the session check carries it out again
+(versions.advance_pending).
 
     research -> review -> paper -> pilot -> live, and retired from any of them
 
@@ -15,8 +16,8 @@ Where it trades, its code is installed (strategies.install) for the account's en
 paper on, for the live one from pilot on; going back, or retiring, takes it out of what it no longer trades. An
 agent's strategy reaches an account only this way, or through a person installing it (install_strategy). A demo
 strategy is loaded by every engine already: nothing to install. On the paper engine (the server's) the version then
-runs as a strategy of its own, named after it (engine_name), with its setting frozen, on the underlying it was tested
-on; going back stops it and takes it off. The daily report compares each of its paper days with a backtest of the
+runs as a strategy of its own, named after it (versions.engine_name), with its setting frozen, on the underlying it
+was tested on; going back stops it and takes it off. The daily report compares each of its paper days with a backtest of the
 day, which the gate to pilot reads. Each daily report also holds every trading version's paper days against what its
 research days predict (standing): one whose last weeks fall below the prediction goes back a stage on its own (watch).
 
@@ -28,11 +29,13 @@ from __future__ import annotations
 import random
 import statistics
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from optra.data import daily_values
+from optra.data.days import day_of
 from optra.infra import access
-from optra.research import analysis, batch, code_identity, combo, evidence, ledger, report, strategies, versions
+from optra.research import analysis, batch, combo, evidence, ledger, report, versions
 
 STAGES = ("research", "review", "paper", "pilot", "live", "retired")
 NEEDS_APPROVAL = {"paper", "pilot", "live"}  # the stages where it trades: a person decides
@@ -45,12 +48,13 @@ RAN_ALL_DAYS = "every trial ran all its days"  # one that stopped early (a missi
 MIN_PAPER_DAYS = 20        # four weeks of paper trading
 MAX_UNMATCHED = 0.1        # paper fills with no backtest fill to match, as a share of all
 PILOT_DAYS = 56            # calendar days in the pilot before going live
-LIVE_STRATEGIES = "/etc/optra/live-strategies"  # root's: the live account's engine runs only what it lists
 MAX_SLIPPAGE = 1.5         # what paper fills paid over the mids, at most this times what the backtest's did
 PREDICTED = (0.05, 0.95)   # the band of the research's P&L over as many days that paper must fall in
 PREDICTION_DAYS = 20       # the last paper days watched against the band (watch)
 MIN_PREDICTED_DAYS = 5     # paper days before a prediction says anything
 HOLDOUT_REPORTS = 3        # holdout reports a family may have: past them the holdout would be one more validation set
+KEPT_BY_DAY = 15           # values in the 30 days before the holdout: a series kept by day (an event list is not)
+STALE_DAYS = 7             # calendar days a kept series' last value may be before the holdout's last day
 
 
 @dataclass
@@ -60,54 +64,58 @@ class Gate:
     detail: str
 
 
+def experiment_gates(experiment_id: str, a: dict[str, Any]) -> list[Gate]:
+    """The review gates of an experiment's best trial (a: analysis.analysis of the experiment): the experiment still
+    believes it once its tries are counted, every trial ran all its days, enough trades on enough days, and it makes
+    money with its parameters moved, the costs doubled, fills of the size shown a minute late and, when it filled
+    inside the spread, every leg at its bid or ask (its robustness checks, analysis.robustness). The one place they
+    are judged: a backtest shows them, review requires them."""
+    best = a["best"]["id"]
+    dsr, pbo = a["deflated_sharpe"].get("dsr"), a["pbo"].get("pbo")
+    gates = [Gate("deflated Sharpe", dsr is not None and dsr > DSR_BAR,
+                  f"{dsr} in experiment {experiment_id} (bar {DSR_BAR})"),
+             Gate("overfitting probability", pbo is not None and pbo < PBO_BAR, f"{pbo} (bar {PBO_BAR})")]
+    exp = ledger.experiment(experiment_id)
+    trials = exp["trials"]
+    stopped = [t for t in trials if t["status"] == "done" and t["error"]]
+    gates.append(Gate(RAN_ALL_DAYS, not stopped, "every trial ran to its last day" if not stopped else
+                      f"{len(stopped)} stopped early: {stopped[0]['error']}"))
+    trial = next(t for t in trials if t["id"] == best)
+    trades = (trial["summary"] or {}).get("trades", 0)
+    gates.append(Gate("trades", trades >= MIN_TRADES, f"{trades} (at least {MIN_TRADES})"))
+    days = len({x["opened"] for x in ledger.trial_trades([best])[best]})
+    gates.append(Gate("days with a trade", days >= MIN_TRADE_DAYS, f"{days} (at least {MIN_TRADE_DAYS})"))
+    gates.append(_plateau(experiment_id, bool(ledger.check_trials(experiment_id, "costs_doubled"))))
+    checks = [("costs doubled", "costs_doubled", "the costs doubled"),
+              ("fills of the size shown, a minute late", "fills_shown_size_late",
+               "fills held to the size shown and a minute late")]
+    # Filled inside the spread: it must hold up at the quotes too.
+    if ledger.Costs.of(exp["spec"]["costs"]).at_the_quotes() is not None:
+        checks.append(("every leg at its bid or ask", "fills_at_the_quotes", "every leg at its bid or ask"))
+    for name, check, what in checks:  # this trial's own: an experiment's checks may have been run for another
+        nets = [t["summary"]["net"] for t in ledger.check_trials(experiment_id, check)
+                if t["summary"] and t["setting"] == trial["setting"]]
+        gates.append(Gate(name, bool(nets) and min(nets) > 0,
+                          f"no trial with {what} (experiment_robustness)" if not nets else f"net {min(nets):,.0f}"))
+    return gates
+
+
 def _research(version_id: str) -> list[Gate]:
-    """To review: an experiment that found it and still believes it once its tries are counted; enough trades; a
-    positive result with the costs doubled."""
-    trials = [t for t in versions.version_trials(version_id) if not t["holdout"]]
-    gates = []
+    """To review: the gates of the experiment that found it (the one whose best it is that believes it most)."""
     best = None
     # A robustness check or an optimiser's round finds nothing: the experiment of all its rounds does.
-    for t in (t for t in trials if not t["parent"] and not t["check"]):
+    for t in versions.version_trials(version_id):
+        if t["holdout"] or t["parent"] or t["check"] or t["report"]:
+            continue
         a = analysis.analysis(t["experiment_id"])
         if a.get("best", {}).get("id") != t["id"]:
             continue
-        dsr, pbo = a["deflated_sharpe"].get("dsr"), a["pbo"].get("pbo")
-        if best is None or (dsr or 0) > (best[1] or 0):
-            best = (t, dsr, pbo)
+        dsr = a["deflated_sharpe"].get("dsr")
+        if best is None or (dsr or 0) > (best[2] or 0):
+            best = (t["experiment_id"], a, dsr)
     if best is None:
-        gates.append(Gate("found by an experiment", False, "it is not the best trial of any experiment"))
-    else:
-        t, dsr, pbo = best
-        gates.append(Gate("deflated Sharpe", dsr is not None and dsr > DSR_BAR,
-                          f"{dsr} in experiment {t['experiment_id']} (bar {DSR_BAR})"))
-        gates.append(Gate("overfitting probability", pbo is not None and pbo < PBO_BAR, f"{pbo} (bar {PBO_BAR})"))
-    stopped = [t for t in trials if t["error"]]
-    gates.append(Gate(RAN_ALL_DAYS, not stopped, "every trial ran to its last day" if not stopped else
-                      f"{len(stopped)} stopped early: {stopped[0]['error']}"))
-    trades = max((t["summary"]["trades"] for t in trials), default=0)
-    gates.append(Gate("trades", trades >= MIN_TRADES, f"{trades} (at least {MIN_TRADES})"))
-    opened = ledger.trial_trades([t["id"] for t in trials])
-    days = max((len({x["opened"] for x in opened[t["id"]]}) for t in trials), default=0)
-    gates.append(Gate("days with a trade", days >= MIN_TRADE_DAYS, f"{days} (at least {MIN_TRADE_DAYS})"))
-    if best is not None:
-        gates.append(_plateau(best[0]["experiment_id"], any(t["check"] == "costs_doubled" for t in trials)))
-
-    def net_of(check: str) -> float | None:
-        return max((t["summary"]["net"] for t in trials if t["check"] == check), default=None)
-
-    net = net_of("costs_doubled")
-    gates.append(Gate("costs doubled", net is not None and net > 0,
-                      "no trial with the costs doubled (experiment_robustness)" if net is None else f"net {net:,.0f}"))
-    net = net_of("fills_shown_size_late")
-    gates.append(Gate("fills of the size shown, a minute late", net is not None and net > 0,
-                      "no trial with fills held to the size shown and a minute late (experiment_robustness)"
-                      if net is None else f"net {net:,.0f}"))
-    if any(ledger.Costs.of(t["costs"]).at_the_quotes() is not None for t in trials):
-        net = net_of("fills_at_the_quotes")  # it filled inside the spread: it must hold up at the quotes too
-        gates.append(Gate("every leg at its bid or ask", net is not None and net > 0,
-                          "no trial with every leg at its bid or ask (experiment_robustness)" if net is None
-                          else f"net {net:,.0f}"))
-    return gates
+        return [Gate("found by an experiment", False, "it is not the best trial of any experiment")]
+    return experiment_gates(best[0], best[1])
 
 
 def _plateau(experiment_id: str, checked: bool) -> Gate:
@@ -131,18 +139,18 @@ def _plateau(experiment_id: str, checked: bool) -> Gate:
                 + idle + (f"; losing: {losing[0]}" if losing else ""))
 
 
-def _found(version_id: str) -> dict[str, Any]:
-    """The version's own trial in research: not a check of another, not on the holdout."""
-    found = [t for t in versions.version_trials(version_id)
-             if not t["holdout"] and not t["parent"] and not t["check"]]
+def _found(version_id: str, root: str | None = None) -> dict[str, Any]:
+    """The version's own trial in research (on root, when given)."""
+    found = [t for t in versions.own_trials(version_id) if root is None or versions.root_of(t) == root]
     if not found:
-        raise ValueError("the version has no trial of its own in research yet: backtest it first")
+        raise ValueError(f"the version has no trial of its own in research{' on ' + root if root else ''} yet: "
+                         "backtest it first")
     return found[0]
 
 
 def research_costs(version_id: str) -> ledger.Costs:
     """The costs the version was found at: what its paper days are backtested at."""
-    return ledger.Costs.of(_found(version_id)["costs"])
+    return ledger.Costs.of(_found(version_id, versions.portfolio(version_id))["costs"])
 
 
 def _band(research: list[float], n: int) -> tuple[float, float]:
@@ -161,7 +169,8 @@ def standing(version_id: str, last: int | None = None) -> dict[str, Any] | None:
     days = evidence.paper_days(v["strategy"], v["setting"], v["code"])[-last if last else 0:]
     if len(days) < MIN_PREDICTED_DAYS:
         return None
-    research = [d["pnl"] for d in ledger.trial_days([_found(version_id)["id"]]).popitem()[1]]
+    found = _found(version_id, versions.portfolio(version_id))["id"]
+    research = [d["pnl"] for d in ledger.trial_days([found]).popitem()[1]]
     if not research:
         return None
     low, high = _band(research, len(days))
@@ -184,7 +193,7 @@ def _review(version_id: str) -> list[Gate]:
     promotion report has taken it to the holdout, and it made money there."""
     tested = versions.strategy_version(version_id)["code"].get("engine")
     try:
-        running = _paper_engine().get_status()["code"]
+        running = versions.paper_engine().get_status()["code"]
     except Exception as exc:
         running, why = None, f"the paper engine does not say what it was built from ({exc})"
     else:
@@ -259,133 +268,46 @@ def status(version_id: str) -> dict[str, Any]:
             "paper_days": evidence.paper_days(v["strategy"], v["setting"], v["code"])}
 
 
-def _sources(v: dict[str, Any]) -> dict[str, str] | None:
-    """The version's files to install, or None for a demo strategy (every engine loads those)."""
-    files = ledger.strategy_source(v["code"]["strategy"])
-    cpp = next(name for name in files if name.endswith(".cpp"))
-    return None if (strategies.demo_dir() / cpp).exists() else files
-
-
-def accounts_of(stage: str) -> set[str]:
-    """The accounts a version at this stage trades on: paper from paper on, and live from pilot on."""
-    return {"paper"} if stage == "paper" else {"paper", "live"} if stage in ("pilot", "live") else set()
-
-
-def _place(version_id: str, v: dict[str, Any], to: str, note: str) -> None:
-    """Installs the version for the accounts `to` trades on and takes it off the others, each recorded. Refused
-    (ValueError) when it does not build, or the code installed is not the version's."""
-    sources = _sources(v)
-    if sources is None:
-        return
-    cpp = next(n for n in sources if n.endswith(".cpp"))
-    for account in strategies.ACCOUNTS:
-        installed = (strategies.installed_dir(account) / cpp).exists()
-        wanted = account in accounts_of(to)
-        if wanted and not installed:
-            strategies.install(sources, account)
-            if code_identity.strategy_hash(strategies.installed_library(account, cpp)) != v["code"]["strategy"]:
-                strategies.uninstall(sources, account)
-                raise ValueError("the installed code is not the version's (a header of strategy/demo it includes "
-                                 "changed since): register it again")
-            versions.record_install(cpp, v["code"]["strategy"], account, True, f"{version_id} to {to}: {note}")
-        elif installed and not wanted and stage_installed(v, account, cpp):
-            strategies.uninstall(sources, account)
-            versions.record_install(cpp, v["code"]["strategy"], account, False, f"{version_id} to {to}: {note}")
-
-
-def live_approval(v: dict[str, Any]) -> str:
-    """The version's line in the live account's list of approved strategies, which its engine reads at start and runs
-    nothing else (IbSettings::live_strategies): the class, the code and the setting."""
-    setting = (f"{k}={float(x)!r}" for k, x in sorted(v["setting"].items()))
-    return " ".join([v["strategy"], v["code"]["strategy"], *setting])
-
-
-def engine_name(version_id: str, v: dict[str, Any]) -> str:
-    """The version's strategy on an engine."""
-    return f"{v['strategy']}_{version_id}"
-
-
-def _portfolio(version_id: str) -> str:
-    """The underlying the version was tested on (its trials' days)."""
-    roots = {t["days"][0].split("/")[0] for t in versions.version_trials(version_id) if t["days"]}
-    if len(roots) != 1:
-        raise ValueError(f"the version was tested on {sorted(roots) or 'nothing'}: one underlying to run it on")
-    return roots.pop()
-
-
-def _paper_engine():
-    from optra.infra import live
-    try:
-        return live.client("paper")
-    except Exception as exc:  # the server runs without the engine
-        raise ValueError(f"the paper engine does not answer: {getattr(exc, 'detail', exc)}") from exc
-
-
-def _start_on_paper(version_id: str, v: dict[str, Any]) -> str:
-    """The version as a strategy of the paper engine, added (or restored, if it ran before) and started. Its name."""
-    client = _paper_engine()
-    name = engine_name(version_id, v)
-    refused = client.get_strategy_classes()["refused"]  # loads the libraries installed since
-    there = {s["strategy_name"]: s for s in client.list_strategies()}
-    if name not in there:
-        if name in client.get_removed_strategies():
-            client.restore_strategy(name)
-        else:
-            try:
-                client.add_strategy(v["strategy"], _portfolio(version_id), v["setting"], name)
-            except Exception as exc:
-                raise ValueError(f"the paper engine does not take {v['strategy']}: {getattr(exc, 'details', exc)}"
-                                 + (f" (libraries it refused: {'; '.join(refused)})" if refused else "")) from exc
-        there[name] = {"status": "added"}
-    if there[name]["status"] == "added":
-        client.init_strategy(name)
-    if there[name]["status"] != "running":
-        client.start_strategy(name)
-    return name
-
-
-def _stop_on_paper(version_id: str, v: dict[str, Any]) -> str:
-    """The version's strategy on the paper engine stopped and taken off, if it is there; what was done."""
-    client = _paper_engine()
-    name = engine_name(version_id, v)
-    if name not in {s["strategy_name"] for s in client.list_strategies()}:
-        return f"{name} is not on the paper engine"
-    if next(s for s in client.list_strategies() if s["strategy_name"] == name)["status"] == "running":
-        client.stop_strategy(name)
-    if client.remove_strategy(name)["removed"]:
-        return f"{name} stopped and taken off the paper engine"
-    return f"{name} stopped; it still holds positions, so it stays on the paper engine until they are closed"
-
-
-def holdout_report(version_id: str) -> dict[str, Any]:
-    """The version over its underlying's days, the holdout's included, beside the control (RandomBuyStrategy), at the
-    costs it was found at: the agent's one way to the holdout, run by the system, once a version and recorded. A change
-    to the strategy is a new version, and its look at the holdout is counted with the others in the ledger."""
+def holdout_report(version_id: str, root: str | None = None) -> dict[str, Any]:
+    """The version over its underlying's days (root's, when it was tested on several), the holdout's included, beside
+    the control (RandomBuyStrategy), at the costs it was found at there: the agent's one way to the holdout, run by the
+    system, once a version and recorded. A change to the strategy is a new version, and its look at the holdout is
+    counted with the others in the ledger."""
     v = versions.strategy_version(version_id)
     if any(t["holdout"] for t in versions.version_trials(version_id)):
         raise ValueError("the version has had its holdout report (get_strategy_version shows it): once a version")
-    found = _found(version_id)
+    root = versions.portfolio(version_id, root)
+    found = _found(version_id, root)
     if (used := versions.holdout_reports(v["family"])) >= HOLDOUT_REPORTS:
         raise ValueError(f"the family {v['family']} has had {used} holdout reports, its most ({HOLDOUT_REPORTS}): "
                          "the holdout judges an idea, it does not tune one")
-    root = _portfolio(version_id)
     cut = ledger.holdout_from(root)
     if cut is None:
         raise ValueError(f"{root} has no holdout (config.json \"holdout\")")
+    days = combo.days(root, None, None, "backtest")
+    if stale := uncovered_series(cut, day_of(days[-1]) or cut):
+        raise ValueError("values by day stop before the holdout's last days, where a strategy reading them would "
+                         f"read nothing (Strategy::daily): {', '.join(stale)}; fill them first")
     costs = ledger.Costs.of(found["costs"])
     pricing = ledger.experiment(found["experiment_id"])["spec"]["pricing"]
     runs = {batch.label(v["strategy"], v["setting"]): (v["strategy"], v["setting"]),
             batch.label(*ledger.CONTROL): ledger.CONTROL}
     with access.system():
-        out = report.report(combo.days(root, None, None, "backtest"), runs, cut, costs,
+        out = report.report(days, runs, cut, costs,
                             family=v["family"], pricing=pricing)
     return {"version_id": version_id, **out}
 
 
-def stage_installed(v: dict[str, Any], account: str, cpp: str) -> bool:
-    """The library built for the account is this version's code (not another's, nor one a person installed)."""
-    library = strategies.installed_library(account, cpp)
-    return library.exists() and code_identity.strategy_hash(library) == v["code"]["strategy"]
+def uncovered_series(cut: date, last: date) -> list[str]:
+    """The values by day (data/daily) kept up to the holdout (KEPT_BY_DAY values in the 30 days before it) whose last
+    value is more than STALE_DAYS before the holdout's last day, each with that value's date."""
+    out = []
+    for path in sorted(daily_values.daily_dir().glob("*.csv")):
+        dated = sorted(date.fromisoformat(d) for d in daily_values.read_series(path))
+        kept = sum(cut - timedelta(days=30) <= d < cut for d in dated)
+        if kept >= KEPT_BY_DAY and dated[-1] < last - timedelta(days=STALE_DAYS):
+            out.append(f"{path.stem} (last {dated[-1]})")
+    return out
 
 
 def promote(version_id: str, to: str, approved: str = "", reason: str = "") -> dict[str, Any]:
@@ -412,55 +334,8 @@ def promote(version_id: str, to: str, approved: str = "", reason: str = "") -> d
                 raise ValueError(f"{to} trades: it needs a person's approval, in words (who and why)")
         note = approved.strip() or "gates passed"
     versions.set_pending(version_id, to, note)
-    return advance(version_id)
-
-
-def advance(version_id: str) -> dict[str, Any]:
-    """Carries out the move under way, each step safe to run again: off the paper engine when it no longer trades
-    there, its code installed for the accounts it trades on and taken off the others (_place), on the paper engine
-    when it starts trading there; then the stage. A step that fails leaves the move under way with why (ValueError):
-    advance_pending carries it out again."""
-    v = versions.strategy_version(version_id)
-    to, note = v["pending"], v["pending_note"] or ""
-    if to is None:
-        return status(version_id)
-    stage = v["stage"]
-    try:
-        if "paper" in accounts_of(stage) and "paper" not in accounts_of(to):
-            note += f" ({_stop_on_paper(version_id, v)})"
-        _place(version_id, v, to, note)
-        if "paper" in accounts_of(to) and "paper" not in accounts_of(stage):
-            note += f" (runs on the paper engine as {_start_on_paper(version_id, v)})"
-        if "live" in accounts_of(to) and "live" not in accounts_of(stage):
-            note += f" (the live account's engine runs it once root adds to {LIVE_STRATEGIES}: {live_approval(v)})"
-    except Exception as exc:
-        why = str(getattr(exc, "detail", exc))
-        versions.set_pending_error(version_id, why)
-        raise ValueError(f"the move to {to} is under way and stopped: {why}; it is tried again at the next check "
-                         "(or promote again)") from exc
-    versions.set_stage(version_id, to, note)
+    versions.advance(version_id)
     return status(version_id)
-
-
-def advance_pending() -> list[str]:
-    """Every move under way carried out again (the session check's); what still stops them."""
-    stuck = []
-    for version_id in versions.pending():
-        try:
-            advance(version_id)
-        except ValueError as exc:
-            stuck.append(f"version {version_id}: {exc}")
-    return stuck
-
-
-def version_of(strategy_name: str) -> str | None:
-    """The version a strategy on the paper engine runs (engine_name), or None for one a person added."""
-    _, _, version_id = strategy_name.rpartition("_")
-    try:
-        v = versions.strategy_version(version_id)
-    except KeyError:
-        return None
-    return version_id if engine_name(version_id, v) == strategy_name else None
 
 
 def watch() -> dict[str, Any]:
@@ -469,7 +344,7 @@ def watch() -> dict[str, Any]:
     whose paper days, all of them, fall inside it (the realization rate). The daily report's."""
     rows, back = [], []
     for v in versions.strategy_versions():
-        if not accounts_of(v["stage"]):
+        if not versions.accounts_of(v["stage"]):
             continue
         try:
             whole, recent = standing(v["id"]), standing(v["id"], PREDICTION_DAYS)

@@ -27,14 +27,12 @@ add_library(quant STATIC
   pricing/hedging.cpp
   pricing/implied_vol.cpp
   pricing/heston.cpp
+  pricing/svi.cpp
   optimizer/bayesian.cpp
-  optimizer/nelder_mead.cpp
   stats/moments.cpp
   stats/stochastic_checks.cpp
   stats/selection.cpp
   stats/features.cpp
-  screener/option_filter.cpp
-  screener/strategies.cpp
   ${LETS_BE_RATIONAL_SOURCES}
 )
 set_target_properties(quant PROPERTIES POSITION_INDEPENDENT_CODE ON)

@@ -41,10 +41,12 @@ def backtest(*, strategy: str, setting: dict[str, float] | None, space: dict[str
         end = date.fromordinal(cut.toordinal() - 1)
     days = [str(f) for f in combo.days(symbol, start, end, "backtest")]
     common = {"days": days, "costs": costs, "priority": jobs.PRIORITY_REPORT}
-    exp = ledger.submit(family=family or strategy, strategy=strategy, space=space or {}, search=search or {},
-                        settings_list=None if space else [setting or {}], note=note, config=config, **common)
-    control = ledger.submit(family=CONTROL_FAMILY, strategy=CONTROL[0], settings_list=[CONTROL[1]],
-                            note="the control of a backtest", **common)
+    # Together: on the same days, they run as one batch.
+    exp, control = ledger.submit_together([
+        dict(family=family or strategy, strategy=strategy, space=space or {}, search=search or {},
+             settings_list=None if space else [setting or {}], note=note, config=config, **common),
+        dict(family=CONTROL_FAMILY, strategy=CONTROL[0], settings_list=[CONTROL[1]],
+             note="the control of a backtest", **common)])
     jobs.wait(ref=exp["experiment_id"])
     jobs.wait(ref=control["experiment_id"])
 
@@ -67,41 +69,16 @@ def backtest(*, strategy: str, setting: dict[str, float] | None, space: dict[str
     robust = None
     if beats:
         checks = analysis.robustness(exp["experiment_id"], best["id"], priority=jobs.PRIORITY_REPORT)
-        keys = ("costs_doubled", "fills_shown_size_late", "fills_at_the_quotes", "parameters_moved")
+        keys = ("costs_doubled", "fills_shown_size_late", "fills_at_the_quotes", "parameters_moved", "other_underlying")
         for key in keys:
             if checks.get(key):
                 jobs.wait(ref=checks[key]["experiment_id"])
         robust = {key: _net(checks.get(key)) for key in keys}
 
     dsr, pbo = found["deflated_sharpe"].get("dsr"), found["pbo"].get("pbo")
-
-    def nets(key: str) -> list[float | None]:
-        return [r["net"] for r in (robust or {}).get(key, [])]
-
     best_trades = ledger.trial_trades([best["id"]])[best["id"]]
-    trade_days = len({t["opened"] for t in best_trades})
-    review = [
-        {"gate": "deflated Sharpe", "met": dsr is not None and dsr > promotion.DSR_BAR,
-         "value": dsr, "bar": f"> {promotion.DSR_BAR}"},
-        {"gate": "overfitting probability", "met": pbo is not None and pbo < promotion.PBO_BAR,
-         "value": pbo, "bar": f"< {promotion.PBO_BAR}"},
-        {"gate": "trades", "met": best.get("trades", 0) >= promotion.MIN_TRADES, "value": best.get("trades", 0),
-         "bar": f">= {promotion.MIN_TRADES}"},
-        {"gate": "days with a trade", "met": trade_days >= promotion.MIN_TRADE_DAYS, "value": trade_days,
-         "bar": f">= {promotion.MIN_TRADE_DAYS}"},
-        {"gate": promotion.RAN_ALL_DAYS, "met": not stopped, "value": len(stopped), "bar": "0 stopped"},
-        {"gate": "parameters moved", "met": robust is not None and all((n or 0) > 0 for n in nets("parameters_moved")),
-         "value": min(nets("parameters_moved"), key=lambda n: n or 0, default=None), "bar": "every net > 0"},
-        {"gate": "costs doubled", "met": bool(nets("costs_doubled")) and all((n or 0) > 0 for n in nets("costs_doubled")),
-         "value": nets("costs_doubled")[:1] or None, "bar": "net > 0"},
-        {"gate": "fills of the size shown, a minute late",
-         "met": bool(nets("fills_shown_size_late")) and all((n or 0) > 0 for n in nets("fills_shown_size_late")),
-         "value": nets("fills_shown_size_late")[:1] or None, "bar": "net > 0"},
-    ]
-    if ledger.Costs.of(costs).at_the_quotes() is not None:  # it filled inside the spread
-        review.append({"gate": "every leg at its bid or ask",
-                       "met": bool(nets("fills_at_the_quotes")) and all((n or 0) > 0 for n in nets("fills_at_the_quotes")),
-                       "value": nets("fills_at_the_quotes")[:1] or None, "bar": "net > 0"})
+    review = [{"gate": g.name, "met": g.passed, "detail": g.detail}
+              for g in promotion.experiment_gates(exp["experiment_id"], found)]
     return {
         "experiment_id": exp["experiment_id"], "config": config, "family": exp["family"], "tries": found["tries"],
         "family_tries": found["family_tries"],
@@ -113,6 +90,8 @@ def backtest(*, strategy: str, setting: dict[str, float] | None, space: dict[str
         "walk_forward_net": found["walk_forward"].get("net"),
         "without_best_days": found["without_best_days"], "by_regime": found["by_regime"],
         "robustness": robust, "review": review, "stopped": stopped,
+        # Not a gate yet: the best setting on the other underlying over the same dates.
+        "other_underlying": (robust or {}).get("other_underlying"),
         "best_trades": best_trades,
     }
 

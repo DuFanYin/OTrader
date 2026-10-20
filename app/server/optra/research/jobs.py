@@ -228,7 +228,7 @@ def complete(job_id: int, worker: str, out: bytes) -> dict[str, Any]:
         job = store.db().execute("SELECT kind FROM jobs WHERE id = ?", (job_id,)).fetchone()
     error, prepared = None, None
     try:
-        runner.read(out)  # its last line: whether the run went through
+        runner.check(out)
         if job is not None:
             prepared = KINDS[job["kind"]].prepare(out)
     except ValueError as e:
@@ -283,14 +283,6 @@ def counts(ref: str) -> dict[str, int]:
 
 # ---------------------------------------------------------------- waiting for jobs
 
-def _run_here(job: dict[str, Any], name: str | None = None) -> bytes:
-    b = job["batch"]
-    try:
-        return runner.run_trials(b["files"], b["trials"], b["risk_free_rate"], b["iv_price_mode"], name=name)
-    except ValueError as e:
-        return orjson.dumps({"status": "error", "error": str(e)})
-
-
 def _taken(priority: int) -> bool:
     return any(w["min_priority"] <= priority for w in workers().values())
 
@@ -300,7 +292,7 @@ def wait(*, ref: str | None = None, job_ids: list[int] | None = None, timeout: f
     if _here:
         worker = f"here:{threading.get_ident()}"
         while (job := lease(worker, ref=ref)) is not None:
-            complete(job["job_id"], worker, _run_here(job))
+            complete(job["job_id"], worker, runner.run_batch(job["batch"]))
         return
     where, args = ("ref = ?", [ref]) if ref is not None else (
         f"id IN ({','.join('?' * len(job_ids or []))})", list(job_ids or []))
@@ -341,7 +333,7 @@ def run(batch: dict[str, Any], priority: int, name: str | None = None, timeout: 
     and each trial's result, as runner.read gives them. A name stops the run of that name before (the page's
     backtest). Raises Cancelled when it was cancelled, ValueError when it failed."""
     if _here:
-        days, trials = runner.read(_run_here({"batch": batch}, name))
+        days, trials = runner.read(runner.run_batch(batch, name=name))
         return days, list(trials)
     job_id = submit(batch, priority, name)
     try:

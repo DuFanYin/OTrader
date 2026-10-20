@@ -282,7 +282,7 @@ h1 { margin: 0; font-size: 26px; font-weight: 600; line-height: 1.15; letter-spa
 <g class="node control" id="n-tools">
 <rect class="box control" x="815" y="146" width="200" height="44" rx="6"/>
 <text class="title" x="915" y="165">Tools</text>
-<text class="sub" x="915" y="181">58, for the page and agents</text>
+<text class="sub" x="915" y="181">61, for the page and agents</text>
 </g>
 <g class="node control" id="n-ledger">
 <rect class="box control" x="405" y="206" width="180" height="44" rx="6"/>
@@ -317,8 +317,8 @@ h1 { margin: 0; font-size: 26px; font-weight: 600; line-height: 1.15; letter-spa
 <text class="door-text" x="670" y="374.5">gRPC (live)</text>
 </g>
 <g class="node door-node" id="n-cli">
-<rect class="door" x="435" y="357" width="120" height="26" rx="13"/>
-<text class="door-text" x="495" y="374.5">CLI (backtest)</text>
+<rect class="door" x="405" y="357" width="180" height="26" rx="13"/>
+<text class="door-text" x="495" y="374.5">CLI (backtest, research)</text>
 </g>
 <g class="node door-node" id="n-load">
 <rect class="door" x="45" y="357" width="120" height="26" rx="13"/>
@@ -336,7 +336,7 @@ h1 { margin: 0; font-size: 26px; font-weight: 600; line-height: 1.15; letter-spa
 <g class="node core" id="n-engine">
 <rect class="box core frame" x="30" y="422" width="720" height="376" rx="10"/>
 <text class="title" x="417" y="442">Engine</text>
-<text class="sub" x="417" y="458">one code path, two assemblies; adapters plug into its ports</text>
+<text class="sub" x="417" y="458">one code path, two assemblies, research tools on its day reading; adapters plug into its ports</text>
 </g>
 <g class="node core" id="n-loop">
 <rect class="box core" x="214" y="474" width="406" height="52" rx="6"/>
@@ -355,7 +355,7 @@ h1 { margin: 0; font-size: 26px; font-weight: 600; line-height: 1.15; letter-spa
 <g class="node core" id="n-portfolios">
 <rect class="box core" x="240" y="554" width="150" height="44" rx="6"/>
 <text class="title" x="315" y="573">Portfolios</text>
-<text class="sub" x="315" y="589">chains, IV, Greeks</text>
+<text class="sub" x="315" y="589">chains, IV, Greeks, smiles</text>
 </g>
 <path class="arrow" id="e-17" d="M240,576 H202" marker-end="url(#head)"/>
 <text class="flow" x="207" y="570">read</text>
@@ -412,12 +412,12 @@ h1 { margin: 0; font-size: 26px; font-weight: 600; line-height: 1.15; letter-spa
 <g class="node lab" id="n-quant">
 <rect class="box lab" x="44" y="834" width="576" height="44" rx="6"/>
 <text class="title" x="332" y="853">quant</text>
-<text class="sub" x="332" y="869">pricing, IV, Greeks, MC, PDE, Heston</text>
+<text class="sub" x="332" y="869">pricing, IV, Greeks, SVI smiles, MC, PDE, Heston</text>
 </g>
 <g class="node lab" id="n-analytics">
 <rect class="box lab" x="815" y="834" width="200" height="44" rx="6"/>
 <text class="title" x="915" y="853">quant/analytics</text>
-<text class="sub" x="915" y="869">research workflows, C ABI</text>
+<text class="sub" x="915" y="869">workflows, synthetic days</text>
 </g>
 <path class="arrow" id="e-32" d="M347,834 V800" marker-end="url(#head)"/>
 <text class="flow" x="355" y="822">IV, Greeks, pricing</text>
@@ -501,11 +501,11 @@ h1 { margin: 0; font-size: 26px; font-weight: 600; line-height: 1.15; letter-spa
 <text class="flow" x="458" y="390">fills, the holding</text>
 <text class="note" x="60" y="430">The day, New York time: at 8:45 the day's contracts are rolled in; at the close expired options settle and working</text>
 <text class="note" x="60" y="448">orders are cancelled; on connect the holdings are checked against the broker's account.</text>
-<text class="note" x="60" y="474">p50 on a shared laptop, broker stand-in: a tick to a decision 26 µs, to the fill back at the strategy 62 µs.</text>
+<text class="note" x="60" y="474">p50 on a shared laptop, broker stand-in: a tick to its order out 28 µs, to the fill back 33 µs, the event thread spinning (20 October).</text>
 <text class="group lab" x="40" y="526"><tspan class="dot">&#9679;</tspan>&#8202; QUANT</text>
 <rect class="box lab" x="40" y="536" width="470" height="44" rx="6"/>
 <text class="title" x="275" y="555">quant</text>
-<text class="sub" x="275" y="571">IV and Greeks, only what moved, on a pool of threads</text>
+<text class="sub" x="275" y="571">IV and Greeks for what moved; smiles once a minute; on a thread pool</text>
 <path class="arrow" d="M150,534 V496" marker-end="url(#head4)"/>
 <text class="flow" x="158" y="516">pricing</text>
 </svg>
@@ -532,7 +532,7 @@ h1 { margin: 0; font-size: 26px; font-weight: 600; line-height: 1.15; letter-spa
 <text class="flow" x="334" y="45">converted</text>
 <path class="arrow" d="M690,52 H778" marker-end="url(#head5)"/>
 <text class="flow" x="704" y="45">first read</text>
-<text class="note" x="40" y="98">Nothing is lost on the way: each tier reads back bit for bit. SPY, 1,706 days: 36 GB delivered, 22 GB of days; a day's 0DTE chain cached, 3.7 MB.</text>
+<text class="note" x="40" y="98">Nothing is lost on the way: each tier reads back bit for bit. SPY, 2,697 days from 2016: 47 GB delivered, 30 GB of days; a day's 0DTE chain cached, 3.7 MB.</text>
 <path class="arrow" d="M920,74 V194" marker-end="url(#head5)"/>
 <text class="flow" x="928" y="128">mapped, not copied</text>
 <text class="group core" x="40" y="140"><tspan class="dot">&#9679;</tspan>&#8202; CORE</text>
@@ -569,9 +569,12 @@ h1 { margin: 0; font-size: 26px; font-weight: 600; line-height: 1.15; letter-spa
 <rect class="box core" x="460" y="384" width="240" height="44" rx="6"/>
 <text class="title" x="580" y="403">Backtest venue</text>
 <text class="sub" x="580" y="419">fills at the next bar, at its costs</text>
+<rect class="box core" x="760" y="384" width="220" height="44" rx="6"/>
+<text class="title" x="870" y="403">entry_research, beside it</text>
+<text class="sub" x="870" y="419">screens on the same days</text>
 <path class="arrow" d="M580,336 V382" marker-start="url(#head5)" marker-end="url(#head5)"/>
 <text class="flow" x="588" y="364">orders, fills</text>
-<text class="note" x="60" y="456">SPY, 200 days from the cache, on this laptop: 1 trial 1.2 s, 512 trials 12 s.</text>
+<text class="note" x="60" y="456">SPY, 200 days from the cache, on this laptop: 1 trial 0.4 s, 512 trials 6.8 s (20 October).</text>
 <text class="group lab" x="60" y="376"><tspan class="dot">&#9679;</tspan>&#8202; QUANT</text>
 <rect class="box lab" x="60" y="384" width="260" height="44" rx="6"/>
 <text class="title" x="190" y="403">Pricing</text>
@@ -591,8 +594,8 @@ h1 { margin: 0; font-size: 26px; font-weight: 600; line-height: 1.15; letter-spa
 <path class="arrow" d="M320,538 H408" marker-end="url(#head5)"/>
 <path class="arrow" d="M480,514 V474" marker-end="url(#head5)"/>
 <text class="flow" x="488" y="496">a batch</text>
-<path class="arrow" d="M910,336 V514" marker-end="url(#head5)"/>
-<text class="flow" x="918" y="496">lines</text>
+<path class="arrow" d="M1010,336 V514" marker-end="url(#head5)"/>
+<text class="flow" x="1018" y="496">lines</text>
 <rect class="box control" x="780" y="616" width="280" height="44" rx="6"/>
 <text class="title" x="920" y="635">The sums, once</text>
 <text class="sub" x="920" y="651">net, Sharpe, drawdown: page, research, agents</text>
@@ -670,13 +673,13 @@ h1 { margin: 0; font-size: 26px; font-weight: 600; line-height: 1.15; letter-spa
 <text class="group infra end" x="1050" y="236"><tspan class="dot">&#9679;</tspan>&#8202; DATA</text>
 <rect class="box infra" x="865" y="246" width="185" height="44" rx="6"/>
 <text class="title" x="957.5" y="265">Holdout days</text>
-<text class="sub" x="957.5" y="281">2026-04 on, sealed</text>
+<text class="sub" x="957.5" y="281">SPY 2026-04, SPXW 2025-07 on</text>
 <rect class="box infra" x="865" y="310" width="185" height="44" rx="6"/>
 <text class="title" x="957.5" y="329">Downloads</text>
 <text class="sub" x="957.5" y="345">checked, one format</text>
 <rect class="box infra" x="865" y="374" width="185" height="44" rx="6"/>
 <text class="title" x="957.5" y="393">Research days</text>
-<text class="sub" x="957.5" y="409">2020-01 to 2026-03</text>
+<text class="sub" x="957.5" y="409">2016-01 to each holdout</text>
 <path class="arrow" d="M957.5,309 V292" marker-end="url(#head3)"/>
 <path class="arrow" d="M957.5,355 V372" marker-end="url(#head3)"/>
 <path class="arrow" d="M957.5,245 V212" marker-end="url(#head3)"/>
@@ -697,18 +700,18 @@ h1 { margin: 0; font-size: 26px; font-weight: 600; line-height: 1.15; letter-spa
 <text class="sub" x="752.5" y="509">R a trade above random</text>
 <rect class="box lab" x="865" y="474" width="185" height="44" rx="6"/>
 <text class="title" x="957.5" y="493">Describe</text>
-<text class="sub" x="957.5" y="509">0DTE implied vs realized move</text>
+<text class="sub" x="957.5" y="509">screens, fills: entry_research</text>
 <rect class="box lab" x="45" y="544" width="595" height="44" rx="6"/>
 <text class="title" x="342.5" y="563">More than luck?</text>
 <text class="sub" x="342.5" y="579">and with costs ×2, parameters ±20%, late fills</text>
 <rect class="box lab" x="660" y="544" width="185" height="44" rx="6"/>
 <text class="title" x="752.5" y="563">Exam</text>
 <text class="sub" x="752.5" y="579">noise fails, an edge passes</text>
-<rect class="box todo" x="865" y="544" width="185" height="44" rx="6"/>
+<rect class="box lab" x="865" y="544" width="185" height="44" rx="6"/>
 <text class="title" x="957.5" y="563">Dealer gamma</text>
-<text class="sub" x="957.5" y="579">from open interest, next</text>
+<text class="sub" x="957.5" y="579">from the day&#8217;s open interest</text>
 <path class="arrow" d="M957.5,419 V472" marker-end="url(#head3)"/>
-<path class="planned" d="M957.5,543 V520" marker-end="url(#head3p)"/>
+<path class="arrow" d="M957.5,543 V520" marker-end="url(#head3)"/>
 <path class="arrow" d="M752.5,419 V460 H137.5 V472" marker-end="url(#head3)"/>
 <path class="arrow" d="M342.5,460 V472" marker-end="url(#head3)"/>
 <path class="arrow" d="M547.5,460 V472" marker-end="url(#head3)"/>

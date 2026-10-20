@@ -24,12 +24,21 @@ optra_add_gtest(test_daily_table_gtest model/test_daily_table.cpp model)
 optra_add_gtest(test_occ_expiry_gtest model/test_occ_expiry.cpp model)
 optra_add_gtest(test_object_gtest model/test_object.cpp model)
 optra_add_gtest(test_order_builder_gtest model/test_order_builder.cpp model)
-optra_add_gtest(test_portfolio_gtest model/test_portfolio.cpp model)
+optra_add_gtest(test_portfolio_gtest model/test_portfolio.cpp model pricing)
+
+# pricing/
+optra_add_gtest(test_pricing_gtest pricing/test_pricing.cpp pricing)
 optra_add_gtest(test_parse_date_gtest model/test_parse_date.cpp model)
 optra_add_gtest(test_constant_gtest model/test_constant.cpp model)
+optra_add_gtest(test_session_calendar_gtest model/test_session_calendar.cpp model)
 
 # strategy/
 optra_add_gtest(test_strategy_context_gtest strategy/test_strategy_context.cpp strategies)
+
+# research/
+if(TARGET research)
+  optra_add_gtest(test_research_gtest research/test_research.cpp research)
+endif()
 
 # core/: the engines, each alone
 if(TARGET core)
@@ -93,7 +102,7 @@ if(TARGET backtest)
   target_compile_definitions(test_live_event_loop_gtest PRIVATE
                              OPTRA_DATA_DIR="${CMAKE_SOURCE_DIR}/../data")
   optra_add_gtest(test_backtest_multiday_gtest core/backtest/test_backtest_multiday.cpp
-                  backtest Arrow::arrow Parquet::parquet)
+                  backtest pricing Arrow::arrow Parquet::parquet)
   optra_strategy_host(test_backtest_multiday_gtest LOAD)
   optra_add_gtest(test_strategy_libraries_gtest strategy/test_strategy_libraries.cpp model)
   optra_strategy_host(test_strategy_libraries_gtest)

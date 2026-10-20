@@ -37,8 +37,8 @@ def world(name: str, model: synthetic_days.Model, days: int) -> dict[str, Any]:
     data_root, db = files.data_root, store._db
     with tempfile.TemporaryDirectory(prefix=f"optra-exam-{name}-") as tmp:
         root = Path(tmp)
-        synthetic_days.generate(model, FIRST_DAY, end, root, "SPY", False)
-        last = sorted(p.stem for p in (root / "SPY").rglob("*.parquet"))[days - 1]
+        synthetic_days.generate(model, FIRST_DAY, end, root / "backtest", "SPY", False)
+        last = sorted(p.stem for p in (root / "backtest" / "SPY").rglob("*.parquet"))[days - 1]
         files.data_root, store._db = (lambda: root), None
         try:
             started = time.monotonic()

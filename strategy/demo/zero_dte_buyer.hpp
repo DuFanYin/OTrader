@@ -44,14 +44,12 @@ class ZeroDteBuyer : public Strategy {
 
     /** The underlying's price now, and at the day's first bar; high and low so far. */
     [[nodiscard]] double price() const { return price_; }
-    [[nodiscard]] double open_price() const { return open_price_; }
-    [[nodiscard]] double high() const { return high_; }
-    [[nodiscard]] double low() const { return low_; }
+    [[nodiscard]] double open_price() const { return portfolio()->day_open(); }
+    [[nodiscard]] double high() const { return portfolio()->day_high(); }
+    [[nodiscard]] double low() const { return portfolio()->day_low(); }
     /** The underlying's last price the day before; 0 when it saw none. */
     [[nodiscard]] double previous_close() const { return previous_close_; }
     [[nodiscard]] int entered_minute() const { return entered_minute_; }
-    /** False when the engine started late and never saw the open. */
-    [[nodiscard]] bool saw_open() const { return first_minute_ >= 1 && first_minute_ <= 5; }
 
   private:
     void buy(model::OptionType side, int minute);
@@ -59,11 +57,7 @@ class ZeroDteBuyer : public Strategy {
     const Setting setting_ = read_setting<Setting>();
     std::string chain_symbol_;
     double price_ = 0.0;
-    double open_price_ = 0.0;
-    double high_ = 0.0;
-    double low_ = 0.0;
     double previous_close_ = 0.0;
-    int first_minute_ = -1;   // the day's first bar it saw
     int entered_minute_ = -1; // the minute it bought today; -1: not yet
     bool done_ = false;       // bought and sold today, or gave up
 };
@@ -75,8 +69,7 @@ inline void ZeroDteBuyer::on_init() {
 
 inline void ZeroDteBuyer::on_day() {
     previous_close_ = price_;
-    price_ = open_price_ = high_ = low_ = 0.0;
-    first_minute_ = -1;
+    price_ = 0.0;
     entered_minute_ = -1;
     done_ = false;
     chain_symbol_ = select_chain(0, 0);
@@ -106,12 +99,6 @@ inline void ZeroDteBuyer::on_timer() {
         return;
     }
     price_ = mid;
-    if (open_price_ <= 0.0) {
-        open_price_ = high_ = low_ = mid;
-        first_minute_ = minute;
-    }
-    high_ = std::max(high_, mid);
-    low_ = std::min(low_, mid);
 
     if (entered_minute_ >= 0 && !done_) {
         if (exit_due(minute) && holds_options() && !has_active_order()) {
@@ -151,7 +138,7 @@ inline void ZeroDteBuyer::buy(model::OptionType side, int minute) {
         }
         cost = std::max(option->ask() - sold->bid(), 0.01);
     }
-    const double multiplier = option->multiplier() > 0.0 ? option->multiplier() : 100.0;
+    const double multiplier = option->multiplier();
     const double contracts = std::floor(setting_.premium_budget / (cost * multiplier));
     if (contracts < 1.0) {
         write_log(std::format("Minute {}: one {} costs {:.0f} USD, over the budget: no fill",
@@ -176,7 +163,7 @@ inline void ZeroDteBuyer::buy(model::OptionType side, int minute) {
                           "{:.2f})",
                           minute, contracts, side == model::OptionType::CALL ? "call" : "put",
                           option->symbol(), sold ? " less " + sold->symbol() : "", cost,
-                          price_, open_price_));
+                          price_, open_price()));
 }
 
 } // namespace strategy

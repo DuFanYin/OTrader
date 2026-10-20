@@ -9,9 +9,6 @@ namespace adapters {
 
 namespace {
 
-constexpr double kShareFee = 0.005;      // USD a share (IBKR Pro, fixed)
-constexpr double kShareFeeMinimum = 1.0; // USD an order
-
 /** The net a unit, as IB prices a BAG: bought legs minus sold legs (negative: a credit). */
 auto net_price(std::span<const model::Leg> legs, const std::vector<double>& leg_prices)
     -> double {
@@ -81,8 +78,8 @@ void BacktestGateway::execute_pending_orders() {
 }
 
 void BacktestGateway::configure_execution(Execution execution) {
-    if (execution.fee_rate < 0.0) {
-        throw std::invalid_argument("fee_rate must be >= 0");
+    if (execution.fee_scale < 0.0) {
+        throw std::invalid_argument("fee_scale must be >= 0");
     }
     if (execution.delay_bars < 0) {
         throw std::invalid_argument("delay_bars must be >= 0");
@@ -146,24 +143,29 @@ auto BacktestGateway::get_market_bid_ask(const std::string& symbol) const
     return {0.0, 0.0};
 }
 
-auto BacktestGateway::default_contract_size(const std::string& symbol) -> double {
-    return model::parse_option_symbol(symbol) ? 100.0 : 1.0;
-}
-
-auto BacktestGateway::calculate_order_fee(const model::OrderRequest& req, double quantity) const
-    -> double {
-    if (execution_.fee_rate <= 0.0) {
+auto BacktestGateway::fill_fee(Pending& pending, double quantity,
+                               const std::vector<double>& prices) const -> double {
+    if (execution_.fee_scale <= 0.0) {
         return 0.0;
     }
-    double contracts = 0.0;
-    double shares = 0.0;
-    for (const model::Leg& leg : req.legs) {
-        const double units = std::abs(quantity * static_cast<double>(leg.ratio));
-        (model::parse_option_symbol(leg.symbol) ? contracts : shares) += units;
+    const std::vector<model::Leg>& legs = pending.req.legs;
+    for (std::size_t i = 0; i < legs.size(); ++i) {
+        const double units = std::abs(quantity * static_cast<double>(legs[i].ratio));
+        if (const auto option = model::parse_option_symbol(legs[i].symbol)) {
+            const model::PortfolioSpec* spec = model::find_portfolio(option->root);
+            const double exchange =
+                spec != nullptr ? model::tier_fee(spec->exchange_fee, prices[i]) : 0.0;
+            pending.option_fees += units * (model::tier_fee(kCommission, prices[i]) + exchange);
+        } else {
+            pending.share_fees += units * kShareFee;
+        }
     }
-    // Options a contract each; shares IBKR's fixed rate, a share's fee and an order's least.
-    return contracts * execution_.fee_rate +
-           (shares > 0.0 ? std::max(kShareFeeMinimum, kShareFee * shares) : 0.0);
+    const auto least = [](double sum, double min) { return sum > 0.0 ? std::max(sum, min) : 0.0; };
+    const double owed = execution_.fee_scale * (least(pending.option_fees, kOptionOrderMin) +
+                                                least(pending.share_fees, kShareOrderMin));
+    const double fee = owed - pending.charged;
+    pending.charged = owed;
+    return fee;
 }
 
 auto BacktestGateway::leg_prices(std::span<const model::Leg> legs) const
@@ -246,6 +248,8 @@ auto BacktestGateway::execute_order(Pending& pending) -> bool {
             fill.datetime = at;
             return fill;
         };
+        // Charged before the fills go out: what books a fill sees its fee.
+        cumulative_fees_ += fill_fee(pending, quantity, *prices);
         // A fill is a contract's: each leg's, a contract alone under the fill's own id.
         for (size_t i = 0; i < req.legs.size(); ++i) {
             const model::Leg& leg = req.legs[i];
@@ -254,8 +258,6 @@ auto BacktestGateway::execute_order(Pending& pending) -> bool {
                           leg.side, (*prices)[i],
                           quantity * std::abs(static_cast<double>(leg.ratio))));
         }
-
-        cumulative_fees_ += calculate_order_fee(req, quantity);
     }
     return whole;
 }

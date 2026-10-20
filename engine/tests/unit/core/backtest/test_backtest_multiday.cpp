@@ -7,14 +7,16 @@
  * day does not quote, while something is held. And the exchange's calendar: holidays, early closes.
  * A strategy made again during the day, as a restart makes it, trades as if it had run through.
  *
- * Writes small SPY days as Parquet (data/SPY/SPY-YYYY-MM/YYYYMMDD.parquet's layout) in a temporary
+ * Writes small SPY days as Parquet (data/backtest/SPY/SPY-YYYY-MM/YYYYMMDD.parquet's layout) in a temporary
  * directory.
  */
 #include "tests/lone_backtest.hpp"
 #include "adapters/market_data/historical_data.hpp"
+#include "model/session_calendar.hpp"
 #include "model/daily_table.hpp"
 #include "model/symbol.hpp"
 #include "model/utility.hpp"
+#include "pricing/pricing.hpp"
 #include "strategy/strategy_registry.hpp"
 #include "strategy/strategy.hpp"
 #include <algorithm>
@@ -56,11 +58,11 @@ class OvernightProbe final : public strategy::Strategy {
     using Strategy::Strategy;
 
     void on_timer() override {
-        const year_month_day today = model::new_york_date(now());
+        const year_month_day today = model::kNyse.date_of(now());
         const int day = static_cast<int>(today.year()) * 10'000 +
                         static_cast<int>(static_cast<unsigned>(today.month())) * 100 +
                         static_cast<int>(static_cast<unsigned>(today.day()));
-        const int minute = model::minutes_since_open(now());
+        const int minute = model::kNyse.minutes_since_open(now());
         if (has_active_order()) {
             return;
         }
@@ -126,6 +128,44 @@ class FailingProbe final : public strategy::Strategy {
 };
 
 REGISTER_STRATEGY(FailingProbe);
+
+/** Buys the weekly call from on_snapshot at the open's bar, its chain quoted from the start: the
+ * quote it reacts to. */
+class SnapshotOrderProbe final : public strategy::Strategy {
+  public:
+    using Strategy::Strategy;
+
+    void on_day() override {
+        const std::array chain{std::string("SPY_20250307")};
+        subscribe_chains(chain);
+    }
+    void on_snapshot() override {
+        const bool flat = holding() == nullptr || holding()->is_flat();
+        if (minute() == 0 && flat && !has_active_order()) {
+            send_order(std::array{leg("SPY-20250307-C-100", model::Side::BUY)});
+        }
+    }
+    void on_timer() override {}
+};
+
+REGISTER_STRATEGY(SnapshotOrderProbe);
+
+/** Trades nothing; writes the bars it saw today and the minute of the last. */
+class MeasuringProbe final : public strategy::Strategy {
+  public:
+    using Strategy::Strategy;
+
+    void on_day() override { bars_ = 0; }
+    void on_timer() override {
+        write_value("bars", ++bars_);
+        write_value("minute", minute());
+    }
+
+  private:
+    int bars_ = 0;
+};
+
+REGISTER_STRATEGY(MeasuringProbe);
 
 /** One option's quote through a day: its bid and ask at every bar. */
 struct Quote {
@@ -234,7 +274,7 @@ auto run(const std::vector<std::string>& files, int buy_day, int sell_day, int e
         .strategy_name = "OvernightProbe",
         .strategy_setting =
             {{"buy_day", buy_day}, {"sell_day", sell_day}, {"expiry", expiry}, {"strike", 100}},
-        .execution = {.fee_rate = 0.0},
+        .execution = {},
         .fills = true};
     return std::move(backtest::run_backtests(files, std::span(&trial, 1),
                                                    /*risk_free_rate=*/0.0, "mid",
@@ -279,6 +319,24 @@ TEST_F(MultiDayBacktest, APositionHeldAtTheCloseIsHeldTheNextMorning) {
     EXPECT_EQ(tue.total_orders, 1);
 }
 
+TEST_F(MultiDayBacktest, AnOrderSentFromOnSnapshotFillsAtTheNextBarsQuote) {
+    // The open's ask 1.05 (spot 100), the next bar's 2.05 (spot 101): what on_snapshot sends on
+    // seeing a quote fills at the bar after, as one from on_timer does, never at the quote seen.
+    std::vector<Bar> bars = day_bars(100.0, {kWeekly}, {0});
+    for (Bar& bar : day_bars(101.0, {kWeekly}, {1, 2, 3, 390})) {
+        bars.push_back(std::move(bar));
+    }
+    const backtest::BacktestTrial trial{.strategy_name = "SnapshotOrderProbe",
+                                        .execution = {},
+                                        .fills = true};
+    const auto s = backtest::run_backtests({write_day(kMon, bars)}, std::span(&trial, 1),
+                                           /*risk_free_rate=*/0.0, "mid", utilities::DISABLED)
+                       .front();
+    ASSERT_EQ(s.daily_results.size(), 1U);
+    ASSERT_EQ(s.daily_results[0].fills.size(), 1U);
+    EXPECT_DOUBLE_EQ(s.daily_results[0].fills[0].price, 2.05);
+}
+
 TEST_F(MultiDayBacktest, ATrialAskingForItsLogKeepsEachDaysRecordsAtTheDatasTime) {
     const std::vector<std::string> files = {write_day(kMon, day_bars(100.0)),
                                             write_day(kTue, day_bars(102.0))};
@@ -286,7 +344,7 @@ TEST_F(MultiDayBacktest, ATrialAskingForItsLogKeepsEachDaysRecordsAtTheDatasTime
         .strategy_name = "OvernightProbe",
         .strategy_setting =
             {{"buy_day", 20250303}, {"sell_day", 20250304}, {"expiry", 20250307}, {"strike", 100}},
-        .execution = {.fee_rate = 0.0},
+        .execution = {},
         .log = true};
     const auto s = backtest::run_backtests(files, std::span(&trial, 1), 0.0, "mid",
                                                  utilities::DISABLED)
@@ -304,6 +362,22 @@ TEST_F(MultiDayBacktest, ATrialAskingForItsLogKeepsEachDaysRecordsAtTheDatasTime
                                                      utilities::DISABLED)
                            .front();
     EXPECT_TRUE(quiet.daily_results[0].log.empty());
+}
+
+TEST_F(MultiDayBacktest, EachDayReportsTheValuesItsStrategyWroteLast) {
+    const std::vector<std::string> files = {write_day(kMon, day_bars(100.0)),
+                                            write_day(kTue, day_bars(102.0))};
+    const backtest::BacktestTrial trial{.strategy_name = "MeasuringProbe"};
+    const auto s = backtest::run_backtests(files, std::span(&trial, 1), 0.0, "mid",
+                                           utilities::DISABLED)
+                       .front();
+    ASSERT_EQ(s.daily_results.size(), 2U);
+    for (const auto& day : s.daily_results) {
+        ASSERT_EQ(day.values.size(), 2U);
+        EXPECT_GT(day.values.at("bars"), 0.0);
+        EXPECT_EQ(day.values.at("minute"), s.daily_results[0].values.at("minute"));
+    }
+    EXPECT_EQ(s.daily_results[1].values.at("bars"), s.daily_results[0].values.at("bars"));
 }
 
 TEST_F(MultiDayBacktest, ADayTradeEndsAsItDidWhenEveryDayRanAlone) {
@@ -370,7 +444,7 @@ TEST_F(MultiDayBacktest, WithFlattenMinutesASpyCallIsSoldBeforeItsCloseInsteadOf
         .strategy_setting =
             {{"buy_day", 20250303}, {"sell_day", 0}, {"expiry", 20250303}, {"strike", 100}},
         .risk_setting = {{"flatten_minutes", 30}},
-        .execution = {.fee_rate = 0.0},
+        .execution = {},
         .fills = true};
     const std::string mon =
         write_day(kMon, day_bars(101.0, {kWeekly, kDaily}, {0, 1, 2, 380, 390}));
@@ -394,7 +468,7 @@ TEST_F(MultiDayBacktest, TrialsRunSideBySideAndOneThatStopsLeavesTheOthers) {
         .strategy_name = "OvernightProbe",
         .strategy_setting =
             {{"buy_day", 20250303}, {"sell_day", 20250304}, {"expiry", 20250307}, {"strike", 100}},
-        .execution = {.fee_rate = 0.0}};
+        .execution = {}};
     backtest::BacktestTrial refused = held;
     refused.risk_setting = {{"no_such_limit", 1}}; // the strategy is added, its limits refused
     const std::vector<backtest::BacktestTrial> trials{held, refused};
@@ -422,7 +496,7 @@ TEST_F(MultiDayBacktest, TrialsOnOneThreadShareTheirPortfolioAndGiveTheResultsTh
                                  {"sell_day", sell_day},
                                  {"expiry", 20250307},
                                  {"strike", strike}},
-            .execution = {.fee_rate = 0.0},
+            .execution = {},
             .fills = true};
     };
     backtest::BacktestTrial refused = probe(20250303, 20250305, 100);
@@ -474,7 +548,7 @@ TEST_F(MultiDayBacktest, OrdersStillWorkingAtTheCloseAreCancelled) {
     // A limit far under the market never fills; a market order sent at the last bar never
     // reaches a bar to fill at.
     test::LoneBacktest backtest;
-    backtest.configure_execution({.fee_rate = 0.0});
+    backtest.configure_execution({});
     backtest.load_backtest_data(write_day(kMon, day_bars(100.0, {kWeekly}, {0, 1, 2, 3})));
     core::Main& main = backtest.main();
     const std::string name =
@@ -515,7 +589,7 @@ TEST_F(MultiDayBacktest, ADayThatDoesNotLoadIsSkippedWhenFlatAndStopsTheRunWhenH
     backtest::BacktestTrial flat{
         .strategy_name = "OvernightProbe",
         .strategy_setting = {{"buy_day", 0}, {"sell_day", 0}, {"expiry", 20250307}},
-        .execution = {.fee_rate = 0.0},
+        .execution = {},
         .minute_metrics = false};
     const auto skipped = backtest::run_backtests({mon, broken.string(), wed},
                                                        std::span(&flat, 1), 0.0, "mid",
@@ -567,7 +641,7 @@ TEST_F(MultiDayBacktest, WithoutTrialsTheDaysAreOnlyCachedAndThenRunTheSameFromT
         .strategy_name = "OvernightProbe",
         .strategy_setting = {{"buy_day", 20250303}, {"sell_day", 20250305}, {"expiry", 20250307},
                              {"strike", 100}},
-        .execution = {.fee_rate = 0.0}};
+        .execution = {}};
     for (const std::size_t ahead : {1U, 3U}) {
         const auto cached = backtest::run_backtests(files, std::span(&trial, 1), 0.0, "mid",
                                                           utilities::DISABLED, cache, 1, ahead);
@@ -654,9 +728,12 @@ TEST_F(MultiDayBacktest, AChainLoadedAlonePricesAsTheWholeDayPricedAtOnceBitForB
         d.fill(i, x);
         model::PortfolioSnapshot whole(d.listing(), d.portfolio_name());
         whole.assign(x);
-        model::price_snapshot(whole, d.rates(), "mid"); // the whole day's listing at once, as it was
+        // The whole day's listing at once, as it was.
+        pricing::price_snapshot(whole, d.rates(), "mid");
+        pricing::fit_smiles(whole);
         for (const auto column : {&model::Frame::iv, &model::Frame::forward,
-                                  &model::Frame::expiry_years, &model::Frame::expiry_rate}) {
+                                  &model::Frame::expiry_years, &model::Frame::expiry_rate,
+                                  &model::Frame::smile}) {
             const std::span<const double> u = x.*column;
             const std::span<const double> v = whole.*column;
             ASSERT_EQ(u.size(), v.size());
@@ -685,13 +762,32 @@ TEST_F(MultiDayBacktest, ADayLoadsOnlyTheChainsItsStrategyAsksFor) {
               std::vector<std::string>{"SPY_20250307"});
 }
 
+TEST_F(MultiDayBacktest, AReplayFillsTheChainsAskedOfItNotThoseLoadedAhead) {
+    // Two asks before the first bar, and a chain loaded ahead that nothing asked for.
+    const adapters::LoadedDay day = adapters::load_day(
+        write_day(kMon, day_bars(101.0, {kWeekly, kDaily, "250314C00100000"})), 0.05, "mid");
+    adapters::Replay replay;
+    replay.roll(*day);
+    day->load_chains(std::array{std::string("SPY_20250314")});
+    replay.load(*day, std::array{std::string("SPY_20250307")});
+    replay.load(*day, std::array{std::string("SPY_20250303")});
+    replay.apply(day, 0);
+    const model::Frame& frame = replay.portfolios().find_portfolio("SPY")->frame();
+    const model::Listing& listing = *day->listing();
+    ASSERT_EQ(listing.chains().size(), 3U);
+    for (std::size_t c = 0; c < listing.size(); ++c) {
+        const std::string& chain = listing.chains()[listing.chain_of(c)].symbol;
+        EXPECT_EQ(frame.bid[c] > 0.0, chain != "SPY_20250314") << chain;
+    }
+}
+
 /** A trial of one day, made again at `restart_minute` (0: never): its fills. */
 auto fills_of(const std::string& file, const std::string& strategy,
               const std::unordered_map<std::string, double>& setting, int restart_minute,
               const model::DailyTable* daily = nullptr) -> std::vector<model::Fill> {
     const backtest::BacktestTrial trial{.strategy_name = strategy,
                                               .strategy_setting = setting,
-                                              .execution = {.fee_rate = 0.0},
+                                              .execution = {},
                                               .fills = true,
                                               .restart_minute = restart_minute,
                                               .daily = daily};
@@ -729,8 +825,8 @@ TEST_F(MultiDayBacktest, AStrategyMadeAgainDuringTheDayTradesAsIfItHadRunThrough
          {std::pair{"RandomBuyStrategy", random}, std::pair{"ComboStrategy", straddle}}) {
         const std::vector<model::Fill> through = fills_of(day, strategy, setting, 0);
         ASSERT_GE(through.size(), 2U) << strategy;
-        const int bought = model::minutes_since_open(through.front().datetime);
-        const int sold = model::minutes_since_open(through.back().datetime);
+        const int bought = model::kNyse.minutes_since_open(through.front().datetime);
+        const int sold = model::kNyse.minutes_since_open(through.back().datetime);
         ASSERT_LT(bought + 2, sold) << strategy;
         EXPECT_TRUE(same_fills(fills_of(day, strategy, setting, bought + 2), through))
             << strategy << ": made again while holding";
@@ -821,24 +917,44 @@ TEST(RollContracts, WhatStaysKeepsItsQuotesWhatIsHeldStaysAndAnEmptyChainGoes) {
 }
 
 TEST(TradingCalendar, HolidaysAndWeekendsAreNotTradingDays) {
-    EXPECT_TRUE(model::is_trading_day(2025y / March / 3));
-    EXPECT_FALSE(model::is_trading_day(2025y / March / 8));   // a Saturday
-    EXPECT_FALSE(model::is_trading_day(2025y / January / 9)); // the day of mourning
-    EXPECT_FALSE(model::is_trading_day(2025y / April / 18));  // Good Friday
-    EXPECT_FALSE(model::is_trading_day(2026y / July / 3));    // Independence Day, observed
-    EXPECT_EQ(model::next_trading_day(2025y / March / 7), 2025y / March / 10);
-    EXPECT_EQ(model::next_trading_day(2025y / April / 17), 2025y / April / 21);
-    EXPECT_EQ(model::next_trading_day(2025y / December / 31), 2026y / January / 2);
-    EXPECT_FALSE(model::is_trading_day(2022y / June / 20)); // Juneteenth, its first year
-    EXPECT_EQ(model::next_trading_day(2021y / December / 23), 2021y / December / 27);
+    EXPECT_TRUE(model::kNyse.is_trading_day(2025y / March / 3));
+    EXPECT_FALSE(model::kNyse.is_trading_day(2025y / March / 8));   // a Saturday
+    EXPECT_FALSE(model::kNyse.is_trading_day(2025y / January / 9)); // the day of mourning
+    EXPECT_FALSE(model::kNyse.is_trading_day(2025y / April / 18));  // Good Friday
+    EXPECT_FALSE(model::kNyse.is_trading_day(2026y / July / 3));    // Independence Day, observed
+    EXPECT_EQ(model::kNyse.next_trading_day(2025y / March / 7), 2025y / March / 10);
+    EXPECT_EQ(model::kNyse.next_trading_day(2025y / April / 17), 2025y / April / 21);
+    EXPECT_EQ(model::kNyse.next_trading_day(2025y / December / 31), 2026y / January / 2);
+    EXPECT_FALSE(model::kNyse.is_trading_day(2022y / June / 20)); // Juneteenth, its first year
+    EXPECT_EQ(model::kNyse.next_trading_day(2021y / December / 23), 2021y / December / 27);
+    // The data's first years, 2016 on.
+    EXPECT_FALSE(model::kNyse.is_trading_day(2016y / January / 1));
+    EXPECT_FALSE(model::kNyse.is_trading_day(2018y / December / 5)); // the day of mourning
+    EXPECT_EQ(model::kNyse.next_trading_day(2019y / July / 3), 2019y / July / 5);
 }
 
 TEST(TradingCalendar, AnOptionExpiringOnAnEarlyCloseExpiresAt1300) {
     // 2025-07-03: the market closes at 13:00 New York (EDT, UTC-4).
-    EXPECT_EQ(model::session_close(2025y / July / 3), 13h);
-    EXPECT_EQ(model::option_expiry_time(2025y / July / 3), sys_days{2025y / July / 3} + 17h);
-    EXPECT_EQ(model::option_expiry_time(2025y / July / 2), sys_days{2025y / July / 2} + 20h);
-    EXPECT_EQ(model::session_close(2020y / November / 27), 13h);
+    EXPECT_EQ(model::kNyse.session_close(2025y / July / 3), 13h);
+    EXPECT_EQ(model::kNyse.expiry_time(2025y / July / 3), sys_days{2025y / July / 3} + 17h);
+    EXPECT_EQ(model::kNyse.expiry_time(2025y / July / 2), sys_days{2025y / July / 2} + 20h);
+    EXPECT_EQ(model::kNyse.session_close(2020y / November / 27), 13h);
+}
+
+/** A market open around the clock (as crypto's): every day trades, a day is UTC's, from its
+ * midnight; its contracts never roll. The same reads as NYSE's, from data. */
+TEST(TradingCalendar, AMarketOpenAroundTheClockTradesEveryDayAndNeverRolls) {
+    const model::SessionCalendar always{.name = "24H", .zone = "UTC", .weekends_closed = false};
+    EXPECT_TRUE(always.is_trading_day(2025y / March / 8)); // a Saturday
+    EXPECT_EQ(always.next_trading_day(2025y / March / 8), 2025y / March / 9);
+    const model::DateTime late = sys_days{2025y / March / 8} + 23h + 30min;
+    EXPECT_EQ(always.date_of(late), 2025y / March / 8);
+    EXPECT_EQ(always.minutes_since_open(late), 23 * 60 + 30);
+    EXPECT_EQ(always.expiry_time(2025y / March / 8), sys_days{2025y / March / 9});
+    EXPECT_FALSE(always.roll);
+    // In New York it is 19:30 on the 8th, a day NYSE is closed.
+    EXPECT_EQ(model::kNyse.date_of(late), 2025y / March / 8);
+    EXPECT_FALSE(model::kNyse.is_trading_day(model::kNyse.date_of(late)));
 }
 
 } // namespace

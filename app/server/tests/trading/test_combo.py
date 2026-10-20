@@ -22,7 +22,7 @@ ENTRY = repo_root() / "engine" / "build" / "entry_backtest"
 def _has_combo_strategy() -> bool:
     if not ENTRY.is_file():
         return False
-    out = subprocess.run([str(ENTRY), "--list-strategies"], capture_output=True, text=True, timeout=30)
+    out = subprocess.run([str(ENTRY), "--list-strategies", "--json"], capture_output=True, text=True, timeout=30)
     return any(s["name"] == combo.CLASS for s in json.loads(out.stdout).get("strategies", []))
 
 
@@ -49,7 +49,7 @@ def test_the_engine_tools_are_in_the_tool_list():
 @pytest.fixture()
 def days(tmp_path, monkeypatch):
     model = synthetic_days.Model(implied_vol=0.2)
-    synthetic_days.generate(model, date(2025, 3, 3), date(2025, 3, 5), tmp_path, "SPY", False)
+    synthetic_days.generate(model, date(2025, 3, 3), date(2025, 3, 5), tmp_path / "backtest", "SPY", False)
     monkeypatch.setattr(files, "data_root", lambda: tmp_path)
     return tmp_path
 

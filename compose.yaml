@@ -1,0 +1,11 @@
+# The whole system on a simulated market (scripts/dev.sh sim) in a container: open http://localhost:5173.
+# The synthetic days and the simulated account are kept in the volume across restarts.
+services:
+  optra:
+    build: .
+    ports:
+      - "5173:5173"
+    volumes:
+      - optra-data:/optra/data
+volumes:
+  optra-data:

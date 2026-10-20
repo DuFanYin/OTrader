@@ -1,117 +1,36 @@
-/** Portfolio, Listing, pricing and the reads. */
+/** Portfolio, Listing and the reads. */
 
 #include "model/portfolio.hpp"
 #include "model/symbol.hpp"
 
-#include "quant/kernel.h"
-#include "utilities/thread_pool.hpp"
+#include "quant/engine_api.h"
 #include <algorithm>
-#include <array>
 #include <bit>
+#include <cassert>
 #include <cctype>
 #include <cmath>
 #include <compare>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <ranges>
 #include <span>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace model {
 
 namespace {
 
-/** The underlying's mark from its quotes, else as marked. */
-auto frame_spot(const Frame& frame) -> double {
-    return mark(frame.underlying_bid, frame.underlying_ask, frame.underlying_mark);
-}
-
-enum class IvInput : std::uint8_t { Mid, Bid, Ask };
-
-auto iv_input(std::string_view mode) -> IvInput {
-    if (mode == "bid") {
-        return IvInput::Bid;
-    }
-    return mode == "ask" ? IvInput::Ask : IvInput::Mid;
-}
-
-auto iv_input_price(double bid, double ask, IvInput input) -> double {
-    if (bid > 0.0 && ask > 0.0 && bid > ask) {
-        return 0.0; // crossed: no valid quote
-    }
-    switch (input) {
-    case IvInput::Bid:
-        return bid > 0.0 ? bid : 0.0;
-    case IvInput::Ask:
-        return ask > 0.0 ? ask : 0.0;
-    case IvInput::Mid:
-        break;
-    }
-    return mark(bid, ask);
-}
-
-/** Parity's median over the three strikes nearest the money quoted both ways; 0 for none (its
- * options are priced on the spot grown, pricing_forward). */
-auto chain_forward(const Listing::Chain& chain, const Frame& frame, double spot, double rate)
-    -> double {
-    if (spot <= 0.0) {
-        return 0.0;
-    }
-    const double t = frame.expiry_years[chain.expiry_index];
-    if (t <= 0.0) {
-        return 0.0;
-    }
-    // C - P = e^(-rt) (F - K)
-    struct Estimate {
-        double gap; // |C - P|: smallest at the strikes nearest the forward
-        double forward;
-    };
-    thread_local std::vector<Estimate> estimates;
-    thread_local std::vector<double> forwards;
-    estimates.clear();
-    const double grow = std::exp(rate * t);
-    for (std::size_t j = 0; j < chain.strikes.size(); ++j) {
-        if (chain.calls[j] < 0 || chain.puts[j] < 0) {
-            continue;
-        }
-        const auto c = static_cast<std::size_t>(chain.calls[j]);
-        const auto p = static_cast<std::size_t>(chain.puts[j]);
-        if (!(frame.bid[c] > 0.0 && frame.ask[c] >= frame.bid[c] && frame.bid[p] > 0.0 &&
-              frame.ask[p] >= frame.bid[p])) {
-            continue;
-        }
-        const double gap = mark(frame.bid[c], frame.ask[c]) - mark(frame.bid[p], frame.ask[p]);
-        estimates.push_back({std::abs(gap), chain.strikes[j] + (grow * gap)});
-    }
-    std::optional<double> implied;
-    if (!estimates.empty()) {
-        // A median: one stale quote does not move it.
-        const auto nearest = std::min<std::ptrdiff_t>(3, std::ssize(estimates));
-        std::ranges::partial_sort(estimates, estimates.begin() + nearest, {}, &Estimate::gap);
-        forwards.clear();
-        for (const Estimate& e : estimates | std::views::take(nearest)) {
-            forwards.push_back(e.forward);
-        }
-        std::ranges::sort(forwards);
-        const std::size_t mid = forwards.size() / 2;
-        implied = forwards.size() % 2 == 1 ? forwards[mid]
-                                           : 0.5 * (forwards[mid - 1] + forwards[mid]);
-    }
-    return implied && std::abs((*implied / spot) - 1.0) < Chain::kMaxForwardGap ? *implied : 0.0;
-}
-
-/** An option with no spot, strike, time left or price to price it from: no IV, no Greeks. */
-auto cannot_price(double spot, double strike, double years, double price) -> bool {
-    return spot <= 0.0 || strike <= 0.0 || years <= 0.0 || price <= 0.0;
-}
-
-/** The forward an option is priced on: its chain's by parity, else the spot grown at the rate. */
-auto pricing_forward(double chain_forward, double spot, double rate, double years) -> double {
-    return chain_forward <= 0.0 ? spot * std::exp(rate * years) : chain_forward;
-}
-
 auto value_at(std::span<const double> values, std::size_t i) -> double {
     return i < values.size() ? values[i] : 0.0;
+}
+
+/** A chain's smile values (Frame::smile) as SVI. */
+auto svi_of(std::span<const double> fitted) -> quant::Svi {
+    return {.a = fitted[kSviA], .b = fitted[kSviB], .rho = fitted[kSviRho], .m = fitted[kSviM],
+            .sigma = fitted[kSviSigma]};
 }
 
 void copy_time_and_underlying_quotes(const Frame& from, Frame& to) {
@@ -183,7 +102,7 @@ Listing::Listing(std::vector<Contract> contracts) {
             chain_id = &option.id;
             Chain& chain = chains_.emplace_back();
             chain.symbol = chain_symbol(option.id.root, option.id.expiry);
-            chain.expiry = option_expiry_time(option.id.expiry);
+            chain.expiry = calendar_of(option.id.root).expiry_time(option.id.expiry);
             chain.first = static_cast<std::uint32_t>(contracts_.size());
             const auto known = std::ranges::find(expiries_, chain.expiry);
             chain.expiry_index = static_cast<std::uint32_t>(known - expiries_.begin());
@@ -243,7 +162,7 @@ auto Listing::chain(std::string_view symbol) const -> std::optional<std::uint32_
                : std::nullopt;
 }
 
-// ---- Pricing
+// ---- How a frame is priced
 
 auto iv_price_mode_of(std::string_view text) -> std::string_view {
     for (const std::string_view mode : {"mid", "bid", "ask"}) {
@@ -254,146 +173,6 @@ auto iv_price_mode_of(std::string_view text) -> std::string_view {
         }
     }
     return {};
-}
-
-void price_snapshot(PortfolioSnapshot& snapshot, const RateCurve& rates,
-                    std::string_view iv_price_mode, std::span<const std::uint8_t> quotes_changed,
-                    bool underlying_changed, std::chrono::seconds time_step) {
-    if (snapshot.listing == nullptr) {
-        snapshot.priced = false;
-        return;
-    }
-    const Listing& listing = *snapshot.listing;
-    const std::size_t n = listing.size();
-    const std::span<const Listing::Chain> chains = listing.chains();
-    const std::span<const DateTime> expiries = listing.expiries();
-    const double spot = frame_spot(snapshot);
-    const bool again_only =
-        !quotes_changed.empty() && quotes_changed.size() == n && snapshot.priced && spot > 0.0;
-    constexpr double kSecondsAYear = 365.25 * 24.0 * 3600.0;
-    const double step_years =
-        again_only ? static_cast<double>(time_step.count()) / kSecondsAYear : 0.0;
-    const double min_left_years =
-        static_cast<double>(std::chrono::seconds(Portfolio::kTimeStepMinTimeLeft).count()) /
-        kSecondsAYear;
-    const bool rescale = again_only && underlying_changed && snapshot.greeks_spot > 0.0;
-    const double spot_ratio = rescale ? snapshot.greeks_spot / spot : 1.0;
-    const std::span<double> iv = snapshot.values(&Frame::iv);
-    const std::span<double> delta = snapshot.values(&Frame::delta);
-    const std::span<double> gamma = snapshot.values(&Frame::gamma);
-    const std::span<double> theta = snapshot.values(&Frame::theta);
-    const std::span<double> vega = snapshot.values(&Frame::vega);
-    const std::span<double> forward = snapshot.values(&Frame::forward);
-    const std::span<double> expiry_years = snapshot.values(&Frame::expiry_years);
-    const std::span<double> expiry_rate = snapshot.values(&Frame::expiry_rate);
-    if (!again_only) {
-        for (const std::span<double> values :
-             {iv, delta, gamma, theta, vega, forward, expiry_years, expiry_rate}) {
-            std::ranges::fill(values, 0.0);
-        }
-    }
-
-    thread_local std::vector<std::uint8_t> expiry_moved;
-    thread_local std::vector<std::uint8_t> chain_moved;
-    expiry_moved.assign(expiries.size(), 1);
-    chain_moved.assign(chains.size(), 1);
-    bool any_expiry_moved = false;
-    for (std::size_t e = 0; e < expiries.size(); ++e) {
-        const double t = years_to_expiry(snapshot.datetime, expiries[e]);
-        const bool within_step = std::abs(t - expiry_years[e]) < step_years &&
-                                 t > min_left_years && expiry_years[e] > min_left_years;
-        const bool moved = !again_only || (t != expiry_years[e] && !within_step);
-        expiry_moved[e] = static_cast<std::uint8_t>(moved);
-        any_expiry_moved = any_expiry_moved || moved;
-        if (moved) {
-            expiry_years[e] = t;
-            expiry_rate[e] = rates.at(t);
-        }
-    }
-    for (std::size_t c = 0; c < chains.size(); ++c) {
-        const Listing::Chain& chain = chains[c];
-        // Its quotes and time as before, and its parity forward still near the spot: the same.
-        if (again_only && expiry_moved[chain.expiry_index] == 0 && forward[c] > 0.0 &&
-            std::abs((forward[c] / spot) - 1.0) < Chain::kMaxForwardGap &&
-            std::ranges::none_of(quotes_changed.subspan(chain.first, chain.count),
-                                 [](std::uint8_t q) { return q != 0; })) {
-            chain_moved[c] = 0;
-            continue;
-        }
-        const double f = chain_forward(chain, snapshot, spot, expiry_rate[chain.expiry_index]);
-        chain_moved[c] = static_cast<std::uint8_t>(!again_only || f != forward[c]);
-        forward[c] = f;
-    }
-
-    const IvInput input = iv_input(iv_price_mode);
-    // Spans: the pool's threads would see their own (empty) thread_locals.
-    const std::span<const std::uint8_t> expiry_flags = expiry_moved;
-    const std::span<const std::uint8_t> chain_flags = chain_moved;
-    auto solve = [&](std::size_t i, bool again) {
-        const std::uint32_t c = listing.chain_of(i);
-        const std::uint32_t e = chains[c].expiry_index;
-        const double k = listing.strike(i);
-        const double t = expiry_years[e];
-        const double r = expiry_rate[e];
-        const bool is_call = listing.type(i) == OptionType::CALL;
-        const double px = iv_input_price(snapshot.bid[i], snapshot.ask[i], input);
-        if (cannot_price(spot, k, t, px)) {
-            iv[i] = delta[i] = gamma[i] = theta[i] = vega[i] = 0.0;
-            return;
-        }
-        const double f = pricing_forward(forward[c], spot, r, t);
-        const double vol = again ? quant::black_implied_vol(px, f, k, t, r, is_call) : iv[i];
-        const quant::BlackGreeks g = quant::black_greeks(is_call, spot, f, k, t, r, vol);
-        iv[i] = vol;
-        delta[i] = g.delta;
-        gamma[i] = g.gamma;
-        theta[i] = g.theta;
-        vega[i] = g.vega;
-    };
-    // An expiry moved: the whole portfolio to the pool, as a whole pricing goes (what moved alone
-    // can be under the pool's threshold and run here, one solve after another).
-    if (!again_only || (underlying_changed && !rescale) || any_expiry_moved) {
-        utilities::shared_pool().parallel_for(0, n, [&](std::size_t i) {
-            const std::uint32_t c = listing.chain_of(i);
-            const bool again = !again_only || quotes_changed[i] != 0 ||
-                               expiry_flags[chains[c].expiry_index] != 0 || chain_flags[c] != 0 ||
-                               (forward[c] <= 0.0 && underlying_changed);
-            if (!again && !underlying_changed) {
-                return; // nothing it is priced from moved
-            }
-            if (!again && rescale) { // per unit of spot: delta once, gamma twice
-                delta[i] *= spot_ratio;
-                gamma[i] *= spot_ratio * spot_ratio;
-                return;
-            }
-            solve(i, again);
-        });
-    } else {
-        if (rescale) { // every option's, then what moved solved again
-            const double gamma_ratio = spot_ratio * spot_ratio;
-            for (std::size_t i = 0; i < n; ++i) {
-                delta[i] *= spot_ratio;
-                gamma[i] *= gamma_ratio;
-            }
-        }
-        thread_local std::vector<std::uint32_t> moved;
-        moved.clear();
-        for (std::size_t c = 0; c < chains.size(); ++c) {
-            const Listing::Chain& chain = chains[c];
-            const bool whole = chain_flags[c] != 0 || (forward[c] <= 0.0 && underlying_changed);
-            for (std::uint32_t i = chain.first; i < chain.first + chain.count; ++i) {
-                if (whole || quotes_changed[i] != 0) {
-                    moved.push_back(i);
-                }
-            }
-        }
-        for (const std::uint32_t i : moved) {
-            solve(i, true);
-        }
-    }
-    snapshot.priced = true;
-    snapshot.greeks_spot = spot;
-    snapshot.iv_price_mode = {}; // it holds its Greeks now
 }
 
 auto greeks_at(const Frame& frame, std::size_t column) -> Greeks {
@@ -503,39 +282,88 @@ auto Chain::atm_strike() const -> double {
     });
 }
 
-auto Chain::skew_25d() const -> std::optional<double> {
-    std::array<std::vector<double>, 2> deltas, ivs; // calls, puts
-    for (const double strike : strikes()) {
-        for (const OptionType type : {OptionType::CALL, OptionType::PUT}) {
-            if (const std::optional<Option> o = option(type, strike)) {
-                const std::size_t side = type == OptionType::CALL ? 0 : 1;
-                deltas[side].push_back(o->delta());
-                ivs[side].push_back(o->iv());
-            }
-        }
+auto Chain::fitted() const -> std::span<const double> {
+    const std::span<const double> all = portfolio_->frame().smile;
+    const std::size_t at = static_cast<std::size_t>(index_) * kSmileValues;
+    if (at + kSmileValues > all.size() || all[at + kSmilePoints] <= 0.0) {
+        return {};
     }
-    const double call = quant::iv_at_delta(deltas[0], ivs[0], 0.25);
-    const double put = quant::iv_at_delta(deltas[1], ivs[1], 0.25);
-    return std::isfinite(call) && std::isfinite(put) ? std::optional(call - put) : std::nullopt;
+    return all.subspan(at, kSmileValues);
+}
+
+auto Chain::smile() const -> quant::SviFit {
+    const std::span<const double> v = fitted();
+    if (v.empty()) {
+        return {};
+    }
+    return quant::SviFit{.svi = svi_of(v),
+                         .error = v[kSmileError],
+                         .points = static_cast<int>(v[kSmilePoints]),
+                         .butterfly_free = v[kSmileButterflyFree] != 0.0};
+}
+
+auto Chain::smile_iv(double strike) const -> std::optional<double> {
+    const std::span<const double> v = fitted();
+    if (v.empty() || strike <= 0.0) {
+        return std::nullopt;
+    }
+    const double w = svi_of(v).total_variance(std::log(strike / v[kSmileForward]));
+    return w > 0.0 ? std::optional(std::sqrt(w / v[kSmileYears])) : std::nullopt;
+}
+
+auto Chain::smile_iv_at_delta(double delta) const -> std::optional<double> {
+    const std::span<const double> v = fitted();
+    const double spot = frame_spot(portfolio_->frame());
+    if (v.empty() || spot <= 0.0 || delta == 0.0 || std::abs(delta) >= 1.0) {
+        return std::nullopt;
+    }
+    const quant::Svi svi = svi_of(v);
+    const double forward = v[kSmileForward];
+    const double years = v[kSmileYears];
+    const double r = rate();
+    const bool is_call = delta > 0.0;
+    const auto delta_at = [&](double k) {
+        const double w = svi.total_variance(k);
+        return w > 0.0 ? quant::black_greeks(is_call, spot, forward, forward * std::exp(k), years,
+                                             r, std::sqrt(w / years))
+                             .delta
+                       : std::numeric_limits<double>::quiet_NaN();
+    };
+    // A call's delta and a put's fall as the strike rises: bisect ln(strike / forward) within ten
+    // ATM deviations.
+    const double reach = 10.0 * std::sqrt(std::max(svi.total_variance(0.0), 1e-12));
+    double lo = -reach;
+    double hi = reach;
+    for (int i = 0; i < 60; ++i) {
+        const double mid = 0.5 * (lo + hi);
+        const double d = delta_at(mid);
+        if (std::isnan(d)) {
+            return std::nullopt;
+        }
+        (d > delta ? lo : hi) = mid;
+    }
+    const double k = 0.5 * (lo + hi);
+    if (!(std::abs(delta_at(k) - delta) < 1e-6)) {
+        return std::nullopt;
+    }
+    return std::sqrt(svi.total_variance(k) / years);
+}
+
+auto Chain::atm_iv() const -> std::optional<double> {
+    const std::span<const double> v = fitted();
+    return v.empty() ? std::nullopt : smile_iv(v[kSmileForward]);
+}
+
+auto Chain::skew_25d() const -> std::optional<double> {
+    const std::optional<double> call = smile_iv_at_delta(0.25);
+    const std::optional<double> put = smile_iv_at_delta(-0.25);
+    return call && put ? std::optional(*call - *put) : std::nullopt;
 }
 
 auto Chain::term_slope(const Chain& far) const -> std::optional<double> {
     const std::optional<double> near_iv = atm_iv();
     const std::optional<double> far_iv = far.atm_iv();
     return near_iv && far_iv ? std::optional(*far_iv - *near_iv) : std::nullopt;
-}
-
-auto Chain::atm_iv() const -> std::optional<double> {
-    const double atm = atm_strike();
-    if (atm <= 0.0) {
-        return std::nullopt;
-    }
-    for (const OptionType type : {OptionType::CALL, OptionType::PUT}) {
-        if (const std::optional<Option> o = option(type, atm); o && o->iv() != 0.0) {
-            return o->iv();
-        }
-    }
-    return std::nullopt;
 }
 
 auto Chain::listed() const -> const Listing::Chain& {
@@ -622,34 +450,29 @@ auto Underlying::contract() const -> const Contract& {
 
 // ---- Portfolio
 
-Portfolio::Portfolio(std::string name_)
-    : name(std::move(name_)), listing_(std::make_shared<const Listing>()), own_(listing_, name) {
+Portfolio::Portfolio(std::string name_, const PortfolioSpec* spec)
+    : name(std::move(name_)), spec_(spec), listing_(std::make_shared<const Listing>()),
+      own_(listing_, name) {
     read_own();
 }
 
-void Portfolio::set_risk_free_rate(double rate) {
-    if (std::isfinite(rate)) {
-        rates_ = RateCurve::flat(rate);
+auto Portfolio::underlying_symbol() const -> std::string_view {
+    if (spec_ != nullptr) {
+        return spec_->underlying;
     }
+    return underlying_ ? std::string_view(underlying_->symbol) : std::string_view{};
 }
 
-void Portfolio::set_rates(RateCurve rates) { rates_ = std::move(rates); }
-
-void Portfolio::set_iv_price_mode(std::string_view mode) {
-    if (const std::string_view known = iv_price_mode_of(mode); !known.empty()) {
-        iv_price_mode_ = known;
+auto Portfolio::hedge_symbol() const -> std::string_view {
+    if (spec_ != nullptr) {
+        return spec_->hedge != spec_->underlying ? spec_->hedge : std::string_view{};
     }
+    return hedge_instrument_ ? std::string_view(hedge_instrument_->symbol) : std::string_view{};
 }
 
-void Portfolio::set_underlying(const Contract& contract) {
-    underlying_ = contract;
-    underlying_symbol = contract.symbol;
-}
+void Portfolio::set_underlying(const Contract& contract) { underlying_ = contract; }
 
-void Portfolio::set_hedge_instrument(const Contract& contract) {
-    hedge_instrument_ = contract;
-    hedge_symbol = contract.symbol;
-}
+void Portfolio::set_hedge_instrument(const Contract& contract) { hedge_instrument_ = contract; }
 
 auto Portfolio::replace_options(std::span<const Contract> options,
                                 const std::unordered_set<std::string>& keep)
@@ -668,7 +491,9 @@ auto Portfolio::replace_options(std::span<const Contract> options,
     return list(std::make_shared<const Listing>(std::move(listed)));
 }
 
-auto Portfolio::list(std::shared_ptr<const Listing> listing) -> std::vector<std::string> {
+auto Portfolio::list(std::shared_ptr<const Listing> listing,
+                     std::optional<std::span<const std::string>> valued)
+    -> std::vector<std::string> {
     if (listing == listing_) {
         return {};
     }
@@ -708,23 +533,52 @@ auto Portfolio::list(std::shared_ptr<const Listing> listing) -> std::vector<std:
     for (; b < before.size(); ++b) {
         dropped.push_back(before[b].symbol);
     }
-    PortfolioSnapshot carried(listing, name);
+    // The new frame: own_'s buffer when the frame is not reading it and only the chains it was
+    // carried with hold values in it (a backtest, day after day: zeroing those is enough), else a
+    // new one.
+    PortfolioSnapshot carried;
+    if (storage_ != nullptr && own_written_) {
+        carried = std::move(own_);
+        carried.relist(listing, *own_written_);
+    } else {
+        carried = PortfolioSnapshot(listing, name);
+    }
+    std::vector<std::uint32_t> written; // the chains whose values are carried
     const Frame& was = frame_;
     copy_time_and_underlying_quotes(was, carried);
     carried.priced = was.priced;
     carried.greeks_spot = was.greeks_spot;
+    // Only the chains the frame holds values of are copied: the new frame is zeros already.
+    std::vector<bool> holds(before.size(), !valued);
+    for (const std::string& symbol : valued.value_or(std::span<const std::string>{})) {
+        if (const std::optional<std::uint32_t> b = listing_->chain(symbol)) {
+            holds[*b] = true;
+        }
+    }
+    for (std::size_t c = 0; c < chain_from.size(); ++c) {
+        if (chain_from[c] && holds[*chain_from[c]]) {
+            written.push_back(static_cast<std::uint32_t>(c));
+        }
+    }
     for (const auto column : PortfolioSnapshot::kOptionColumns) {
         const std::span<double> to = carried.values(column);
-        for (std::size_t i = 0; i < to.size(); ++i) {
-            if (from[i]) {
-                to[i] = value_at(was.*column, *from[i]);
+        const std::span<const double> values = was.*column;
+        for (const std::uint32_t c : written) {
+            const Listing::Chain& now = listing->chains()[c];
+            for (std::uint32_t i = now.first; i < now.first + now.count; ++i) {
+                if (from[i]) {
+                    to[i] = value_at(values, *from[i]);
+                }
             }
         }
     }
     const std::span<double> forward = carried.values(&Frame::forward);
-    for (std::size_t c = 0; c < forward.size(); ++c) {
-        if (chain_from[c]) {
-            forward[c] = value_at(was.forward, *chain_from[c]);
+    const std::span<double> smile = carried.values(&Frame::smile);
+    for (const std::uint32_t c : written) {
+        forward[c] = value_at(was.forward, *chain_from[c]);
+        for (std::size_t v = 0; v < kSmileValues; ++v) {
+            smile[(c * kSmileValues) + v] =
+                value_at(was.smile, (*chain_from[c] * kSmileValues) + v);
         }
     }
     const std::span<double> years = carried.values(&Frame::expiry_years);
@@ -740,6 +594,7 @@ auto Portfolio::list(std::shared_ptr<const Listing> listing) -> std::vector<std:
     }
     listing_ = std::move(listing);
     own_ = std::move(carried);
+    own_written_ = std::move(written);
     read_own();
     return dropped;
 }
@@ -751,10 +606,9 @@ void Portfolio::apply(PortfolioSnapshot& snapshot) {
         apply(static_cast<const Frame&>(snapshot));
         return;
     }
-    if (!snapshot.priced) {
-        price_snapshot(snapshot);
-    }
+    assert(snapshot.priced);
     std::swap(own_, snapshot);
+    own_written_.reset();
     read_own();
     move_time(frame_.datetime);
 }
@@ -763,29 +617,24 @@ void Portfolio::apply(const Frame& frame, std::shared_ptr<const void> storage) {
     if (frame.listing != listing_.get()) {
         if (storage_ != nullptr) {
             own_.assign(frame_);
+            own_written_.reset();
             read_own();
         }
         copy_time_and_underlying_quotes(frame, own_);
         read_own();
-    } else if (!frame.priced) {
-        own_.assign(frame);
-        price_snapshot(own_);
-        read_own();
-    } else if (storage != nullptr) {
+        move_time(frame.datetime);
+        return;
+    }
+    assert(frame.priced);
+    if (storage != nullptr) {
         frame_ = frame;
         storage_ = std::move(storage);
     } else {
         own_.assign(frame);
+        own_written_.reset();
         read_own();
     }
     move_time(frame.datetime);
-}
-
-void Portfolio::price_snapshot(PortfolioSnapshot& snapshot,
-                               std::span<const std::uint8_t> quotes_changed,
-                               bool underlying_changed, std::chrono::seconds time_step) const {
-    model::price_snapshot(snapshot, rates_, iv_price_mode_, quotes_changed,
-                          underlying_changed, time_step);
 }
 
 auto Portfolio::underlying() const -> std::optional<Underlying> {
@@ -796,7 +645,7 @@ auto Portfolio::underlying() const -> std::optional<Underlying> {
 }
 
 auto Portfolio::hedge() const -> std::optional<Underlying> {
-    if (hedge_symbol.empty()) {
+    if (hedge_symbol().empty()) {
         return underlying();
     }
     if (!hedge_instrument_) {
@@ -860,12 +709,105 @@ void Portfolio::read_own() {
     storage_.reset();
 }
 
+void Portfolio::restore_day(std::chrono::year_month_day day, double open, double high,
+                            double low) {
+    if (DateTime{std::chrono::sys_days{day}} != day_of_open_ || open <= 0.0 || saw_open()) {
+        return;
+    }
+    const bool seen = day_first_minute_ >= 1;
+    day_open_ = open;
+    day_high_ = seen ? std::max(day_high_, high) : high;
+    day_low_ = seen ? std::min(day_low_, low) : low;
+    day_first_minute_ = 1;
+}
+
 void Portfolio::move_time(DateTime time) {
     if (time == DateTime{}) {
         return;
     }
     datetime_ = time;
-    dte_ref_ = std::chrono::floor<std::chrono::days>(time);
+    const SessionCalendar& calendar = this->calendar();
+    const std::chrono::year_month_day date = calendar.date_of(time);
+    dte_ref_ = std::chrono::sys_days{date};
+    if (dte_ref_ != day_of_open_) {
+        day_of_open_ = dte_ref_;
+        day_open_ = day_high_ = day_low_ = 0.0;
+        day_first_minute_ = -1;
+    }
+    const double mark = frame_.underlying_mark;
+    const int minute = calendar.minutes_since_open(time);
+    if (mark <= 0.0 || minute < 1 ||
+        minute > (calendar.session_close(date) - calendar.open).count()) {
+        return;
+    }
+    if (day_first_minute_ < 0) {
+        day_open_ = day_high_ = day_low_ = mark;
+        day_first_minute_ = minute;
+    }
+    day_high_ = std::max(day_high_, mark);
+    day_low_ = std::min(day_low_, mark);
+}
+
+// ---- Legs
+
+auto leg_chain(const Portfolio& portfolio, const LegRule& rule) -> std::string {
+    using enum LegRule::ExpiryBy;
+    if (rule.expiry_by == kNearest) {
+        std::string best;
+        int best_gap = std::numeric_limits<int>::max();
+        for (const std::string& symbol : portfolio.chains_by_expiry(rule.min_dte, rule.max_dte)) {
+            const std::optional<Chain> chain = portfolio.chain(symbol);
+            const int gap = chain ? std::abs(chain->days_to_expiry() - rule.dte) : best_gap;
+            if (gap < best_gap) {
+                best_gap = gap;
+                best = symbol;
+            }
+        }
+        return best;
+    }
+    constexpr int kNoExpiryLimit = 3650;
+    const std::vector<std::string> found = portfolio.chains_by_expiry(
+        rule.dte, rule.expiry_by == kExactly ? rule.dte : kNoExpiryLimit);
+    return found.empty() ? std::string() : found.front();
+}
+
+auto leg_option(const Chain& chain, const LegRule& rule) -> std::optional<Option> {
+    const double forward = chain.forward();
+    const std::span<const double> strikes = chain.strikes();
+    if (forward <= 0.0 || strikes.empty()) {
+        return std::nullopt;
+    }
+    using enum LegRule::StrikeBy;
+    if (rule.strike_by == kDelta) {
+        std::optional<Option> best;
+        double best_gap = std::numeric_limits<double>::infinity();
+        for (const double k : strikes) {
+            const std::optional<Option> option = chain.option(rule.right, k);
+            if (!option || !(option->iv() > 0.0) || option->multiplier() == 0.0) {
+                continue;
+            }
+            const double gap = std::abs(option->delta() / option->multiplier() - rule.strike);
+            if (gap < best_gap) {
+                best_gap = gap;
+                best = option;
+            }
+        }
+        return best;
+    }
+    double target = forward * (1.0 + rule.strike / 100.0);
+    if (rule.strike_by == kImpliedMoves) {
+        const double atm = chain.atm_strike();
+        const std::optional<Option> call = chain.call(atm);
+        const std::optional<Option> put = chain.put(atm);
+        if (!call || !put || call->bid() <= 0.0 || call->ask() <= 0.0 || put->bid() <= 0.0 ||
+            put->ask() <= 0.0) {
+            return std::nullopt;
+        }
+        target = forward * (1.0 + rule.strike * (call->mid() + put->mid()) / forward);
+    }
+    const auto nearest =
+        std::ranges::min_element(strikes, {}, [target](double k) { return std::abs(k - target); });
+    return chain.option(rule.right, *nearest);
 }
 
 } // namespace model

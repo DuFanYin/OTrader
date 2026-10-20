@@ -10,9 +10,11 @@ A map of this repository for coding agents: where each thing is, which document 
 | `engine/assembly/` | `Main` put together with its adapters: the live one (`live.*`, with the trading days) and the backtest (`backtest.*`: the replay, a day, many trials over many days) | [doc/engine.md](doc/engine.md) |
 | `engine/adapters/` | the ports' implementations: IB, the backtest's venue, the simulated market, the Parquet days, SQLite | [doc/engine.md](doc/engine.md#how-the-engine-is-organised) |
 | `engine/strategy/` | what a strategy is written against: the base class, its context (what it reads and does), the registry that loads strategy libraries | [doc/engine.md](doc/engine.md#writing-a-strategy) |
-| `engine/model/`, `engine/utilities/` | the data model (contracts, orders, fills, combos, the portfolio: `Listing`, `Portfolio`, `PortfolioSnapshot`; a strategy's record, parameters declared with `Param`, values by day); generic pieces (queues, rings, pools, the thread pool, logging) | [doc/engine.md](doc/engine.md#how-the-engine-is-organised) |
-| `engine/quant/` | the numerics (pricing, Greeks, implied vol, Monte Carlo, trees, PDE, Heston, the screener, the selection statistics: DSR, PBO, walk-forward) and its C ABI (`analytics/`) | [doc/research.md](doc/research.md#the-methods) |
-| `engine/entry/` | the programs (`entry_backtest`, `entry_live`, `entry_simulate`) and the gRPC API (`optra_engine.proto`) | |
+| `engine/pricing/` | a snapshot's quotes made into forwards, IVs and Greeks, then each chain's smile (SVI), one code for live market data and the backtest's days | [doc/latency.md](doc/latency.md#pricing-once-and-not-on-the-event-thread) |
+| `engine/model/`, `engine/utilities/` | the data model (contracts, orders, fills, combos, the portfolio: `Listing`, `Portfolio`, `PortfolioSnapshot`; what each portfolio is, `PortfolioSpec`; a strategy's record, parameters declared with `Param`, values by day); generic pieces (queues, rings, pools, the thread pool, logging) | [doc/engine.md](doc/engine.md#how-the-engine-is-organised) |
+| `engine/quant/` | the numerics (pricing, Greeks, implied vol, Monte Carlo, trees, PDE, Heston, SVI smiles, the selection statistics: DSR, PBO, walk-forward); `analytics/`: the research tools' workflows on them, the screener, and their C ABI | [doc/research.md](doc/research.md#the-methods) |
+| `engine/research/` | research tools on the offline data and the backtest days, not linked into trading: option structures screened through the engine's own day reading and leg picking, the dealers' gamma by the day's open interest, the underlying at chosen minutes; the NBBO ticks and trades read a contract or a row group at a time, limit orders simulated on them, trades placed in the NBBO and summed in cells; run by `entry_research` | |
+| `engine/entry/` | the programs (`entry_backtest`, `entry_live`, `entry_simulate`, `entry_research`) and the gRPC API (`optra_engine.proto`) | |
 | `engine/tests/` | `unit/` mirrors `engine/`; `integration/` (IB paper); `checks/` (on data); `bench/` | [doc/latency.md](doc/latency.md) |
 | `strategy/` | strategies, a library per `.cpp`: `demo/` the repository's (the only one in git); `research/`, `paper/`, `live/`, `configs/` the owner's and the agents' | [doc/engine.md](doc/engine.md#writing-a-strategy) |
 | `app/server/optra/` | the server: `api/` routes, `tools/` the declared tools, `research/` experiments, ledger and jobs, `services/`, `infra/` (gRPC client, backtest runner, C ABI) | [doc/server.md](doc/server.md) |
@@ -38,10 +40,11 @@ Linux, GCC 14 or newer (the apt line is in the README). No data ships with the r
 
 ## Where a change goes
 
-- **A strategy**: first a setting of `ComboStrategy` (legs as rules); a new class in `strategy/research/` only for what its parameters cannot say.
+- **A strategy**: one idea, one class in `strategy/research/`, the features it reads computed in it. Testing a new idea means writing a new class and running it through `backtest`: a script's description of the data is not a test of it, and an existing class is not stretched to cover it. `ComboStrategy` is for a combo from the lab and for sweeping a structure (legs, strikes, days to expiry); it gets no new filters.
 - **An experiment**: a config in `strategy/configs/`, run by the `backtest` tool; counted in the ledger before it runs ([doc/server.md](doc/server.md#experiments)).
 - **Something the page or an agent needs**: a tool in `app/server/optra/tools/` first, the page only calls it; from the live engine, an RPC in the proto ([doc/research.md](doc/research.md#for-agents)).
 - **Another broker, data vendor or database**: an adapter behind `core::Gateway`, `core::MarketData` or `core::Database`.
+- **A heavy step of a research description** (rows of the offline data read one by one, or more than about a gigabyte held): C++ in `engine/research/`, run by `entry_research` with a JSON spec; Python writes the spec and does the statistics on the compact tables it writes. It refuses a holdout day (config.json) unless the spec says `"reach_holdout": true`.
 - **A research question**: read what the engine already reports (per-trade attribution, the ledger's days, `replay_trial`) before writing a script; a question that comes back becomes a parameter or an engine feature.
 
 ## Rules

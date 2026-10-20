@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <ctime>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -69,7 +70,8 @@ class LogEngine final : public utilities::Logger {
     bool pop_log_for_stream(utilities::LogRecord& out, int timeout_ms);
 
   private:
-    /** A pooled record to fill; null when the level is filtered or the pool is closing. */
+    /** A pooled record to fill, every field (it holds the last one's); null when the level is
+     * filtered or the pool is closing. */
     utilities::LogRecord* acquire(utilities::LogLevel level);
     void run();
     /** Local time text, cached per second (log thread). */
@@ -85,7 +87,14 @@ class LogEngine final : public utilities::Logger {
     std::function<std::chrono::system_clock::time_point()> clock_;
     utilities::ObjectPool<utilities::LogRecord> log_pool_;
 
-    utilities::MpscRing<utilities::LogRecord*, kQueueCap> queue_;
+    /** The queue to the log thread and the stream's latest records: made with the log thread, by
+     * the first record (an engine that never logs, as a backtest's trials, has neither). */
+    struct Rings {
+        utilities::MpscRing<utilities::LogRecord*, kQueueCap> queue;
+        utilities::MpscRing<utilities::LogRecord*, kStreamRingCap> stream;
+    };
+    std::unique_ptr<Rings> rings_;
+    std::atomic<Rings*> started_{nullptr}; // rings_, once made: for the stream's reader
     utilities::Wakeup wakeup_; // the log thread sleeps here
     std::once_flag thread_started_;
     std::atomic<bool> stopping_{false};
@@ -96,7 +105,6 @@ class LogEngine final : public utilities::Logger {
     std::atomic<std::uint64_t> dropped_{0}; // queue full
     std::thread thread_;
 
-    utilities::MpscRing<utilities::LogRecord*, kStreamRingCap> stream_ring_;
     std::mutex stream_mutex_; // the ring's consumer side: the stream, or the log thread evicting
     std::condition_variable stream_cv_;
 };

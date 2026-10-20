@@ -1,7 +1,8 @@
 /**
  * The StrategyEngine reports a strategy in error, removes only a strategy there is with nothing
  * held or working, drives its callbacks, and, approving only some (a live account's), refuses the
- * others.
+ * others. What its strategies want streamed is each one's chains and the options held or ordered
+ * today, one sorted set; a strategy finds only a chain it subscribes.
  */
 #include "tests/lone_backtest.hpp"
 #include "core/strategy/strategy_engine.hpp"
@@ -10,6 +11,8 @@
 #include "strategy/strategy.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
+#include <map>
 #include <gtest/gtest.h>
 #include <stdexcept>
 #include <string>
@@ -45,7 +48,7 @@ class EngineCountingStrategy final : public strategy::Strategy {
 
 REGISTER_STRATEGY(EngineCountingStrategy);
 
-/** Counts its stops, and throws on init when told to. */
+/** Counts its stops, and throws on init or stop when told to. */
 class EngineStepsStrategy final : public strategy::Strategy {
   public:
     using Strategy::Strategy;
@@ -55,10 +58,16 @@ class EngineStepsStrategy final : public strategy::Strategy {
             throw std::runtime_error("no chain");
         }
     }
-    void on_stop() override { ++stops; }
+    void on_stop() override {
+        ++stops;
+        if (throw_on_stop) {
+            throw std::runtime_error("cannot close");
+        }
+    }
     void on_timer() override {}
 
     bool throw_on_init = false;
+    bool throw_on_stop = false;
     int stops = 0;
 };
 
@@ -87,6 +96,17 @@ class StrategyEngineTest : public ::testing::Test {
     core::StrategyEngine* se = main.strategy_engine();
     std::string name_;
 };
+
+TEST_F(StrategyEngineTest, AStrategysValuesAreTakenOnceTheLastWrittenStanding) {
+    strategy::Strategy* s = se->find_strategy(name_);
+    s->write_value("a", 1.0);
+    s->write_value("a", 2.0);
+    s->write_value("b", 3.0);
+    EXPECT_EQ(se->take_values(name_), (std::map<std::string, double, std::less<>>{{"a", 2.0},
+                                                                                {"b", 3.0}}));
+    EXPECT_TRUE(se->take_values(name_).empty());
+    EXPECT_TRUE(se->take_values("none").empty());
+}
 
 TEST_F(StrategyEngineTest, AStrategyInErrorIsReportedAndRunsNoMore) {
     const std::string other =
@@ -141,6 +161,23 @@ TEST_F(StrategyEngineTest, AStrategyWhoseInitThrowsIsInError) {
     EXPECT_THROW(se->init_strategy(name), std::runtime_error);
     EXPECT_EQ(se->find_record(name)->state, model::StrategyState::Error);
     EXPECT_NE(se->error(name).find("no chain"), std::string::npos);
+}
+
+TEST_F(StrategyEngineTest, AStrategyWhoseStopThrowsIsInErrorAndAHaltStillStopsTheOthers) {
+    const std::string first =
+        se->add_strategy({.class_name = "EngineStepsStrategy", .portfolio = "SPY"});
+    const std::string second =
+        se->add_strategy({.class_name = "EngineStepsStrategy", .portfolio = "SPY"});
+    static_cast<EngineStepsStrategy*>(se->find_strategy(first))->throw_on_stop = true;
+    for (const std::string& name : {first, second}) {
+        se->init_strategy(name);
+        se->start_strategy(name);
+    }
+    EXPECT_NO_THROW(main.halt("test"));
+    EXPECT_EQ(se->find_record(first)->state, model::StrategyState::Error);
+    EXPECT_NE(se->error(first).find("cannot close"), std::string::npos);
+    EXPECT_EQ(se->find_record(second)->state, model::StrategyState::Inited);
+    EXPECT_EQ(static_cast<const EngineStepsStrategy*>(se->find_strategy(second))->stops, 1);
 }
 
 TEST_F(StrategyEngineTest, AStrategyNeedsItsPortfolio) {
@@ -248,6 +285,53 @@ TEST_F(StrategyEngineTest, SnapshotsAndDaysReachOnlyTheirPortfoliosStrategiesAsT
     const std::string report = se->callback_report();
     // A line per strategy timed: elsewhere, never quoted, has had no bar to run on.
     EXPECT_EQ(std::ranges::count(report, '\n'), 2) << report;
+}
+
+TEST_F(StrategyEngineTest, WhatIsWantedIsEachStrategysChainsAndTheOptionsHeldOrOrdered) {
+    EXPECT_TRUE(se->wanted()->subscribed.empty());
+    const std::string other =
+        se->add_strategy({.class_name = "EngineProbeStrategy", .portfolio = "SPY"});
+    const std::uint64_t changes = se->wanted_changes();
+    se->subscribe_chains(name_, std::vector<std::string>{"SPY_20991218"});
+    se->subscribe_chains(other, std::vector<std::string>{"SPY_20991218", "SPY_20991219"});
+    EXPECT_EQ(se->wanted()->subscribed,
+              (std::vector<std::string>{"SPY_20991218", "SPY_20991219"})); // each once
+    EXPECT_GT(se->wanted_changes(), changes);
+
+    // Found only while subscribed, and listed.
+    const strategy::Strategy& probe = *se->find_strategy(name_);
+    EXPECT_TRUE(probe.find_chain("SPY_20991218"));
+    EXPECT_FALSE(se->find_strategy(other)->find_chain("SPY_20991219")); // not listed
+    se->subscribe_chains(name_, std::vector<std::string>{"SPY_20991219"});
+    EXPECT_FALSE(probe.find_chain("SPY_20991218")); // no longer subscribed
+
+    se->set_held_options(std::vector<std::string>{"SPY-20991218-C-510", "SPY-20991218-C-500"});
+    model::OrderRequest single;
+    single.legs = {{.ratio = 1, .symbol = "SPY-20991218-C-500"}}; // held already: once
+    se->note_ordered(single);
+    model::OrderRequest spread;
+    spread.legs = {{.ratio = 1, .symbol = "SPY-20991220-P-495"},
+                   {.ratio = 1, .symbol = "SPY-20991218-C-505"}};
+    se->note_ordered(spread);
+    const std::uint64_t ordered = se->wanted_changes();
+    model::OrderRequest shares;
+    shares.legs = {{.ratio = 1, .symbol = "SPY"}};
+    se->note_ordered(shares); // not an option
+    se->note_ordered(single); // ordered already
+    EXPECT_EQ(se->wanted_changes(), ordered); // nothing new
+    EXPECT_EQ(se->wanted()->options,
+              (std::vector<std::string>{"SPY-20991218-C-500", "SPY-20991218-C-505",
+                                        "SPY-20991218-C-510", "SPY-20991220-P-495"}));
+    EXPECT_EQ(se->wanted()->chains, // and the options' chains, as a backtest's day loads them
+              (std::vector<std::string>{"SPY_20991218", "SPY_20991219", "SPY_20991220"}));
+
+    se->clear_ordered();
+    EXPECT_EQ(se->wanted()->options,
+              (std::vector<std::string>{"SPY-20991218-C-500", "SPY-20991218-C-510"}));
+    se->set_held_options({});
+    EXPECT_TRUE(se->wanted()->options.empty());
+    ASSERT_TRUE(se->remove_strategy(other)); // its chains go with it
+    EXPECT_EQ(se->wanted()->subscribed, std::vector<std::string>{"SPY_20991219"});
 }
 
 } // namespace

@@ -7,14 +7,16 @@
  * and saved like any fill, so the next start rebooks it too. A name, which its fills are kept under, is a
  * strategy's for good. The record of orders and fills is emptied only when nothing is held.
  * The risk limits and a halt outlive a restart, and no strategy starts while halted; a fill booked
- * by hand is held and rebooked like any. The strategies running when the engine stopped start
- * again, each that may; a saved strategy that cannot be made again is skipped.
+ * by hand is held and rebooked like any; a fill that came without a time keeps the engine's. The
+ * strategies running when the engine stopped start again, each that may; a saved strategy that
+ * cannot be made again is skipped.
  */
 #include "tests/read_main.hpp"
 #include "adapters/database/sqlite_database.hpp"
 #include "assembly/live.hpp"
 #include "strategy/strategy_registry.hpp"
 #include "strategy/strategy.hpp"
+#include "model/session_calendar.hpp"
 #include "model/symbol.hpp"
 #include "model/utility.hpp"
 #include <chrono>
@@ -189,6 +191,30 @@ TEST_F(LiveRestore, AStrategyComesBackWithItsHolding) {
     EXPECT_EQ(engine.bookkeeping_engine()->strategy_of("100"), name);
     EXPECT_THROW(engine.remove_strategy(name), std::runtime_error); // it holds a call
     EXPECT_TRUE(removed_strategies(engine).empty());
+    engine.close();
+}
+
+TEST_F(LiveRestore, AFillThatCameWithoutATimeIsStampedWithTheEnginesAndKeptSo) {
+    const std::string option = model::option_symbol({.root = "SPY",
+                                                         .expiry = 2099y / December / 18,
+                                                         .type = model::OptionType::CALL,
+                                                         .strike = 600});
+    const model::DateTime before = floor<seconds>(system_clock::now());
+    std::string name;
+    {
+        const auto made = live::make_main();
+        core::Main& engine = *made;
+        name = engine.add_strategy("RandomBuyStrategy", "SPY", {});
+        fill(engine, name, "110", option, 1, 1.5); // no time, as IB's
+        ASSERT_TRUE(eventually([&] { return quantity(engine, name, option) == 1; }));
+        engine.close();
+    }
+    const auto made = live::make_main();
+    core::Main& engine = *made;
+    const model::DateTime last = engine.event_loop()->on_event_thread(
+        [&] { return engine.bookkeeping_engine()->find_holding(name)->last_fill; });
+    EXPECT_GE(last, before); // what traded_today() reads, after a restart too
+    EXPECT_LE(last, system_clock::now());
     engine.close();
 }
 
@@ -533,7 +559,7 @@ TEST_F(LiveRestore, AFillBookedByHandIsHeldAndRebooked) {
         c.trading_class = "SPY";
         c.option_strike = 640;
         c.option_type = model::OptionType::CALL;
-        c.option_expiry = model::option_expiry_time(2099y / December / 18);
+        c.option_expiry = model::kNyse.expiry_time(2099y / December / 18);
         c.option_underlying = "SPY";
         adapters::SqliteDatabase db(nullptr, path_);
         db.save_contracts(std::vector{c});

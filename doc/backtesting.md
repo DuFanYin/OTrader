@@ -15,22 +15,22 @@ Numbers are from one shared laptop (an 8-core Ryzen 7 5850U).
 
 | Tier | What | SPY |
 |---|---|---|
-| Downloads | as delivered, read only to convert | 1,706 days, 36 GB, about 6 bytes an option-minute |
-| Backtest days | one Parquet file a day, one row group per expiry (a backtest skips what it does not trade), exact decimal prices, dictionary symbols, zstd; each read back and compared when written | 22 GB, about 4 bytes an option-minute |
-| Day cache | what the first read priced: a `.day` (contracts and minutes, about 1 MB) and a `.chain` per expiry used (quotes, forwards, IVs), laid out as the backtest reads it | 3.7 MB for the same-day chain; loading one is mapping a file, 0.04 ms |
+| Downloads | as delivered, read only to convert | 2,697 days from 2016, 47 GB, about 6 bytes an option-minute |
+| Backtest days | one Parquet file a day, one row group per expiry (a backtest skips what it does not trade), exact decimal prices, dictionary symbols, zstd; each read back and compared when written | 30 GB, about 4 bytes an option-minute |
+| Day cache | what the first read priced: a `.day` (contracts and minutes, about 1 MB) and a `.chain` per expiry used (quotes, forwards, IVs, each minute's smile), laid out as the backtest reads it | 3.7 MB for the same-day chain; loading one is mapping a file, 0.04 ms |
 
 Greeks are not cached: the live code prices them on demand, bit for bit the same. The format in full is on the [data page](data.md).
 
 ## Reading a day, running many trials
 
 - **Only what is asked for**: a day's contracts and minutes, then a chain only when a strategy subscribes to it, holds or orders one of its options, as live streams only what it is asked for.
-- **Priced once**: a chain read from the day file gets its forward from put-call parity, then each option's IV, once.
+- **Priced once**: a chain read from the day file gets its forward from put-call parity, then each option's IV, then each minute's smile, once.
 - **Read ahead**: a loader reads the next days while the current one runs.
 - **Shared, read only**: each trial has its own engine (the live engine with a backtest venue in place of the broker), but no trial reads or prices a day; each day is loaded once and shared.
-- **One replay per thread**: the trials on a thread share a replay that rolls each day in once and applies each minute once, copying only the loaded chains' rows.
+- **One replay per thread**: the trials on a thread share a replay that rolls each day in once and applies each minute once, copying only the rows of the chains its engines asked for, not those read ahead for them. A day is freed on a loader thread once the last trial lets go of it, off the trials' way.
 - **Deterministic**: one thread owns each engine's state, so a trial gives the same result alone or beside others.
 - **Fills**: at the next minute's quotes, at a set position in each spread, with fees, size limits or delays defined once on the server.
-- **Summed once**: each trial writes its days and round trips as columns; the server alone sums them, in one function for the ledger, the tools and the page, so every view shows the same Sharpe ratio and drawdown. Jobs over the same days run as one batch.
+- **Summed once**: each trial writes its days and round trips as columns; the server alone sums them, in one function for the ledger, the tools and the page, so every view shows the same Sharpe ratio and drawdown. Jobs over the same days run as one batch: the experiments one request makes (a strategy and its control, the robustness checks, a report's strategies) are queued in one transaction, so a waiting worker takes them together and reads each day once.
 
 ## Measure first
 

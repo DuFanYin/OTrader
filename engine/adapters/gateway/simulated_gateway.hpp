@@ -22,7 +22,7 @@ class SimulatedGateway final : public BacktestGateway {
     static constexpr double kStartingCash = 100'000.0;
 
     SimulatedGateway(const model::Portfolios& portfolios, std::vector<std::string> files,
-                     std::string account_file, Clock clock, double fee_rate);
+                     std::string account_file, Clock clock);
 
     void connect() override;
     void disconnect() override { connected_ = false; }

@@ -30,6 +30,11 @@ class VersionRequest(Input):
     version_id: str = Field(..., description="A strategy version's id (register_strategy_version returns it).")
 
 
+class HoldoutRequest(VersionRequest):
+    symbol: str | None = Field(None, description="The underlying to run it on, when its own trials ran on several "
+                                                 "(the same setting backtested on SPXW and SPY); else its one.")
+
+
 class ListRequest(Input):
     stage: Literal["research", "review", "paper", "pilot", "live", "retired"] | None = Field(
         None, description="Only the versions at this stage.")
@@ -87,10 +92,10 @@ def approve_strategy_version(p: ApproveRequest) -> Result:
     return _move(p.version_id, p.to, p.approved, "")
 
 
-def holdout_report(p: VersionRequest) -> Result:
+def holdout_report(p: HoldoutRequest) -> Result:
     _version(p.version_id)
     try:
-        out = promotion.holdout_report(p.version_id)
+        out = promotion.holdout_report(p.version_id, p.symbol)
     except ValueError as exc:
         raise ToolError(str(exc), 409) from exc
     return Result(summary={"version_id": p.version_id, "days": out["days"], "header": out["header"],
@@ -143,8 +148,9 @@ TOOLS = [
          VERSION + "The one way to the holdout: the system runs the version (its setting frozen, at the costs it was "
          "found at) over its underlying's days, the holdout's included, beside the control, and reports the research "
          "days and the holdout apart (trades, win rate, expectancy in R with its t, net, drawdown, the gap to the "
-         "control). Once a version, recorded; the gate to paper reads it.",
-         VersionRequest, holdout_report, "/strategy_versions/{version_id}/holdout_report", cost="heavy", engine=False,
+         "control). Once a version, recorded; the gate to paper reads it. A version whose own trials ran on several "
+         "underlyings is run on the one named.",
+         HoldoutRequest, holdout_report, "/strategy_versions/{version_id}/holdout_report", cost="heavy", engine=False,
          record=False, example={"version_id": EXAMPLE_VERSION}),
     Tool("promote_strategy_version", "Move a strategy version",
          VERSION + "Asks for review (its gates must pass: found by an experiment with a deflated Sharpe above 0.95 and "

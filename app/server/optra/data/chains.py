@@ -1,4 +1,4 @@
-"""The trading engine's days as option chains for the lab: a backtest day (data/<SYMBOL>/) or a day the
+"""The trading engine's days as option chains for the lab: a backtest day (data/backtest/<SYMBOL>/) or a day the
 live engine recorded (data/recorded/<SYMBOL>/: today's is as fresh as the last minute recorded), at
 one of its timestamps, in the chain shape the screener and option_chain tools read (services/market_data asks this module for them).
 
@@ -26,7 +26,7 @@ from optra.utils import files
 
 RATE = 0.05                 # entry_backtest's --risk-free-rate default
 MULTIPLIER = 100.0
-YEAR_SECONDS = 365.25 * 24 * 3600   # model::years_to_expiry
+YEAR_SECONDS = 365 * 24 * 3600   # model::kSecondsAYear
 MIN_T = 1e-6
 MAX_FORWARD_GAP = 0.1       # ChainData::kMaxForwardGap
 PARITY_STRIKES = 3
@@ -57,9 +57,9 @@ def _forward(pairs: list[tuple[float, float, float]], spot: float, years: float)
 
 def day_files(symbol: str) -> dict[str, tuple[Path, str]]:
     """ISO day -> (Parquet file, "backtest" or "recorded"); a recorded day wins over a backtest one."""
-    data = files.data_root()
     days: dict[str, tuple[Path, str]] = {}
-    for root, kind in ((data / symbol, "backtest"), (data / "recorded" / symbol, "recorded")):
+    for root, kind in ((files.backtest_root() / symbol, "backtest"),
+                       (files.data_root() / "recorded" / symbol, "recorded")):
         for f in root.rglob("*.parquet") if root.is_dir() else []:
             if (day := day_of(f)) is not None:
                 days[day.isoformat()] = (f, kind)
@@ -146,9 +146,8 @@ def load(symbol: str, day: str | None, at: str | None) -> dict:
 
 def symbols() -> list[str]:
     """The underlyings with backtest or recorded days."""
-    data = files.data_root()
     found = set()
-    for root in (data, data / "recorded"):
+    for root in (files.backtest_root(), files.data_root() / "recorded"):
         for d in root.iterdir() if root.is_dir() else []:
             if d.is_dir() and d.name.isupper() and next(d.rglob("*.parquet"), None):
                 found.add(d.name)

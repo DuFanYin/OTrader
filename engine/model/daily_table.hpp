@@ -31,6 +31,8 @@ class DailyTable {
     /** The series' last `n` values dated before `day` (fewer when it has fewer), oldest first. */
     [[nodiscard]] std::vector<double> before(std::string_view series, Day day,
                                              std::size_t n) const;
+    /** The date of the series' last value before `day`. */
+    [[nodiscard]] std::optional<Day> last_before(std::string_view series, Day day) const;
     /** The series' first date on or after `day`. */
     [[nodiscard]] std::optional<Day> next(std::string_view series, Day day) const;
     [[nodiscard]] bool empty() const { return series_.empty(); }

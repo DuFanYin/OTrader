@@ -1,5 +1,5 @@
 # core::MarketData (IB, simulated); data_loader (a day's files: Parquet, the cache) and
-# historical_data (a backtest day in memory).
+# historical_data (a backtest day in memory, and the replay days are rolled into).
 if(BUILD_GATEWAY)
   add_library(ib_market_data ib_market_data.cpp)
   target_link_libraries(ib_market_data PUBLIC market_data_engine PRIVATE ib_api)
@@ -27,7 +27,7 @@ if(BUILD_BACKTEST)
   target_link_libraries(data_loader PUBLIC model PRIVATE Arrow::arrow Parquet::parquet
                         nlohmann_json::nlohmann_json)
   add_library(historical_data historical_data.cpp)
-  target_link_libraries(historical_data PUBLIC data_loader model)
+  target_link_libraries(historical_data PUBLIC data_loader model PRIVATE pricing)
 endif()
 if(OPTRA_SIMULATED_MARKET)
   add_library(simulated_market_data simulated_market_data.cpp)

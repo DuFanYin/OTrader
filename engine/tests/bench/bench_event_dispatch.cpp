@@ -5,15 +5,17 @@
  *     market data thread; a backtest before its run);
  *   - apply of a priced snapshot: what the event thread does with it (takes over its values);
  *   - apply of a priced frame read in place (a backtest's bar);
- *   - apply of an unpriced frame: copied and priced on the event thread.
+ *   - apply of a priced frame copied.
  *
- * Above 256 options pricing splits the IV and Greeks across the shared thread pool.
+ * Above 256 options pricing splits the IV and Greeks across the shared thread pool, as live does.
  */
 
 #include "tests/bench/bench_util.hpp"
 #include "model/object.hpp"
 #include "model/portfolio.hpp"
 #include "model/symbol.hpp"
+#include "pricing/pricing.hpp"
+#include "utilities/thread_pool.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -72,7 +74,8 @@ void bench_snapshot(size_t n_options) {
     Histogram pricing = bench::measure_per_op(
         [&] {
             priced.priced = false;
-            fx.portfolio.price_snapshot(priced);
+            pricing::price_snapshot(priced, model::RateCurve{}, "mid", {}, true, {},
+                                    &utilities::shared_pool());
             keep(priced.iv[0]);
         },
         /*iters=*/5000, /*warmup=*/200);
@@ -91,9 +94,9 @@ void bench_snapshot(size_t n_options) {
             keep(first.iv());
         },
         /*iters=*/5000, /*warmup=*/200);
-    Histogram apply_unpriced = bench::measure_per_op(
+    Histogram apply_copied = bench::measure_per_op(
         [&] {
-            fx.portfolio.apply(static_cast<const model::Frame&>(fx.snap));
+            fx.portfolio.apply(static_cast<const model::Frame&>(priced));
             keep(first.iv());
         },
         /*iters=*/5000, /*warmup=*/200);
@@ -101,7 +104,7 @@ void bench_snapshot(size_t n_options) {
     bench::print_row(("price_snapshot " + n).c_str(), pricing);
     bench::print_row(("apply snapshot " + n).c_str(), apply_priced);
     bench::print_row(("apply frame in place " + n).c_str(), apply_in_place);
-    bench::print_row(("apply unpriced " + n).c_str(), apply_unpriced);
+    bench::print_row(("apply frame copied " + n).c_str(), apply_copied);
 }
 
 } // namespace

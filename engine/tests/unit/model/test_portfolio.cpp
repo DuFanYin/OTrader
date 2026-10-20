@@ -1,17 +1,19 @@
 /**
- * A portfolio's listing, frames and pricing (Portfolio), and the structure that holds the
- * portfolios (Portfolios): the columns' order; a snapshot's views after a copy or a move;
- * implied vol from the side the mode names; each expiry at the rate to it on the curve; Greeks
- * priced when asked from what a pricing keeps, its own bit for bit; a frame of another listing moves only the clock and the underlying; a
- * frame read in place or copied; a roll keeps what stays; the at-the-money strike and a chain's
- * forward; chains by expiry and a day's options in place of the ones before; contracts of no
- * portfolio.
+ * A portfolio's listing and frames (Portfolio), and the structure that holds the portfolios
+ * (Portfolios): the columns' order; a snapshot's views after a copy or a move; a rate curve; a
+ * frame of another listing moves only the clock and the underlying; a frame read in place or
+ * copied; a roll keeps what stays; the at-the-money strike; chains by expiry and a day's options
+ * in place of the ones before; contracts of no portfolio; a hedge named by a portfolio's spec; a
+ * leg's rule picking its chain and its option.
  */
 #include "model/portfolio.hpp"
+#include "model/session_calendar.hpp"
 #include "model/portfolios.hpp"
 #include "model/portfolio_spec.hpp"
 #include "model/symbol.hpp"
 #include "model/utility.hpp"
+#include "pricing/pricing.hpp"
+#include "quant/engine_api.h"
 #include <algorithm>
 #include <bit>
 #include <chrono>
@@ -82,6 +84,9 @@ auto snapshot(const model::Portfolio& p, double spot,
     return s;
 }
 
+/** Priced as live prices it, before it is applied. */
+void price(model::PortfolioSnapshot& s) { pricing::price_snapshot(s, model::RateCurve{}, "mid"); }
+
 TEST(PortfolioListing, ColumnsRunByChainThenBySymbolWithEachChainsStrikes) {
     const std::string c610 = symbol(OptionType::CALL, 610);
     const std::string p600 = symbol(OptionType::PUT, 600);
@@ -130,97 +135,6 @@ TEST(PortfolioSnapshot, ACopyOrAMoveViewsItsOwnValues) {
     EXPECT_NE(copy.ask.data(), moved.ask.data());
 }
 
-TEST(PortfolioPricing, ImpliedVolIsSolvedFromTheSideTheModeNamesInAnyCase) {
-    const std::string call = symbol(OptionType::CALL, 600);
-    auto p = portfolio({call});
-    model::PortfolioSnapshot s = snapshot(*p, 600.0, {{call, {10.0, 12.0}}});
-    const auto iv = [&] {
-        model::PortfolioSnapshot priced = s;
-        p->price_snapshot(priced);
-        EXPECT_TRUE(priced.priced);
-        return priced.iv[0];
-    };
-    const double mid = iv();
-    EXPECT_GT(mid, 0.0);
-    p->set_iv_price_mode("BID");
-    const double bid = iv();
-    p->set_iv_price_mode("Ask");
-    const double ask = iv();
-    EXPECT_LT(bid, mid);
-    EXPECT_LT(mid, ask);
-    p->set_iv_price_mode("last"); // no such mode: the one before stays
-    EXPECT_EQ(iv(), ask);
-    p->set_risk_free_rate(std::nan("")); // ignored
-    EXPECT_EQ(iv(), ask);
-
-    p->set_iv_price_mode("bid");
-    s.values(&model::Frame::bid)[0] = 0.0; // asked only: nothing to solve from
-    model::PortfolioSnapshot unquoted = s;
-    p->price_snapshot(unquoted);
-    EXPECT_TRUE(unquoted.priced);
-    EXPECT_EQ(unquoted.iv[0], 0.0);
-    EXPECT_EQ(unquoted.delta[0], 0.0);
-
-    model::PortfolioSnapshot unlisted;
-    p->price_snapshot(unlisted);
-    EXPECT_FALSE(unlisted.priced);
-}
-
-TEST(PortfolioPricing, GreeksPricedWhenAskedFromWhatAPricingKeepsAreItsOwnBitForBit) {
-    // Two expiries: the later one quoted both ways (a forward by parity); the earlier only in calls
-    // (the spot grown); quotes missing, one-sided, at zero; and a spot of none.
-    const year_month_day near = 2099y / December / 4;
-    std::vector<std::string> options;
-    std::map<std::string, std::pair<double, double>> quotes;
-    for (const double k : {580.0, 590.0, 600.0, 610.0, 620.0}) {
-        for (const OptionType type : {OptionType::CALL, OptionType::PUT}) {
-            const std::string later = symbol(type, k);
-            options.push_back(later);
-            const double value = std::max(type == OptionType::CALL ? 600.0 - k : k - 600.0, 0.0) +
-                                 8.0 * std::exp(-std::abs(k - 600.0) / 20.0);
-            if (k != 610.0 || type != OptionType::PUT) {
-                quotes[later] = {k == 590.0 ? 0.0 : value - 0.07, value + 0.07};
-            }
-        }
-        const std::string sooner = symbol(OptionType::CALL, k, near);
-        options.push_back(sooner);
-        quotes[sooner] = {std::max(600.0 - k, 0.0) + 1.0, std::max(600.0 - k, 0.0) + 1.3};
-    }
-    auto p = std::make_unique<model::Portfolio>("SPY");
-    p->set_underlying(contract("SPY", 1.0));
-    std::vector<model::Contract> listed;
-    for (const std::string& o : options) {
-        listed.push_back(contract(o, 100.0));
-    }
-    p->list(std::make_shared<const model::Listing>(listed));
-    const auto bits = [](double v) { return std::bit_cast<std::uint64_t>(v); };
-    for (const double spot : {600.3, 0.0}) {
-        for (const std::string_view mode : {"mid", "bid", "ask"}) {
-            model::PortfolioSnapshot s = snapshot(*p, spot, quotes);
-            model::price_snapshot(s, model::RateCurve::flat(0.05), mode);
-            model::Frame kept = s; // what a stored day keeps: no Greeks, the setting
-            kept.delta = kept.gamma = kept.theta = kept.vega = {};
-            kept.iv_price_mode = mode;
-            bool some = false;
-            for (std::size_t i = 0; i < s.iv.size(); ++i) {
-                const model::Greeks g = model::greeks_at(kept, i);
-                EXPECT_EQ(bits(g.delta), bits(s.delta[i])) << mode << " " << spot << " " << i;
-                EXPECT_EQ(bits(g.gamma), bits(s.gamma[i])) << mode << " " << spot << " " << i;
-                EXPECT_EQ(bits(g.theta), bits(s.theta[i])) << mode << " " << spot << " " << i;
-                EXPECT_EQ(bits(g.vega), bits(s.vega[i])) << mode << " " << spot << " " << i;
-                some = some || g.delta != 0.0;
-            }
-            EXPECT_EQ(some, spot > 0.0);
-            // A snapshot that takes the frame holds them as its own.
-            model::PortfolioSnapshot copy = p->snapshot();
-            copy.assign(kept);
-            for (std::size_t i = 0; i < s.iv.size(); ++i) {
-                EXPECT_EQ(bits(copy.delta[i]), bits(s.delta[i])) << mode << " " << spot << " " << i;
-            }
-        }
-    }
-}
-
 TEST(PortfolioPricing, ARateCurveIsStraightBetweenItsPointsAndFlatBeyondThem) {
     const model::RateCurve c{.years = {1.0 / 12, 1.0}, .rates = {0.01, 0.04}};
     EXPECT_EQ(c.at(0.0), 0.01);
@@ -230,55 +144,11 @@ TEST(PortfolioPricing, ARateCurveIsStraightBetweenItsPointsAndFlatBeyondThem) {
     EXPECT_EQ(model::RateCurve::flat(0.05).at(3.0), 0.05);
 }
 
-TEST(PortfolioPricing, EachExpiryIsPricedAtTheRateToItAsAtThatOneRate) {
-    // Two expiries, 3 and 17 days out, whose rates on the curve differ.
-    const year_month_day near = 2099y / December / 4;
-    std::vector<std::string> options;
-    std::map<std::string, std::pair<double, double>> quotes;
-    for (const year_month_day expiry : {near, kExpiry}) {
-        for (const double k : {590.0, 600.0, 610.0}) {
-            for (const OptionType type : {OptionType::CALL, OptionType::PUT}) {
-                const std::string o = symbol(type, k, expiry);
-                options.push_back(o);
-                const double value =
-                    std::max(type == OptionType::CALL ? 600.0 - k : k - 600.0, 0.0) + 5.0;
-                quotes[o] = {value - 0.05, value + 0.05};
-            }
-        }
-    }
-    auto p = std::make_unique<model::Portfolio>("SPY");
-    p->set_underlying(contract("SPY", 1.0));
-    std::vector<model::Contract> listed;
-    for (const std::string& o : options) {
-        listed.push_back(contract(o, 100.0));
-    }
-    p->list(std::make_shared<const model::Listing>(listed));
-    const model::RateCurve curve{.years = {3.0 / 365, 30.0 / 365}, .rates = {0.0, 0.10}};
-    model::PortfolioSnapshot s = snapshot(*p, 600.0, quotes);
-    model::price_snapshot(s, curve, "mid");
-    ASSERT_EQ(s.expiry_rate.size(), 2U);
-    for (std::size_t e = 0; e < 2; ++e) {
-        EXPECT_EQ(s.expiry_rate[e], curve.at(s.expiry_years[e]));
-    }
-    EXPECT_NE(s.expiry_rate[0], s.expiry_rate[1]);
-    const auto bits = [](double v) { return std::bit_cast<std::uint64_t>(v); };
-    const model::Listing& listing = p->listing();
-    for (std::size_t e = 0; e < 2; ++e) {
-        model::PortfolioSnapshot one = snapshot(*p, 600.0, quotes);
-        model::price_snapshot(one, model::RateCurve::flat(s.expiry_rate[e]), "mid");
-        for (std::size_t i = 0; i < listing.size(); ++i) {
-            if (listing.chains()[listing.chain_of(i)].expiry_index == e) {
-                EXPECT_EQ(bits(s.iv[i]), bits(one.iv[i])) << e << " " << i;
-                EXPECT_EQ(bits(s.delta[i]), bits(one.delta[i])) << e << " " << i;
-            }
-        }
-    }
-}
-
 TEST(PortfolioFrames, AFrameOfAnotherListingMovesOnlyTheClockAndTheUnderlying) {
     const std::string call = symbol(OptionType::CALL, 600);
     auto p = portfolio({call});
     model::PortfolioSnapshot s = snapshot(*p, 600.0, {{call, {1.0, 1.2}}});
+    price(s);
     p->apply(s);
     auto other = portfolio({call});
     model::PortfolioSnapshot moved = snapshot(*other, 601.0, {{call, {9.0, 9.2}}});
@@ -294,7 +164,8 @@ TEST(PortfolioFrames, ASnapshotIsTakenOverAndAFrameReadInPlaceWhileItsStorageKee
     auto p = portfolio({call});
     model::PortfolioSnapshot s = snapshot(*p, 600.0, {{call, {10.0, 12.0}}});
     s.values(&model::Frame::bid_size)[0] = 5.0;
-    p->apply(s); // priced here, then taken over: s has the zeros it had
+    price(s);
+    p->apply(s); // taken over: s has the zeros it had
     EXPECT_TRUE(p->frame().priced);
     EXPECT_DOUBLE_EQ(s.bid[0], 0.0);
     const model::Option option = *p->option(call);
@@ -305,14 +176,14 @@ TEST(PortfolioFrames, ASnapshotIsTakenOverAndAFrameReadInPlaceWhileItsStorageKee
     EXPECT_DOUBLE_EQ(option.delta(), p->frame().delta[0] * 100.0);
 
     auto stored = std::make_shared<model::PortfolioSnapshot>(snapshot(*p, 600.0, {{call, {7, 8}}}));
-    p->price_snapshot(*stored);
+    price(*stored);
     p->apply(*stored, stored);
     EXPECT_EQ(p->frame().bid.data(), stored->bid.data()); // read where it is
     stored->values(&model::Frame::bid)[0] = 7.5;
     EXPECT_DOUBLE_EQ(p->option(call)->bid(), 7.5);
 
     model::PortfolioSnapshot copied = snapshot(*p, 600.0, {{call, {3.0, 4.0}}});
-    p->price_snapshot(copied);
+    price(copied);
     p->apply(static_cast<const model::Frame&>(copied));
     copied.values(&model::Frame::bid)[0] = 0.0;
     EXPECT_DOUBLE_EQ(p->option(call)->bid(), 3.0); // a copy of its own
@@ -323,6 +194,7 @@ TEST(PortfolioFrames, AHedgeIsCountedOnlyWhenBothArePriced) {
     auto p = portfolio({call});
     p->set_hedge_instrument(contract("SPYX", 1.0));
     model::PortfolioSnapshot s = snapshot(*p, 600.0, {{call, {10.0, 12.0}}});
+    price(s);
     p->apply(s);
     EXPECT_DOUBLE_EQ(p->hedge()->theo_delta(), 0.0); // not priced
     EXPECT_DOUBLE_EQ(p->underlying()->theo_delta(), 1.0);
@@ -331,6 +203,7 @@ TEST(PortfolioFrames, AHedgeIsCountedOnlyWhenBothArePriced) {
     s.hedge_bid = 299.9;
     s.hedge_ask = 300.1;
     s.hedge_mark = 300.0;
+    price(s);
     p->apply(s);
     EXPECT_DOUBLE_EQ(p->hedge()->theo_delta(), 0.5);
     EXPECT_EQ(p->instrument("SPYX")->symbol(), "SPYX");
@@ -338,6 +211,7 @@ TEST(PortfolioFrames, AHedgeIsCountedOnlyWhenBothArePriced) {
 
     model::PortfolioSnapshot no_spot = snapshot(*p, 0.0, {{call, {10.0, 12.0}}});
     no_spot.hedge_mark = 300.0;
+    price(no_spot);
     p->apply(no_spot);
     EXPECT_DOUBLE_EQ(p->hedge()->theo_delta(), 0.0);
 }
@@ -348,6 +222,8 @@ TEST(PortfolioFrames, ARollKeepsTheValuesOfWhatStays) {
     const std::string comes = symbol(OptionType::CALL, 600, 2099y / December / 19);
     auto p = portfolio({stays, goes});
     model::PortfolioSnapshot s = snapshot(*p, 600.0, {{stays, {10.0, 12.0}}, {goes, {5, 6}}});
+    price(s);
+    s.values(&model::Frame::smile)[model::kSmilePoints] = 7.0; // as a fit would leave it
     p->apply(s);
     const double forward = p->chain("SPY_20991218")->forward();
     EXPECT_GT(forward, 0.0);
@@ -357,8 +233,65 @@ TEST(PortfolioFrames, ARollKeepsTheValuesOfWhatStays) {
     EXPECT_DOUBLE_EQ(p->option(comes)->bid(), 0.0);
     EXPECT_FALSE(p->option(goes));
     EXPECT_DOUBLE_EQ(p->chain("SPY_20991218")->forward(), forward);
+    EXPECT_EQ(p->chain("SPY_20991218")->smile().points, 7);
+    EXPECT_EQ(p->chain("SPY_20991219")->smile().points, 0);
     EXPECT_DOUBLE_EQ(p->underlying()->mid(), 600.0);
     EXPECT_EQ(p->datetime(), kQuoted);
+}
+
+/** The underlying's open, high and low today: from the session's frames (the open's bar is minute
+ * 1), anew each day. */
+TEST(PortfolioFrames, TheDaysOpenHighAndLowAreTheSessionsFrames) {
+    auto p = portfolio({symbol(OptionType::CALL, 600)});
+    const auto at = [&](model::DateTime t, double spot) {
+        model::PortfolioSnapshot s = snapshot(*p, spot, {});
+        s.datetime = t;
+        price(s);
+        p->apply(s);
+    };
+    const model::DateTime open = model::kNyse.at(2099y / December / 1, 9h + 30min);
+    at(open, 590.0); // 09:30: before the open's bar
+    EXPECT_EQ(p->day_first_minute(), -1);
+    at(open + 1min, 600.0);
+    at(open + 2min, 605.0);
+    at(open + 3min, 598.0);
+    EXPECT_DOUBLE_EQ(p->day_open(), 600.0);
+    EXPECT_DOUBLE_EQ(p->day_high(), 605.0);
+    EXPECT_DOUBLE_EQ(p->day_low(), 598.0);
+    EXPECT_EQ(p->day_first_minute(), 1);
+    at(open + 24h + 40min, 610.0); // the next day, 40 minutes in
+    EXPECT_DOUBLE_EQ(p->day_open(), 610.0);
+    EXPECT_DOUBLE_EQ(p->day_low(), 610.0);
+    EXPECT_EQ(p->day_first_minute(), 40);
+}
+
+/** An engine that started late takes the day's open, high and low from its source: the open's,
+ * the highest and lowest of both; another day's are left out, and so is one once the open was
+ * seen. */
+TEST(PortfolioFrames, ADaysRangeFromTheSourceIsWhereTheDayBegan) {
+    auto p = portfolio({symbol(OptionType::CALL, 600)});
+    const auto at = [&](model::DateTime t, double spot) {
+        model::PortfolioSnapshot s = snapshot(*p, spot, {});
+        s.datetime = t;
+        price(s);
+        p->apply(s);
+    };
+    const year_month_day day = 2099y / December / 1;
+    const model::DateTime open = model::kNyse.at(day, 9h + 30min);
+    at(open + 40min, 600.0);
+    EXPECT_FALSE(p->saw_open());
+    p->restore_day(2099y / November / 30, 590.0, 610.0, 580.0); // another day's
+    EXPECT_FALSE(p->saw_open());
+    p->restore_day(day, 595.0, 599.0, 585.0);
+    EXPECT_TRUE(p->saw_open());
+    EXPECT_EQ(p->day_first_minute(), 1);
+    EXPECT_DOUBLE_EQ(p->day_open(), 595.0);
+    EXPECT_DOUBLE_EQ(p->day_high(), 600.0); // its own frame's
+    EXPECT_DOUBLE_EQ(p->day_low(), 585.0);
+    p->restore_day(day, 500.0, 700.0, 400.0); // seen now: kept
+    EXPECT_DOUBLE_EQ(p->day_open(), 595.0);
+    at(open + 41min, 620.0);
+    EXPECT_DOUBLE_EQ(p->day_high(), 620.0);
 }
 
 TEST(PortfolioChains, TheAtTheMoneyStrikeIsTheNearestOrWithoutAPriceTheMiddleOne) {
@@ -378,34 +311,6 @@ TEST(PortfolioChains, TheAtTheMoneyStrikeIsTheNearestOrWithoutAPriceTheMiddleOne
     EXPECT_EQ(atm(605.0), 600.0); // of two as near, the lower
     EXPECT_EQ(atm(607.0), 610.0);
     EXPECT_FALSE(p->chain("SPY_20991218")->atm_iv());
-}
-
-TEST(PortfolioPricing, AForwardFromParityNeedsAStrikeQuotedBothWaysNearTheSpot) {
-    const std::string c600 = symbol(OptionType::CALL, 600);
-    const std::string p600 = symbol(OptionType::PUT, 600);
-    const std::string c610 = symbol(OptionType::CALL, 610);
-    const std::string p610 = symbol(OptionType::PUT, 610);
-    auto p = portfolio({c600, p600, c610, p610});
-    const auto priced = [&](double spot, double call_600) {
-        model::PortfolioSnapshot s = snapshot(
-            *p, spot,
-            {{c600, {call_600 - 0.1, call_600 + 0.1}},
-             {p600, {4.9, 5.1}},
-             {c610, {1.0, 1.2}},
-             {p610, {0.0, 10.2}}}); // asked only: no parity there
-        p->price_snapshot(s);
-        return s;
-    };
-    const model::PortfolioSnapshot parity = priced(600.0, 5.5);
-    const double grow = std::exp(0.05 * parity.expiry_years[0]);
-    EXPECT_NEAR(parity.forward[0], 600.0 + (grow * 0.5), 1e-9);
-
-    model::PortfolioSnapshot far = priced(600.0, 200.0); // a forward near 795: bad quotes
-    EXPECT_EQ(far.forward[0], 0.0);                      // none by parity
-    p->apply(far);
-    EXPECT_NEAR(p->chain("SPY_20991218")->forward(), 600.0 * grow, 1e-9); // the spot grown
-
-    EXPECT_EQ(priced(0.0, 5.5).forward[0], 0.0); // no spot
 }
 
 TEST(PortfolioChains, ChainsByExpiryAndADaysOptionsInPlaceOfTheOnesBefore) {
@@ -460,8 +365,9 @@ TEST(Portfolios, AnInstrumentIsItsOwnPortfoliosBeforeOneItHedges) {
     EXPECT_EQ(structure.find_portfolio("SPXW")->hedge()->symbol(), "SPY");
     EXPECT_EQ(structure.find_contract("SPX")->symbol, "SPX");
 
-    structure.ensure_portfolio("ONLY_HEDGED");
-    structure.find_portfolio("ONLY_HEDGED")->hedge_symbol = "DIA";
+    static constexpr model::PortfolioSpec kOnlyHedged{
+        .name = "ONLY_HEDGED", .underlying = "ONLY_HEDGED", .hedge = "DIA"};
+    structure.ensure_portfolio(kOnlyHedged);
     EXPECT_EQ(structure.portfolio_of("DIA"), structure.find_portfolio("ONLY_HEDGED"));
     EXPECT_TRUE(structure.trades_contract("DIA"));
     EXPECT_FALSE(structure.trades_contract("EEM"));
@@ -483,6 +389,76 @@ TEST(Portfolios, ADaysContractsReplaceOnlyThatPortfoliosOptions) {
     EXPECT_EQ(structure.find_contract(spy), nullptr);
     EXPECT_NE(structure.find_contract(spxw), nullptr);
     EXPECT_NE(structure.find_contract("SPY"), nullptr);
+}
+
+TEST(PortfolioLegs, ALegsRulePicksItsChainByDaysToExpiry) {
+    const std::string near = symbol(OptionType::CALL, 600, 2099y / December / 4);
+    const std::string far = symbol(OptionType::CALL, 600, 2099y / December / 18);
+    auto p = portfolio({near, far});
+    p->set_trading_day(sys_days{2099y / December / 1}); // 3 and 17 days out
+    using By = model::LegRule::ExpiryBy;
+    const auto chain = [&](By by, int dte, int lo = 0, int hi = 0) {
+        return model::leg_chain(*p, {.ratio = 1, .expiry_by = by, .dte = dte, .min_dte = lo,
+                                     .max_dte = hi});
+    };
+    EXPECT_EQ(chain(By::kFirstAtLeast, 0), "SPY_20991204");
+    EXPECT_EQ(chain(By::kFirstAtLeast, 5), "SPY_20991218");
+    EXPECT_EQ(chain(By::kExactly, 3), "SPY_20991204");
+    EXPECT_EQ(chain(By::kExactly, 4), "");
+    EXPECT_EQ(chain(By::kNearest, 10, 0, 30), "SPY_20991204"); // 7 days either way: the earlier
+    EXPECT_EQ(chain(By::kNearest, 15, 0, 30), "SPY_20991218");
+    EXPECT_EQ(chain(By::kNearest, 15, 0, 10), "SPY_20991204"); // the window first
+}
+
+TEST(PortfolioLegs, ALegsRulePicksItsStrikeOffTheForwardByImpliedMovesOrByDelta) {
+    // Quoted at their Black prices on a forward of 600 (vol 20%), a dime wide.
+    const std::vector<double> strikes{570, 580, 590, 600, 610, 620, 630};
+    std::vector<std::string> names;
+    for (const double k : strikes) {
+        names.push_back(symbol(OptionType::CALL, k));
+        names.push_back(symbol(OptionType::PUT, k));
+    }
+    auto p = std::make_unique<model::Portfolio>("SPY");
+    p->set_underlying(contract("SPY", 1.0));
+    std::vector<model::Contract> listed;
+    for (const std::string& n : names) {
+        listed.push_back(contract(n, 100.0));
+    }
+    p->list(std::make_shared<const model::Listing>(listed));
+    p->set_trading_day(sys_days{2099y / December / 1});
+    const double years = model::years_to_expiry(kQuoted, model::DateTime{sys_days{kExpiry} + 21h});
+    std::map<std::string, std::pair<double, double>> quotes;
+    for (const double k : strikes) {
+        for (const bool call : {true, false}) {
+            const double v = quant::black_price(call, 600.0, k, years, 0.0, 0.2);
+            quotes[symbol(call ? OptionType::CALL : OptionType::PUT, k)] = {v - 0.05, v + 0.05};
+        }
+    }
+    model::PortfolioSnapshot s = snapshot(*p, 600.0, quotes);
+    price(s);
+    p->apply(s);
+    const model::Chain chain = *p->chain(p->chains_by_expiry(0, 3650).front());
+    using By = model::LegRule::StrikeBy;
+    const auto strike = [&](OptionType right, By by, double value) {
+        return model::leg_option(chain, {.ratio = 1, .right = right, .strike_by = by,
+                                         .strike = value})
+            ->strike();
+    };
+    EXPECT_DOUBLE_EQ(strike(OptionType::CALL, By::kForwardPct, 1.0), 610.0); // 606: nearest 610
+    EXPECT_DOUBLE_EQ(strike(OptionType::PUT, By::kForwardPct, 0.0), 600.0);
+    // The straddle's mid over the forward is the move; a move down from the forward.
+    const double straddle = chain.call(600)->mid() + chain.put(600)->mid();
+    const double down = 600.0 - straddle;
+    const double expected = *std::ranges::min_element(
+        strikes, {}, [down](double k) { return std::abs(k - down); });
+    EXPECT_DOUBLE_EQ(strike(OptionType::PUT, By::kImpliedMoves, -1.0), expected);
+    // By delta: the put nearest -0.25 of those priced.
+    const double picked = strike(OptionType::PUT, By::kDelta, -0.25);
+    for (const double k : strikes) {
+        const model::Option put = *chain.put(k);
+        EXPECT_LE(std::abs((chain.put(picked)->delta() / 100.0) + 0.25),
+                  std::abs((put.delta() / 100.0) + 0.25) + 1e-12);
+    }
 }
 
 } // namespace

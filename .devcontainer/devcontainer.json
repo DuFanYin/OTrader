@@ -1,0 +1,10 @@
+{
+  "name": "Optra",
+  "build": { "dockerfile": "../Dockerfile", "context": "..", "target": "deps" },
+  "containerEnv": { "WEB_HOST": "0.0.0.0" },
+  "forwardPorts": [5173],
+  "postCreateCommand": "./build.sh r",
+  "customizations": {
+    "vscode": { "extensions": ["ms-vscode.cpptools", "ms-vscode.cmake-tools", "ms-python.python"] }
+  }
+}

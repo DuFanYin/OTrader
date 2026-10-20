@@ -18,8 +18,9 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from optra.research import code_identity, evidence, jobs, ledger, promotion, runner, strategies
+from optra.research import code_identity, evidence, jobs, ledger, promotion, runner, strategies, versions
 from optra.data import daily_values
+from optra.services import market_data
 from optra.data.days import ET, parse_option
 from optra.infra.remote_client import EngineClient
 from optra.utils import files
@@ -95,8 +96,8 @@ def check(client: EngineClient, send: bool, account: str = "paper") -> dict[str,
     engine does not answer for about a minute while it starts (the morning restart, a deploy), and
     a crash is notified separately (optra-alert@). Recovery is notified for the problems that
     were notified, naming them. Moves of versions between stages under way are carried out again
-    first (promotion.advance_pending, with the paper account's check); one still stopped is a problem."""
-    now = (promotion.advance_pending() if account == "paper" else []) + problems(client)
+    first (versions.advance_pending, with the paper account's check); one still stopped is a problem."""
+    now = (versions.advance_pending() if account == "paper" else []) + problems(client)
     state = _data() / ("session-check.json" if account == "paper" else f"session-check-{account}.json")
     try:
         kept = json.loads(state.read_text())
@@ -186,11 +187,10 @@ def backtest_fills(data: Path, portfolio: str, cls: str, setting: dict[str, floa
     return fills, paid
 
 
-def compare(client: EngineClient, strategy: str, day: date, fee_rate: float = 0.65,
-            data: Path | None = None) -> dict[str, Any]:
+def compare(client: EngineClient, strategy: str, day: date, data: Path | None = None) -> dict[str, Any]:
     """A paper day against a backtest of the same recorded day: the strategy's class, its setting
     and the risk limits as the live engine has them, over the day's recorded quotes (data/
-    recorded), at the costs its version was found at (fee_rate's otherwise). Each contract
+    recorded), at the costs its version was found at (the default costs otherwise). Each contract
     and side in time order, the n-th paper fill against the n-th backtest one; what only one side
     has; each side's cash flow; what the backtest's fills paid over the mids, and the paper's: the
     same less the matched fills' price differences.
@@ -212,8 +212,8 @@ def compare(client: EngineClient, strategy: str, day: date, fee_rate: float = 0.
     code = {"engine": client.get_status()["code"],
             "strategy": code_identity.strategy_hash(traded) if traded.is_file() else ""}
     limits = {l["name"]: l["value"] for l in client.get_risk()["limits"]}
-    version_id = promotion.version_of(strategy)
-    costs = (promotion.research_costs(version_id) if version_id else ledger.Costs(fee_rate=fee_rate)).model_copy(
+    version_id = versions.version_of(strategy)
+    costs = (promotion.research_costs(version_id) if version_id else ledger.Costs()).model_copy(
         update={"risk": limits})
     paper = paper_fills(client, day, strategy).get(strategy, [])
     backtest, backtest_slippage = backtest_fills(data or _data() / "recorded", record["portfolio"],
@@ -282,6 +282,17 @@ def recording(day: date, record_dir: Path) -> list[str]:
     return [f"Quotes recorded: {', '.join(f.parent.parent.name for f in found)} ({record_dir})"]
 
 
+def treasury_curve(day: date) -> list[str]:
+    """The Treasury's yields of the month's days published by `day` added to the values by day (DGS1MO to DGS2: the
+    live engine prices on the latest before each morning), as the lines to report."""
+    try:
+        days = {d: v for d, v in market_data.treasury_days(day.replace(day=1)).items() if d <= str(day)}
+        added = daily_values.add_values(days)
+    except Exception as exc:
+        return [f"Treasury curve: not added: {exc}"]
+    return [f"Treasury curve: {added} new days, the latest {max(days) if days else 'none this month'}"]
+
+
 def minute_rv(day: date, record_dir: Path) -> list[str]:
     """The day's realized vol of each recorded portfolio's minutes added to the values by day (what ComboStrategy
     reads the next day), as the lines to report."""
@@ -323,6 +334,7 @@ def collect(client: EngineClient, day: date, record_dir: Path | None, account: s
     if account == "paper" and record_dir.is_dir():
         facts["recording"] = recording(day, record_dir)
         facts["recording"] += minute_rv(day, record_dir)
+        facts["recording"] += treasury_curve(day)
         fills = facts["fills"] if "error" not in facts["fills"] else {}
         strategies = facts["strategies"] if isinstance(facts["strategies"], list) else []
         # Every strategy running, fills or not: a day the backtest trades and the paper engine does not is a gap too.

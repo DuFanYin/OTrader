@@ -15,10 +15,6 @@ namespace {
 
 constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 
-double payoff(double s, double k, bool is_call) {
-    return is_call ? std::max(s - k, 0.0) : std::max(k - s, 0.0);
-}
-
 }  // namespace
 
 double trinomial_price(double spot, double strike, double rate, double dividend_yield, double vol,

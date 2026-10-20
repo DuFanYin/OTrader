@@ -69,6 +69,7 @@ constexpr Task kTasks[] = {
     {"implied_vol", quant::analytics::run_implied_vol_json},
     {"implied_vol_batch", quant::analytics::run_implied_vol_batch_json},
     {"black_batch", quant::analytics::run_black_batch_json},
+    {"synthetic_quotes", quant::analytics::run_synthetic_quotes_json},
     {"heston_calibrate", quant::analytics::run_heston_calibrate_json},
     {"heston_price", quant::analytics::run_heston_price_json},
     {"screener", quant::analytics::run_screener_json},

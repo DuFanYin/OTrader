@@ -7,8 +7,8 @@ A backtest is only as good as the quotes it replays. Optra ships no market data.
 The backtester reads one Parquet file per symbol and trading day:
 
 ```
-data/<SYMBOL>/<SYMBOL>-YYYY-MM/YYYYMMDD.parquet
-data/SPXW/SPXW-2025-08/20250804.parquet
+data/backtest/<SYMBOL>/<SYMBOL>-YYYY-MM/YYYYMMDD.parquet
+data/backtest/SPXW/SPXW-2025-08/20250804.parquet
 ```
 
 The folder is the portfolio (`SPXW`, `SPY`); the file name is the day. `data/` is not part of the repository.
@@ -43,7 +43,7 @@ A day can carry its risk-free curve in the file's metadata, under `risk_free_cur
 
 The rates are continuously compounded, a year, at maturities in years. The engine prices each expiry at the rate to it on the curve (a straight line between the points, flat beyond the ends) and gives strategies the same rate (`Chain::rate`). A day without a curve is priced at the one rate the backtest is given (5% by default).
 
-The converted days carry the US Treasury curve of the business day before, which is known at the open. Synthetic days carry the rate they were priced at.
+The converted days carry the US Treasury curve of the business day before, which is known at the open. Synthetic days carry the rate they were priced at. The live engine prices on the same curve: the values by day `DGS1MO`, `DGS3MO`, `DGS6MO`, `DGS1` and `DGS2` (percent, as the Treasury publishes them), the latest before each morning; the end-of-day report adds each day the Treasury has published. Without them it prices at 5%.
 
 ## How a day is stored
 
@@ -87,7 +87,10 @@ Data in another shape needs only another way of reading it into the same columns
 
 ## Values by day
 
-Besides the days, a strategy may read values that come once a day: an index's close, an implied volatility at the close, the dates of events. Each series is one file, `data/daily/<series>.csv`, a line `YYYY-MM-DD,value` each (a header line and lines starting with `#` are skipped); an event series lists its dates. Backtest and live read the same files, and a strategy sees each value from the next day on (`Strategy::daily`, `daily_history`, `trading_days_until`), so it never reads a close before it happened. The live engine reads them again each morning; a backtest's trials hash them, so changing a file makes new trials. The series `<underlying>_ex_dividend` (the ex-dividend dates of a share-settled underlying) has the risk checks close any combo with a call sold before the close of the day before. One series the system works out from the days themselves: `<PORTFOLIO>_minute_rv`, the realized vol of the underlying's minutes, which `ComboStrategy` filters on (`python -m optra.data.daily_values data/<PORTFOLIO>` over the backtest days; the end-of-day report adds each paper day from the day recorded). Read from the file, not from the minutes a strategy saw, it is the same after a restart during the day.
+Besides the days, a strategy may read values that come once a day: an index's close, an implied volatility at the close, the dates of events. Each series is one file, `data/daily/<series>.csv`, a line `YYYY-MM-DD,value` each (a header line and lines starting with `#` are skipped); an event series lists its dates. Backtest and live read the same files, and a strategy sees each value from the next day on (`Strategy::daily`, `daily_history`, `trading_days_until`), so it never reads a close before it happened; a value more than five trading days old reads as none, so a series no longer kept is missing rather than stuck at its last value. The live engine reads them again each morning; a backtest's trials hash them, so changing a file makes new trials. The series `<underlying>_ex_dividend` (the ex-dividend dates of a share-settled underlying) has the risk checks close any combo with a call sold before the close of the day before. Series the system works out from the days themselves (`python -m optra.data.daily_values data/backtest/<PORTFOLIO>`):
+
+- `<PORTFOLIO>_minute_rv`, the realized vol of the underlying's minutes, which `ComboStrategy` filters on; the end-of-day report adds each paper day from the day recorded. Read from the file, not from the minutes a strategy saw, it is the same after a restart during the day.
+- with `--surface`, the volatility surface 15 minutes before the close (15:45; 12:45 on a half day) as the measuring strategy `SurfaceStrategy` (`strategy/demo/surface.cpp`) writes it: `<PORTFOLIO>_atm_iv_7d`, `_atm_iv_30d`, `_atm_iv_90d` (ATM IV at constant maturity, calendar time, the two expiries around it interpolated in total variance), `_rr25_30d` and `_bf25_30d` (the 25 delta risk reversal and butterfly), `_term_slope` (90 days less 30), `_spot`, and from the spots `_rv_21d` (21 days close to close, a year of 252) and `_iv_rv` (30-day ATM IV less it). IVs are fractions. Backtest only: the paper engine streams 100 quotes, too few for a surface, so a strategy that reads these is not run on paper.
 
 ## Replaying a paper day
 
@@ -102,7 +105,7 @@ uv run --directory app/server python -m optra.data.synthetic_days --start 2025-0
 ./engine/build/entry_backtest --files data/synthetic/SPY/SPY-2025-03/*.parquet ComboStrategy
 ```
 
-The page and the server can make them too (`POST /api/data/synthetic`). They go to `data/synthetic`, apart from the real days in `data/<SYMBOL>`: research takes every day there is for an underlying, and a synthetic day among them would count as a real one.
+The page and the server can make them too (`POST /api/data/synthetic`). They go to `data/synthetic`, apart from the real days in `data/backtest/<SYMBOL>`: research takes every day there is for an underlying, and a synthetic day among them would count as a real one.
 
 The model:
 

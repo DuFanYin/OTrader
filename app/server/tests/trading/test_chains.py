@@ -20,7 +20,7 @@ pytestmark = pytest.mark.skipif(not is_engine_available(), reason="libanalytics_
 @pytest.fixture()
 def day(tmp_path, monkeypatch):
     model = synthetic_days.Model(implied_vol=0.2, tick=0.0, spread=0.0)
-    synthetic_days.generate(model, date(2025, 3, 3), date(2025, 3, 3), tmp_path, "SPY", False)
+    synthetic_days.generate(model, date(2025, 3, 3), date(2025, 3, 3), tmp_path / "backtest", "SPY", False)
     monkeypatch.setattr(files, "data_root", lambda: tmp_path)
     return model
 

@@ -45,7 +45,7 @@ TEST(FilledOrder, IsAMarketOrderTradedWholeWithOneFillNamedByTheOrder) {
 auto holding(std::initializer_list<std::tuple<std::string, int, double>> legs) -> model::StrategyHolding {
     model::StrategyHolding h;
     for (const auto& [symbol, quantity, price] : legs) {
-        model::OptionPosition& p = h.options.try_emplace(symbol, symbol).first->second;
+        model::OptionPosition& p = h.options.try_emplace(symbol, symbol, 100.0).first->second;
         p.quantity = quantity;
         p.avg_cost = price;
     }

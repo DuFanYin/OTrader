@@ -17,9 +17,12 @@
  */
 
 #include "tests/read_main.hpp"
+#include "adapters/market_data/ib_market_data.hpp"
+#include "core/market_data/market_data_engine.hpp"
 #include "core/bookkeeping/bookkeeping_engine.hpp"
 #include "core/strategy/strategy_engine.hpp"
 #include "assembly/live.hpp"
+#include "model/session_calendar.hpp"
 #include "model/order_builder.hpp"
 #include "model/symbol.hpp"
 #include "model/utility.hpp"
@@ -34,6 +37,7 @@
 
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -45,6 +49,7 @@
 #include <gtest/gtest.h>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -328,12 +333,12 @@ TEST_F(IbPaper, ADaysRollSyncsTheContractsInWhileTheEngineAndItsStrategiesRunOn)
     EXPECT_TRUE(started(engine, name)) << "the strategy runs on";
     const auto [options, expired] = engine.event_loop()->on_event_thread([&] {
         const model::Portfolio* p = engine.find_portfolio("SPY");
-        const auto today = model::new_york_date(std::chrono::system_clock::now());
+        const auto today = model::kNyse.date_of(std::chrono::system_clock::now());
         const model::Listing& listing = p->listing();
         std::size_t gone = 0;
         for (std::size_t c = 0; c < listing.size(); ++c) {
             const model::DateTime expiry = listing.chains()[listing.chain_of(c)].expiry;
-            gone += model::new_york_date(expiry) < today ? 1 : 0;
+            gone += model::kNyse.date_of(expiry) < today ? 1 : 0;
         }
         return std::pair{p->listing().size(), gone};
     });
@@ -433,21 +438,32 @@ TEST_F(IbPaper, AnOrderIbRefusesIsRejectedWithItsReason) {
     const auto made = live::make_main();
     core::Main& engine = *made;
     const std::string strategy = engine.add_strategy("RandomBuyStrategy", "SPY", kQuiet);
+    if (env("OPTRA_IB_PAPER_RAW") == "1") {
+        engine.log_engine()->set_level(utilities::DEBUG); // what IB sends back, as it comes
+    }
     engine.connect();
     // No quotes here (market data is not started; closed days have none): the age check would
-    // refuse the order before IB sees it.
-    engine.set_risk_settings({{"max_quote_age_seconds", 0}});
-    // A price off SPY's tick (0.01): IB refuses it (110) before it ever works.
+    // refuse the order before IB sees it; nor are the engine's own size and delta limits to.
+    engine.set_risk_settings({{"max_quote_age_seconds", 0},
+                              {"max_share_order", 100'000'000},
+                              {"max_share_position", 1'000'000'000},
+                              {"max_strategy_delta_usd", 0},
+                              {"max_total_delta_usd", 0}});
+    // A million shares at 100 (far below SPY: it would never fill): 100 million USD, far past
+    // what the paper account can carry, which IB checks as it takes the order. (A price off the
+    // tick is no refusal: IB rounds it to the tick, 2026-10-20.)
+    constexpr double kShares = 1'000'000;
     const std::string order_id = engine.event_loop()->on_event_thread([&] {
         const std::array leg{model::contract_leg(*engine.find_contract("SPY"), model::Side::BUY)};
         return engine.send_order(
             optra_tests::record_of(engine, strategy),
-            model::order_request(leg, kPrice + 0.001, 1, model::OrderType::LIMIT));
+            model::order_request(leg, kPrice, kShares, model::OrderType::LIMIT));
     });
     ASSERT_FALSE(order_id.empty()) << "the gateway took no order";
     const std::optional<Status> status =
         wait_for(engine, order_id, [](Status s) { return s == Status::REJECTED || working(s); });
-    if (status && working(*status)) { // the market closed: IB holds the order for the open, its price unchecked
+    // IB took it unchecked (it checked the funds as it took the order on 2026-10-20).
+    if (status && working(*status)) {
         // Cancelled at IB, with any an earlier run of this test left working there: this test's
         // client placed them all, under lower ids (one IB no longer has answers that it has not).
         for (int id = 1; id < std::stoi(order_id); ++id) {
@@ -460,7 +476,7 @@ TEST_F(IbPaper, AnOrderIbRefusesIsRejectedWithItsReason) {
         std::this_thread::sleep_for(2s); // IB's answers to the earlier ones
         engine.gateway()->disconnect();
         engine.close();
-        GTEST_SKIP() << "the market is closed: IB checks the price only when it sends the order on";
+        GTEST_SKIP() << "IB took the order without checking the account's funds: nothing refused";
     }
     EXPECT_EQ(status, Status::REJECTED) << "IB refused it and the engine says so";
     engine.gateway()->disconnect();
@@ -473,10 +489,10 @@ TEST_F(IbPaper, AnExpiryTheEngineDidNotSeeSettlesAtIbsClose) {
     const std::string db = build_file("ib_paper_settle.db");
     copy_db(db, true);
     use(db, 53);
-    auto expiry = model::new_york_date(std::chrono::system_clock::now());
+    auto expiry = model::kNyse.date_of(std::chrono::system_clock::now());
     do {
         expiry = std::chrono::sys_days{expiry} - std::chrono::days{1};
-    } while (!model::is_trading_day(expiry));
+    } while (!model::kNyse.is_trading_day(expiry));
     const std::string option = model::option_symbol(
         {.root = "SPY", .expiry = expiry, .type = model::OptionType::CALL, .strike = 2000});
     std::string strategy;
@@ -486,7 +502,7 @@ TEST_F(IbPaper, AnExpiryTheEngineDidNotSeeSettlesAtIbsClose) {
         strategy = engine.add_strategy("RandomBuyStrategy", "SPY", kQuiet);
         const auto [order, fill] = model::filled_order(
             "settle-test-1", option, model::Side::BUY, 1, 0.01,
-            model::new_york_time(expiry, std::chrono::hours{10}), "test: held through the close");
+            model::kNyse.at(expiry, std::chrono::hours{10}), "test: held through the close");
         engine.database()->save_order(strategy, order);
         engine.database()->save_fill(strategy, fill);
         engine.close();
@@ -516,6 +532,46 @@ TEST_F(IbPaper, AnExpiryTheEngineDidNotSeeSettlesAtIbsClose) {
     }
     engine.gateway()->disconnect();
     engine.close();
+}
+
+/** An engine that missed the open takes the day's open, high and low from IB's minute bars: here
+ * the last trading day's, whole. */
+TEST_F(IbPaper, ADaysOpenHighAndLowComeFromIbsMinuteBars) {
+    use(build_file("ib_paper_range.db"), 55);
+    auto day = model::kNyse.date_of(std::chrono::system_clock::now());
+    do {
+        day = std::chrono::sys_days{day} - std::chrono::days{1};
+    } while (!model::kNyse.is_trading_day(day));
+    model::Portfolios portfolios;
+    portfolios.ensure_portfolios_created();
+    core::BookkeepingEngine bookkeeping(nullptr, portfolios);
+    const core::StrategyEngine strategies(nullptr, portfolios, bookkeeping, {});
+    core::MarketDataEngine engine(nullptr, portfolios, strategies,
+                                  std::make_unique<adapters::IbMarketData>(),
+                                  [](const model::PortfolioSnapshot&) {});
+    std::mutex m;
+    std::condition_variable answered;
+    std::optional<std::array<double, 3>> range;
+    engine.on_day_range([&](const std::string& underlying, std::chrono::year_month_day on,
+                            double open, double high, double low) {
+        const std::lock_guard lock(m);
+        EXPECT_EQ(underlying, "SPY");
+        EXPECT_EQ(on, day);
+        range = std::array{open, high, low};
+        answered.notify_all();
+    });
+    engine.start();
+    ASSERT_TRUE(engine.ask_day_range("SPY", day));
+    std::unique_lock lock(m);
+    ASSERT_TRUE(answered.wait_for(lock, kWait, [&] { return range.has_value(); }))
+        << "IB's minute bars of SPY on " << day;
+    const auto [open, high, low] = *range;
+    std::cout << std::format("SPY on {}: open {}, high {}, low {}\n", day, open, high, low);
+    EXPECT_GT(low, 0.0);
+    EXPECT_LE(low, open);
+    EXPECT_GE(high, open);
+    lock.unlock();
+    engine.stop();
 }
 
 /** Combo fills at IB are booked as leg fills (the BAG execution is not booked), and the holding is
@@ -632,7 +688,8 @@ TEST_F(IbPaper, ComboFillsAreBookedAsLegs) {
         return best;
     });
     ASSERT_FALSE(chain.empty()) << "no SPXW expiry after today in the database";
-    engine.market_data()->subscribe_chains(strategy, std::vector{chain});
+    engine.event_loop()->on_event_thread(
+        [&] { engine.strategy_engine()->subscribe_chains(strategy, std::vector{chain}); });
     engine.market_data()->start();
     double forward = 0;
     for (auto until = std::chrono::steady_clock::now() + 90s;

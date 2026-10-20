@@ -31,7 +31,7 @@ API_HEADERS = {
     "constant.hpp": "engine/model/constant.hpp",
     "utility.hpp": "engine/model/utility.hpp",
     "order_builder.hpp": "engine/model/order_builder.hpp",
-    "kernel.h": "engine/quant/kernel.h",
+    "engine_api.h": "engine/quant/engine_api.h",
     "zero_dte_buyer.hpp": "strategy/demo/zero_dte_buyer.hpp",
 }
 EXAMPLE = ("strategy/demo/random_buy.hpp", "strategy/demo/random_buy.cpp")
@@ -57,6 +57,11 @@ RULES = [
     "at ratio 1 is that contract's own order. close_all_strategy_positions; holds_options(), has_active_order(), "
     "holding(). "
     "register_hedging keeps the delta near zero with the underlying.",
+    "One idea, one class: the features it reads are computed in it as it runs, from the quotes, IVs, smiles and "
+    "values by day the backtest gives; ComboStrategy is for a combo from the lab and sweeping a structure only. A "
+    "question that trades nothing is a strategy that only measures: it writes its answers with write_value(name, "
+    "value), one value a name a day (the last written stands; a shape within the day as one value a bucket), and "
+    "get_trial gives them back by day.",
     "Code it calls is in its own file or in the engine: not another strategy's .cpp. Each strategy file is a library "
     "of its own, so a base shared by several strategies is a header only (as demo/zero_dte_buyer.hpp).",
     "The flow: put_strategy (a name of lower case letters, digits and _; it builds and returns the class and its "

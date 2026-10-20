@@ -34,15 +34,16 @@ What differs between modes is only what is plugged in:
 |---|---|
 | `core/main.*` | `core::Main`: owns the engines and the ports, routes every event in a fixed order |
 | `core/event_loop.*` | the event thread: one ordered queue, a snapshot slot per portfolio |
-| `core/bookkeeping/` | each strategy's orders, fills and holding; valuation each bar, settlement at expiry, the check against the broker |
-| `core/risk/` | the limits, the exposure marks, the daily loss, the halt |
-| `core/strategy/` | the strategies, their states, callback timing, the delta hedges they ask for |
-| `core/market_data/` | turns live quotes into priced snapshots on its own thread |
+| `core/bookkeeping/` | each strategy's orders, fills and holding; valuation each bar; a position's life: settlement at expiry, the closes asked for when the engine missed one, closing before a share-settled expiry or an ex-dividend day; the check against the broker |
+| `core/risk/` | the limits (no opening inside the window before a share-settled expiry), the exposure marks, the daily loss, the halt |
+| `core/strategy/` | the strategies, their states, callback timing, the delta hedges they ask for; what they want streamed (the chains they subscribe, the options held or ordered today), one set that live market data plans from and a backtest's day loads |
+| `core/market_data/` | live only: streams what the strategies want and turns the quotes into priced snapshots on its own thread |
 | `core/log/` | the log thread |
 | `core/gateway/`, `core/database/` | the ports: `core::Gateway`, `core::MarketData`, `core::Database` |
 | `assembly/` | `Main` put together: live (`live.*`, with the trading days) and backtest (`backtest.*`: the replay, a day, many trials) |
 | `adapters/` | the ports' implementations: IB, the backtest venue, the simulated market, the Parquet days, SQLite |
-| `model/` | contracts, orders, fills, the portfolio (`Listing`, `Portfolio`, `PortfolioSnapshot`), a strategy's record, `Param` |
+| `pricing/` | a snapshot's quotes made into forwards, IVs and Greeks, then each chain's smile (an SVI fitted to its IVs): the same code for live market data and the backtest's days |
+| `model/` | contracts, orders, fills, the portfolio (`Listing`, `Portfolio`, `PortfolioSnapshot`), what each portfolio is (`portfolio_spec.hpp`) and its calendar (`session_calendar.hpp`: trading days, hours, roll, expiry), a strategy's record, `Param` |
 | `strategy/` | what a strategy is written against: `Strategy`, `StrategyContext`, the registry |
 | `quant/` | the numerical library and its C ABI ([research.md](research.md#the-methods)) |
 | `entry/` | the programs and the gRPC API (`optra_engine.proto`) |
@@ -64,15 +65,19 @@ Rules:
 | It reads | It does |
 |---|---|
 | its record (name, class, portfolio, setting) | `send_order` |
-| its portfolio | `register_hedging` / `unregister_hedging` |
+| its portfolio: quotes, IVs and Greeks, each chain's forward and smile (`Chain::smile`, `smile_iv`, `smile_iv_at_delta`) | `register_hedging` / `unregister_hedging` |
 | its holding, whether an order is working | `subscribe_chains` |
-| values by day (`daily()`, from `data/daily`) | `write_log`, `set_error` |
+| time to an expiry: calendar years in every IV (365 days, as Cboe's VIX), or `variance_years` on a variance clock (each half hour's share of a session's variance, a night before each open) | |
+| values by day (`daily()`, from `data/daily`) | `write_log`, `set_error`; `write_value`: a value of the day, reported with the backtest's days (what a strategy that only measures answers with) |
 
 - It cannot reach the database, the network or other strategies.
+- Heavy computation does not belong in a callback: it runs on the event thread, which every portfolio and fill waits on. What is computed per chain (forwards, smiles) arrives with the snapshot, computed on the market-data thread live and once per day in a backtest.
 - States: added → inited → running, or error. Each step only from the one before; only a running strategy can be stopped, so a stop never closes positions by mistake. A callback that throws, or keeps running over its time budget, puts it in error until it is inited again.
 - Each `.cpp` under `strategy/` is its own library, loaded at run time. Backtests load the demo and research strategies; a trading engine loads the demo ones and those installed for its account, which takes a person. Agent-written code stays off a trading account.
 
-**ComboStrategy** (`strategy/demo/`) trades one combination described by rules: up to four legs, each with ratio, call or put, strike relative to the forward, days to expiry. It opens and closes at set minutes, exits on profit or loss, can delta-hedge, and can wait for a Heston edge. Research ideas become settings of it.
+**ComboStrategy** (`strategy/demo/`) trades one combination described by rules: up to four legs, each with ratio, call or put, strike relative to the forward, days to expiry. It opens and closes at set minutes, exits on profit or loss, can delta-hedge, and can wait for an edge over each leg's chain's fitted smile. It runs a combo picked in the lab and sweeps a structure; a new idea is a class of its own in `strategy/research/`.
+
+**SurfaceStrategy** (`strategy/demo/`) trades nothing: each day, 15 minutes before the close, it measures the volatility surface (ATM IV at 7, 30 and 90 days, the 25 delta risk reversal and butterfly) for the values by day ([data.md](data.md#values-by-day)).
 
 ## Booking orders and fills
 
@@ -120,6 +125,7 @@ One process all day. The event thread runs the strategies and books everything; 
 
 - **Restart**: every order, fill and setting is saved as it happens. On start each strategy comes back under its name, its holding replayed from its orders and fills; the engine catches up with IB and compares positions contract by contract; no strategy starts until they agree.
 - **A strategy restarted mid-day** starts with its members empty and reads what it did today from its holding (`traded_today`, `last_order_minute`, `holds_options`). A backtest trial's `restart_minute` makes the strategy again at that minute each day to check this.
+- **The engine started after the open**: the underlying's open, high and low of the day (`Portfolio::day_open`, `day_high`, `day_low`) are asked of the source once its first quote comes after the first five minutes: IB's one-minute bars of the day (midpoints; an index's trades), the open being the first minute's close as a backtest's first bar. Until the answer, `Strategy::saw_open` is false.
 - **Expiry**: at the New York close the engine settles expiring options itself: SPXW and XSP in cash at intrinsic value, SPY, QQQ and IWM in the money by delivering shares at the strike (`model/portfolio_spec.hpp`). If the engine was down at the close, it asks the broker for that day's official close and settles at it when the answer comes; the strategy cannot start until then (the operator can settle by hand).
 - **Dividends**: the day before an ex-dividend day of a share-settled underlying, combos with a call sold are closed before the close (early exercise). The ex-dividend days are read from `data/daily/<underlying>_ex_dividend.csv`; without that file the rule does not apply.
 - **Names**: orders and fills are saved under the strategy's name, so a name is never reused and a removed strategy can be restored with its holding.
@@ -129,17 +135,17 @@ One process all day. The event thread runs the strategies and books everything; 
 
 ```bash
 ./engine/build/entry_backtest --list-strategies          # every strategy and its parameters
-./engine/build/entry_backtest --files data/SPY/SPY-2025-03/*.parquet ComboStrategy leg1_ratio=1 leg2_ratio=1 leg2_right=1 \
-    --costs '{"fee_rate": 1.2, "multi_leg_fill_position": 0.5}'
+./engine/build/entry_backtest --files data/backtest/SPY/SPY-2025-03/*.parquet ComboStrategy leg1_ratio=1 leg2_ratio=1 leg2_right=1 \
+    --costs '{"fee_scale": 1.0, "multi_leg_fill_position": 0.5}'
 ./engine/build/entry_backtest --batch spec.json                # many trials over the same days
 ```
 
 - Days run as live trades them: one engine and one strategy, in date order, each morning's contracts rolled in from the day's file.
-- **Fills**: each minute, orders from the minute before fill at a set position in each leg's spread (ask or bid by default; one position for single-leg orders, another for combos), optionally limited to the size shown or delayed. These costs are one object defined in the server (fees, the two positions, the fill model, the delay, the risk limits) and handed to the engine whole.
+- **Fills**: each minute, orders from the minute before fill at a set position in each leg's spread (ask or bid by default; one position for single-leg orders, another for combos), optionally limited to the size shown or delayed. These costs are one object defined in the server (a scale on the fees, the two positions, the fill model, the delay, the risk limits) and handed to the engine whole. The fees themselves are the engine's: IBKR's commission by an option's price and an order's least (`BacktestGateway`), and each portfolio's exchange fee (`model::PortfolioSpec`, SPXW's Cboe index fee); a new exchange or root is a line there.
 - **At the close**: expiring options settle, working orders are cancelled, holdings carry to the next day.
 - **Batch**: many trials over the same days, each on its own engine, each day read and priced once for all ([backtesting.md](backtesting.md)). A trial gives exactly the result it gives alone.
-- **Output**: one JSON line per trial (its days and round trips as columns), then a line with the days (each file, its bars and quotes, the underlying's open and close); fills only when asked. The engine does not sum days; the server does, in one place, for the ledger, the tools and the page.
-- **Day cache**: a day's contracts and minutes in a `.day` file, each chain loaded in a `.chain` file (quotes, forwards, IVs), read in place. A chain is loaded only when a strategy subscribes to it, holds or orders one of its options. Greeks are not stored: they are priced on demand by the live code, bit for bit the same.
+- **Output**: for a person, text: the run, its setting and costs, each day's net P&L, fees and orders, the round trips, the drawdown and the P&L by source (a run from the command line is charged IBKR's fees unless `--costs` says otherwise). With `--json` (and always with `--batch`), one JSON line per trial (its days and round trips as columns), then a line with the days (each file, its bars and quotes, the underlying's open and close); fills only when asked. The server reads only the JSON and sums the days, in one place, for the ledger, the tools and the page.
+- **Day cache**: a day's contracts and minutes in a `.day` file, each chain loaded in a `.chain` file (quotes, forwards, IVs, each minute's smile), read in place. A chain is loaded only when a strategy subscribes to it, holds or orders one of its options. Greeks are not stored: they are priced on demand by the live code, bit for bit the same.
 - **Round trips**: from the bar a position opens to the bar it holds nothing again, the same day or later (an option exercised ends when its delivered shares are sold the next morning). Each has its P&L after fees and by source, its maximum loss at the open, what its orders paid over the mids, and what its options settled for. Per-trade measures (R, win rate, number of trades) are built from these.
 - **Errors**: a run stops rather than give a wrong answer, for example when a day is missing between two held days. Logs go to stderr. The data format is in [data.md](data.md).
 
@@ -158,7 +164,7 @@ set -a && . ./.env && set +a && cd engine/build && OPTRA_IB_PAPER_TESTS=1 OPTRA_
 
 | Case | What IB does | What the engine does |
 |---|---|---|
-| a single option | several state reports, one execution, timestamped in IB Gateway's time zone | stamps fills itself |
+| a single option | several state reports, one execution, timestamped in IB Gateway's time zone | stamps each fill with the engine's time as it books it, as it stamps an order as it sends it |
 | a combination (BAG) | three executions under one order number: the combination at its net price, then each leg; the order reported filled before the legs arrive | books only the legs |
 | a combination of one option | no answer at all | sends a single option as an ordinary order |
 | after reconnecting | resends the day's executions for the client number | drops those already booked; one client number per database |
@@ -175,6 +181,7 @@ secType=OPT  SPXW 261013C07820000  side=SLD price=10.1    the second leg
 ```bash
 ./build.sh r                                   # Release: the programs and the numerics library
 ./build.sh r 0 g                               # a clean build with the Interactive Brokers connection
+cmake --build engine/build -j4                 # the tests and benchmarks too (build.sh builds only the programs)
 ctest --test-dir engine/build                  # the unit tests: no network, no database file
 scripts/bench.sh --check                       # the latency benchmarks against their baseline
 scripts/test_sanitize.sh thread                # the threaded tests under ThreadSanitizer (or address)

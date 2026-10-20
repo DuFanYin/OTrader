@@ -11,9 +11,10 @@
 #include "utilities/text.hpp"
 #include <algorithm>
 #include <array>
-#include <atomic>
+#include <barrier>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <deque>
 #include <filesystem>
 #include <format>
@@ -22,6 +23,7 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <stop_token>
 #include <thread>
 #include <tuple>
 #include <utility>
@@ -33,10 +35,11 @@ namespace {
 // What a day measures.
 
 /** The trading days from the one `from` falls on to the one `to` does, both counted. */
-auto trading_days(model::DateTime from, model::DateTime to) -> int {
-    const std::chrono::year_month_day last = model::new_york_date(to);
+auto trading_days(const model::SessionCalendar& calendar, model::DateTime from, model::DateTime to)
+    -> int {
+    const std::chrono::year_month_day last = calendar.date_of(to);
     int n = 1;
-    for (auto d = model::new_york_date(from); d < last; d = model::next_trading_day(d)) {
+    for (auto d = calendar.date_of(from); d < last; d = calendar.next_trading_day(d)) {
         ++n;
     }
     return n;
@@ -51,37 +54,13 @@ constexpr std::string_view kSettlement = "settle-"; // the order ids settlement 
 
 } // namespace
 
-// ---- Replay
-
-auto Replay::roll(const adapters::HistoricalData& day) -> std::vector<std::string> {
-    const std::string& name = day.portfolio_name();
-    if (structure_.find_portfolio(name) == nullptr) {
-        day.build_portfolio(structure_);
-        return {};
-    }
-    std::vector<std::string> dropped =
-        structure_.replace_contracts(name, day.underlying(), day.listing());
-    if (model::Portfolio* portfolio = structure_.find_portfolio(name)) {
-        portfolio->set_trading_day(std::chrono::floor<std::chrono::days>(day.day()));
-    }
-    return dropped;
-}
-
-void Replay::apply(const std::shared_ptr<const adapters::HistoricalData>& day, std::size_t i) {
-    if (model::Portfolio* portfolio = structure_.find_portfolio(day->portfolio_name())) {
-        model::PortfolioSnapshot& minute = minutes_[portfolio];
-        day->fill(i, minute);
-        portfolio->apply(minute, std::shared_ptr<const void>(day, &minute)); // read where it is
-    }
-}
-
 // ---- Backtest: the engine
 
-Backtest::Backtest(Replay& replay)
+Backtest::Backtest(adapters::Replay& replay)
     : replay_(replay),
       main_(
           core::Main::Ports{
-              // No clock: the data's time, the latest snapshot's.
+              // No clock: each bar's time (run_bar).
               .database = [](utilities::Logger*) -> std::unique_ptr<core::Database> {
                   return std::make_unique<adapters::BacktestDatabase>();
               },
@@ -92,7 +71,7 @@ Backtest::Backtest(Replay& replay)
                   backtest_gateway_ = gateway.get();
                   return gateway;
               },
-              .portfolios = &replay_.structure_},
+              .portfolios = &replay_.portfolios()},
           // Quiet from the start: stdout carries the JSON result.
           utilities::DISABLED) {
     main_.log_engine()->set_clock([this] { return main_.now(); });
@@ -118,7 +97,7 @@ auto Backtest::use_day(const adapters::LoadedDay& day, std::span<const std::stri
                                std::vector<std::string>(dropped.begin(), dropped.end()));
     }
     used_a_day_ = true;
-    portfolio_ = replay_.structure_.find_portfolio(day->portfolio_name());
+    portfolio_ = replay_.portfolios().find_portfolio(day->portfolio_name());
     return day_.get();
 }
 
@@ -168,9 +147,9 @@ auto Backtest::begin_day() -> bool {
 }
 
 void Backtest::load_chains_wanted() {
-    const core::MarketDataEngine& market_data = *main_.market_data();
-    wanted_changes_ = market_data.wanted_changes();
-    day_->load_chains(market_data.chains_wanted());
+    const core::StrategyEngine& strategies = *main_.strategy_engine();
+    wanted_changes_ = strategies.wanted_changes();
+    replay_.load(*day_, strategies.wanted()->chains);
     if (std::string why = day_->load_error(); !why.empty() &&
                                                    !std::ranges::contains(result_.errors, why)) {
         result_.errors.push_back(std::move(why));
@@ -179,10 +158,11 @@ void Backtest::load_chains_wanted() {
 
 void Backtest::run_bar(std::size_t i) {
     if (restart_minute_ > 0 &&
-        model::minutes_since_open(portfolio_->frame().datetime) == restart_minute_) {
+        portfolio_->calendar().minutes_since_open(portfolio_->frame().datetime) ==
+            restart_minute_) {
         main_.strategy_engine()->make_again(strategy_->name);
     }
-    const bool asked = main_.market_data()->wanted_changes() != wanted_changes_;
+    const bool asked = main_.strategy_engine()->wanted_changes() != wanted_changes_;
     if (asked) { // a chain asked for since
         load_chains_wanted();
         // The bar applied again, so that the chain is read from this bar on, by this engine and
@@ -190,8 +170,12 @@ void Backtest::run_bar(std::size_t i) {
         replay_.apply(day_, i);
     }
     const model::Frame& bar = portfolio_->frame();
-    main_.snapshot_applied(bar);
+    main_.set_time(bar.datetime);
+    // The orders sent before fill at this bar's quotes, and their fills come first, as live they
+    // come ahead of the quotes after them; whatever on_snapshot or on_timer sends now fills at the
+    // next bar.
     backtest_gateway_->execute_pending_orders();
+    main_.snapshot_applied(bar);
     main_.event_loop()->put_event(model::Event(model::EventType::Timer));
     measure(i, bar);
 }
@@ -219,6 +203,7 @@ auto Backtest::end_day() -> DailyResult {
         result_.summary.*source -= before_.*source;
     }
     result_.flat_at_close = holding.is_flat();
+    result_.values = main_.strategy_engine()->take_values(name);
     before_ = now;
     fees_before_ += result_.daily_fees;
 
@@ -304,9 +289,7 @@ void Backtest::track_round_trip(const model::Frame& bar) {
             ++trip.share_fills;
             continue;
         }
-        const model::Contract* contract =
-            portfolio != nullptr ? portfolio->contract(fill.symbol) : nullptr;
-        const double multiplier = contract != nullptr ? contract->multiplier : 100.0;
+        const double multiplier = main_.portfolios()->multiplier(fill.symbol);
         const double sign = fill.side == model::Side::BUY ? 1.0 : -1.0;
         if (fill.order_id.starts_with(kSettlement)) {
             trip.settled -= sign * fill.price * fill.quantity * multiplier;
@@ -330,7 +313,7 @@ void Backtest::track_round_trip(const model::Frame& bar) {
     fees_at_last_bar_ = fees;
     if (holding.is_flat()) {
         trip.closed = bar.datetime;
-        trip.days = trading_days(trip.opened, trip.closed);
+        trip.days = trading_days(portfolio_->calendar(), trip.opened, trip.closed);
         round_trips_.push_back(std::move(trip));
         open_trip_.reset();
     }
@@ -340,7 +323,7 @@ auto Backtest::round_trips() const -> std::vector<RoundTrip> {
     std::vector<RoundTrip> out = round_trips_;
     if (open_trip_) {
         RoundTrip& still = out.emplace_back(*open_trip_);
-        still.days = trading_days(still.opened, last_bar_time_);
+        still.days = trading_days(portfolio_->calendar(), still.opened, last_bar_time_);
     }
     return out;
 }
@@ -373,34 +356,28 @@ auto in_date_order(std::vector<std::string> files) -> std::vector<std::string> {
     return files;
 }
 
-/** fn(0) ... fn(count - 1), on up to `threads` threads taking them in turn. */
-template <typename Fn> void on_threads(std::size_t count, std::size_t threads, Fn&& fn) {
-    std::atomic<std::size_t> next{0};
-    const auto work = [&] {
-        for (std::size_t i = next++; i < count; i = next++) {
-            fn(i);
-        }
-    };
-    if (threads <= 1) {
-        work();
-        return;
-    }
-    std::vector<std::jthread> workers;
-    workers.reserve(threads);
-    for (std::size_t t = 0; t < threads; ++t) {
-        workers.emplace_back(work);
-    }
-}
-
 /** The days in order, each loaded ahead of its turn on a thread of its own, with the chains the
  * days run so far loaded (wanted: their days to expiry), as a day's engines will most likely ask
- * for them again: up to `ahead` at a time. */
+ * for them again: up to `ahead` at a time. A day is freed on a thread of the loader's when the
+ * last engine lets go of it (its contracts and chains are thousands of blocks and mappings), not
+ * on that engine's: the loader outlives the engines. */
 class DayLoader {
   public:
     DayLoader(std::span<const std::string> files, double risk_free_rate, std::string iv_price_mode,
               std::string cache_dir, std::size_t ahead)
         : files_(files), risk_free_rate_(risk_free_rate), iv_price_mode_(std::move(iv_price_mode)),
-          cache_dir_(std::move(cache_dir)), ahead_(std::max<std::size_t>(ahead, 1)) {}
+          cache_dir_(std::move(cache_dir)), ahead_(std::max<std::size_t>(ahead, 1)),
+          freeing_([this](const std::stop_token& stop) { free_days(stop); }) {}
+    DayLoader(const DayLoader&) = delete;
+    DayLoader& operator=(const DayLoader&) = delete;
+    ~DayLoader() {
+        loading_.clear(); // a day loaded and never taken is freed too
+        {
+            const std::scoped_lock lock(to_free_mutex_);
+            freeing_.request_stop();
+        }
+        to_free_ready_.notify_one();
+    }
 
     /** The next day, and why it did not load (empty when it did). */
     std::pair<adapters::LoadedDay, std::string> next() {
@@ -431,9 +408,17 @@ class DayLoader {
 
   private:
     [[nodiscard]] adapters::LoadedDay load(const std::string& file,
-                                           std::vector<int> days_to_expiry) const {
-        adapters::LoadedDay day =
+                                           std::vector<int> days_to_expiry) {
+        adapters::LoadedDay loaded =
             adapters::load_day(file, risk_free_rate_, iv_price_mode_, cache_dir_);
+        adapters::HistoricalData* at = loaded.get();
+        // Its last holder hands it to free_days.
+        adapters::LoadedDay day(
+            at, [this, loaded = std::move(loaded)](adapters::HistoricalData* /*at*/) mutable {
+                const std::scoped_lock lock(to_free_mutex_);
+                to_free_.push_back(std::move(loaded));
+                to_free_ready_.notify_one();
+            });
         if (day->has_data() && !days_to_expiry.empty()) {
             const auto today = std::chrono::floor<std::chrono::days>(day->day());
             std::vector<std::string> chains;
@@ -449,6 +434,20 @@ class DayLoader {
         return day;
     }
 
+    void free_days(const std::stop_token& stop) {
+        std::unique_lock lock(to_free_mutex_);
+        while (true) {
+            to_free_ready_.wait(lock, [&] { return !to_free_.empty() || stop.stop_requested(); });
+            if (to_free_.empty()) {
+                return; // stopped: the engines have let go of every day
+            }
+            std::vector<adapters::LoadedDay> days = std::exchange(to_free_, {});
+            lock.unlock();
+            days.clear();
+            lock.lock();
+        }
+    }
+
     std::span<const std::string> files_;
     double risk_free_rate_;
     std::string iv_price_mode_;
@@ -457,13 +456,17 @@ class DayLoader {
     std::size_t queued_ = 0; // the next day to start loading
     std::deque<std::future<adapters::LoadedDay>> loading_;
     std::vector<int> days_to_expiry_; // of the chains the day run last loaded
+    std::mutex to_free_mutex_;
+    std::condition_variable to_free_ready_;
+    std::vector<adapters::LoadedDay> to_free_; // let go of by the engines, to free
+    std::jthread freeing_;                     // last: it reads the members above
 };
 
 /** One trial over the days: which days its engine may take, the strategy added on the first, a
  * throw stopping this trial alone, its log kept, its run summed. */
 class TrialRun {
   public:
-    TrialRun(const BacktestTrial& trial, utilities::LogLevel log_level, Replay& replay)
+    TrialRun(const BacktestTrial& trial, utilities::LogLevel log_level, adapters::Replay& replay)
         : trial_(trial), backtest_(replay) {
         backtest_.configure_execution(trial.execution);
         backtest_.keep_metrics(trial.minute_metrics);
@@ -563,7 +566,8 @@ class TrialRun {
             }
             return false;
         }
-        if (held && last_day_ && date && model::next_trading_day(*last_day_) != *date) {
+        if (held && last_day_ && date &&
+            model::calendar_of(day->portfolio_name()).next_trading_day(*last_day_) != *date) {
             stop(std::format("No day between {:%F} and {:%F}, which the holding would skip: the "
                              "run stops here",
                              *last_day_, *date));
@@ -748,7 +752,7 @@ class TrialGroup {
     }
 
   private:
-    Replay replay_; // before the runs: their engines are on it
+    adapters::Replay replay_; // before the runs: their engines are on it
     std::vector<std::unique_ptr<TrialRun>> runs_;
 };
 
@@ -774,6 +778,7 @@ run_backtests(const std::vector<std::string>& parquet_files, std::span<const Bac
         threads = std::max(1U, std::thread::hardware_concurrency());
     }
     threads = std::min(threads, trials.size());
+    DayLoader days(files, risk_free_rate, iv_price_mode, cache_dir, days_ahead); // outlives groups
     // Trial r in group r % threads.
     std::vector<std::unique_ptr<TrialGroup>> groups;
     for (std::size_t g = 0; g < threads; ++g) {
@@ -783,19 +788,47 @@ run_backtests(const std::vector<std::string>& parquet_files, std::span<const Bac
         groups[r % threads]->add(trials[r], log_level);
     }
 
-    DayLoader days(files, risk_free_rate, iv_price_mode, cache_dir, days_ahead);
+    // A thread a group for the whole run; each day started on all at once and awaited (the
+    // barrier orders the day's fields before and after).
+    std::size_t index = 0;
+    adapters::LoadedDay day;
+    std::string load_error;
+    bool finished = false;
+    std::barrier sync(static_cast<std::ptrdiff_t>(groups.size() + 1));
+    std::vector<std::jthread> workers;
+    if (groups.size() > 1) {
+        for (std::size_t g = 0; g < groups.size(); ++g) {
+            workers.emplace_back([&, g] {
+                for (sync.arrive_and_wait(); !finished; sync.arrive_and_wait()) {
+                    groups[g]->run_day(index, day, load_error);
+                    sync.arrive_and_wait();
+                }
+            });
+        }
+    }
     for (std::size_t i = 0; i < files.size(); ++i) {
         if (!groups.empty() &&
             std::ranges::all_of(groups, [](const auto& group) { return group->stopped(); })) {
             break;
         }
-        const auto [day, load_error] = days.next();
-        on_threads(groups.size(), threads,
-                   [&](std::size_t g) { groups[g]->run_day(i, day, load_error); });
+        std::tie(day, load_error) = days.next();
+        index = i;
+        if (groups.size() == 1) {
+            groups.front()->run_day(i, day, load_error);
+        } else if (!workers.empty()) {
+            sync.arrive_and_wait(); // started
+            sync.arrive_and_wait(); // done
+        }
         if (load_error.empty()) {
             days.ran(*day);
         }
+        day.reset();
     }
+    finished = true;
+    if (!workers.empty()) {
+        sync.arrive_and_wait(); // each sees finished and returns
+    }
+    workers.clear();
 
     const auto took = std::chrono::system_clock::now() - start;
     std::vector<BacktestRunSummary> summaries;

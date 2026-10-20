@@ -5,6 +5,7 @@
  * in shares), and orders from before a restart are cancelled.
  */
 #include "adapters/gateway/simulated_gateway.hpp"
+#include "model/session_calendar.hpp"
 #include "model/portfolios.hpp"
 #include "model/symbol.hpp"
 #include "model/utility.hpp"
@@ -81,7 +82,7 @@ class Simulated : public ::testing::Test {
     }
     auto venue() -> std::unique_ptr<SimulatedGateway> {
         auto v = std::make_unique<SimulatedGateway>(portfolios, std::vector<std::string>{}, file,
-                                                    [this] { return now; }, 0.0);
+                                                    [this] { return now; });
         v->set_callbacks([this](const model::Order& o) { orders.push_back(o); },
                          [this](const model::Fill& f) { fills.push_back(f); });
         return v;
@@ -103,7 +104,8 @@ TEST_F(Simulated, AFillGoesIntoTheAccountAndTheNextRunReadsItBack) {
     EXPECT_EQ(fills.front().price, 1.10);
     const core::BrokerAccount bought = v->query_account().get();
     EXPECT_EQ(position(bought, kCall), 2.0);
-    EXPECT_DOUBLE_EQ(value(bought, "TotalCashValue"), SimulatedGateway::kStartingCash - 220.0);
+    // IB's fees: 2 x 0.65 a contract (at least 1 an order).
+    EXPECT_DOUBLE_EQ(value(bought, "TotalCashValue"), SimulatedGateway::kStartingCash - 220.0 - 1.3);
 
     quote(605.0, 1.20, 1.30);
     v->on_minute(); // marked at the mid
@@ -114,23 +116,25 @@ TEST_F(Simulated, AFillGoesIntoTheAccountAndTheNextRunReadsItBack) {
     const core::BrokerAccount sold = venue()->query_account().get(); // the next run's, from the file
     EXPECT_EQ(position(sold, kCall), 1.0);
     EXPECT_DOUBLE_EQ(value(sold, "RealizedPnL"), 10.0); // 100 x (1.20 - 1.10)
-    EXPECT_DOUBLE_EQ(value(sold, "TotalCashValue"), SimulatedGateway::kStartingCash - 220.0 + 120.0);
+    EXPECT_DOUBLE_EQ(value(sold, "TotalCashValue"),
+                     SimulatedGateway::kStartingCash - 220.0 - 1.3 + 120.0 - 1.0); // the least
 }
 
 TEST_F(Simulated, AnOptionPastItsCloseIsSettledInShares) {
     auto v = venue();
     v->connect();
     v->send_order(order(kCall, model::Side::BUY, 1));
-    now = model::option_expiry_time(model::parse_option_symbol(kCall)->expiry) +
+    now = model::kNyse.expiry_time(model::parse_option_symbol(kCall)->expiry) +
           std::chrono::minutes(1);
     quote(605.0, 0.0, 0.0); // no quote for it after the close
     v->on_minute();
     const core::BrokerAccount settled = v->query_account().get();
     EXPECT_EQ(position(settled, kCall), 0.0);
     EXPECT_EQ(position(settled, "SPY"), 100.0); // exercised: 100 shares at the strike
-    // 110 paid for it; 4 of value a share in the money, 605 a share paid for the shares.
+    // 110 and a fee of 1 paid for it; 4 of value a share in the money, 605 a share paid for the
+    // shares.
     EXPECT_DOUBLE_EQ(value(settled, "TotalCashValue"),
-                     SimulatedGateway::kStartingCash - 110.0 + 400.0 - 60'500.0);
+                     SimulatedGateway::kStartingCash - 110.0 - 1.0 + 400.0 - 60'500.0);
 }
 
 TEST_F(Simulated, OrdersFromBeforeARestartAreCancelled) {

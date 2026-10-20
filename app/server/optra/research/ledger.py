@@ -41,7 +41,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from optra import settings
 from optra.infra import access
-from optra.research import batch, jobs, runner, code_identity
+from optra.research import batch, code_identity, jobs, runner, store
 from optra.research.store import db, lock as _lock, now
 from optra.research.space import canonical, expand, resolved
 from optra.research.strategies import built_strategies, strategy_classes, unknown_strategy
@@ -51,18 +51,19 @@ from optra.utils import files
 DEFAULT_BUDGET = 200
 CONTROL = ("RandomBuyStrategy", {"seed": 1.0})  # what a strategy must beat, run on the same days
 CONTROL_FAMILY = "control"
-BATCH_SIZE = 128  # trials a job holds; the jobs of the same days run together, up to jobs.BATCH_TRIALS
+BATCH_SIZE = 512  # trials a job holds (2026-10-20: 512 over SPXW's 2,386 days 71 s and 1.85 GB, under a worker's
+                  # 4.5 GB; SPY's 2,560 days in one job 76 s, in four of 128 99 s); the jobs of the same days run
+                  # together, up to jobs.BATCH_TRIALS
 
 def digest(value: Any, n: int = 16) -> str:
     return hashlib.sha256(canonical(value).encode()).hexdigest()[:n]
 
 
 def days_hash(day_files: list[Path]) -> str:
-    root = files.data_root().resolve()
     entries = []
     for f in day_files:
         st = f.stat()
-        entries.append([str(f.resolve().relative_to(root)), st.st_size, st.st_mtime_ns])
+        entries.append([files.ledger_name(f), st.st_size, st.st_mtime_ns])
     return digest(entries)
 
 
@@ -76,9 +77,9 @@ def holdout_from(root: str) -> date | None:
 
 
 def resolve_days(days: str | list[str], start: date | None = None, end: date | None = None,
-                 holdout: bool = False) -> list[Path]:
-    """A folder of days or the days themselves (under data/), in date order, between start and end, with
-    none in a holdout unless `holdout` (the promotion report's trials)."""
+                 reach_holdout: bool = False) -> tuple[list[Path], bool]:
+    """A folder of days or the days themselves (under data/), in date order, between start and end, and whether any
+    of them is in its portfolio's holdout: refused unless `reach_holdout` (a person's or the system's report)."""
     if isinstance(days, list):
         day_files = [files.inside_data(d) for d in days]
     else:
@@ -87,14 +88,18 @@ def resolve_days(days: str | list[str], start: date | None = None, end: date | N
                  and (end is None or (day_of(f) or end) <= end)]
     if not day_files:
         raise ValueError("no backtest days")
+    cuts: dict[str, date | None] = {}
+    reached = False
     for f in day_files:
         root = f.parent.parent.name
-        cut = holdout_from(root)
+        cut = cuts[root] if root in cuts else cuts.setdefault(root, holdout_from(root))
         d = held_day(f) or day_of(f)  # by the quotes' own times: a file renamed does not move its day
-        if not holdout and cut is not None and d is not None and d >= cut:
-            raise ValueError(f"{f.name} is in {root}'s holdout (from {cut}): experiments cannot use it; "
-                             f"the promotion report (backtest_report) is the way to the holdout")
-    return day_files
+        if cut is not None and d is not None and d >= cut:
+            if not reach_holdout:
+                raise ValueError(f"{f.name} is in {root}'s holdout (from {cut}): experiments cannot use it; "
+                                 f"the promotion report (backtest_report) is the way to the holdout")
+            reached = True
+    return day_files, reached
 
 
 class Costs(BaseModel):
@@ -102,9 +107,10 @@ class Costs(BaseModel):
     every tool and the page as one field, each with its default, and a trial records them."""
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    fee_rate: float = Field(1.2, ge=0, description=(
-        "Fees, USD an option contract (IBKR plus exchange fees on SPX: about 1.2); shares pay IBKR's fixed rate, "
-        "0.005 a share, 1 an order."))
+    fee_scale: float = Field(1.0, ge=0, le=10, description=(
+        "Fees as the engine charges them, times this (1: as charged, 0: none): the broker's commission (IBKR's, "
+        "by an option's price, an order's least) and each root's exchange fee, said only there "
+        "(BacktestGateway, model::PortfolioSpec)."))
     fill_position: float = Field(1.0, ge=0, le=10, description=(
         "Where in its spread an order of one leg fills: its mid plus this many half spreads toward its side (1: buys "
         "at the ask, sells at the bid; below 1 inside the spread, above 1 beyond it)."))
@@ -121,14 +127,14 @@ class Costs(BaseModel):
 
     @classmethod
     def of(cls, recorded: Costs | dict[str, Any] | None) -> Costs:
-        """As a trial recorded them, from before 2026-10-17 too (its slippage_bps, gone since, is dropped)."""
+        """As a trial recorded them."""
         if isinstance(recorded, Costs):
             return recorded
-        return cls.model_validate({k: v for k, v in (recorded or {}).items() if k in cls.model_fields})
+        return cls.model_validate(recorded or {})
 
     def doubled(self) -> Costs:
         """The robustness check's: fees and the fill positions twice what they were."""
-        return self.model_copy(update={"fee_rate": self.fee_rate * 2, "fill_position": self.fill_position * 2,
+        return self.model_copy(update={"fee_scale": self.fee_scale * 2, "fill_position": self.fill_position * 2,
                                        "multi_leg_fill_position": self.multi_leg_fill_position * 2})
 
     def strict(self) -> Costs:
@@ -143,26 +149,60 @@ class Costs(BaseModel):
                                        "multi_leg_fill_position": max(self.multi_leg_fill_position, 1.0)})
 
 
-def submit(*, family: str, strategy: str, days: str | list[str], space: dict[str, Any] | None = None,
-           search: dict[str, Any] | None = None, start: str | None = None, end: str | None = None,
-           costs: Costs | dict[str, Any] | None = None, risk_free_rate: float = 0.05, iv_price_mode: str = "mid",
-           note: str = "", parent: str | None = None, settings_list: list[dict[str, float]] | None = None,
-           batch_size: int = BATCH_SIZE, holdout: bool = False,
-           priority: int = jobs.PRIORITY_EXPERIMENT, config: str | None = None,
-           check: str | None = None) -> dict[str, Any]:
-    """Register an experiment and its trials, and queue the trials not yet run. Refused, with nothing
-    registered, when the family's budget would be passed or a day is in a holdout (unless `holdout`: the
-    promotion report, which records its use). config: the strategy/configs file it was run from, kept in its spec;
-    check: the robustness check it is (analysis.robustness), kept there too, by which the promotion gates find it.
-    Returns, with the counts, the trials' ids in the order of the settings."""
+def submit(**experiment: Any) -> dict[str, Any]:
+    """Register an experiment and its trials, and queue the trials not yet run (its fields: _prepared's). Refused,
+    with nothing registered, when the family's budget would be passed or a day is in a holdout (unless
+    `reach_holdout`: a person's or the system's report; an experiment whose days reach a holdout is recorded so,
+    `holdout`). Returns, with the counts, the trials' ids in the order of the settings."""
+    return submit_together([experiment])[0]
+
+
+def submit_together(experiments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Several experiments (each as submit takes one) registered and queued in one transaction, all or none: those
+    of the same days and pricing then run as one batch (jobs: batch_key), each day read once for all, as experiments
+    submitted one after another would not be once a worker waits for jobs (it takes the first at once). The days
+    several of them name are checked and hashed once. What each returns is submit's."""
+    days_checked: dict[Any, tuple[list[Path], str, bool]] = {}
+    prepared = [_prepared(days_checked, **e) for e in experiments]
+    with _lock:
+        con = db()
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            out = [_register(con, p) for p in prepared]
+            con.execute("COMMIT")
+        except BaseException:
+            con.execute("ROLLBACK")
+            raise
+    return out
+
+
+def _prepared(days_checked: dict[Any, tuple[list[Path], str, bool]], *, family: str, strategy: str,
+              days: str | list[str],
+              space: dict[str, Any] | None = None, search: dict[str, Any] | None = None, start: str | None = None,
+              end: str | None = None, costs: Costs | dict[str, Any] | None = None, risk_free_rate: float = 0.05,
+              iv_price_mode: str = "mid", note: str = "", parent: str | None = None,
+              settings_list: list[dict[str, float]] | None = None, batch_size: int = BATCH_SIZE,
+              reach_holdout: bool = False, priority: int = jobs.PRIORITY_EXPERIMENT, config: str | None = None,
+              check: str | None = None, report: bool = False) -> dict[str, Any]:
+    """An experiment as it is registered, all but the ledger's part (_register). config: the strategy/configs file it
+    was run from, kept in its spec; check: the robustness check it is (analysis.robustness), kept there too, by which
+    the promotion gates find it. days_checked: the days already checked, by what named them."""
     if not family:
         raise ValueError("an experiment needs a family: the hypothesis its trials are variants of")
-    if holdout and not access.trusted():
+    if reach_holdout and not access.trusted():
         raise ValueError("the holdout is the system's: holdout_report runs a version on it, once")
     if family == CONTROL_FAMILY and strategy != CONTROL[0]:
         raise ValueError(f"the family {CONTROL_FAMILY} is the control's ({CONTROL[0]}): name the hypothesis instead")
-    day_files = resolve_days(days, date.fromisoformat(start) if start else None,
-                             date.fromisoformat(end) if end else None, holdout=holdout)
+    named = (tuple(days) if isinstance(days, list) else days, start, end, reach_holdout)
+    if named not in days_checked:
+        day_files, reached = resolve_days(days, date.fromisoformat(start) if start else None,
+                                          date.fromisoformat(end) if end else None, reach_holdout=reach_holdout)
+        dh = days_hash(day_files)
+        daily = sorted(runner.daily_dir().glob("*.csv")) if runner.daily_dir().is_dir() else []
+        if daily:  # what the strategy may read beside the days: a change is another trial
+            dh = digest([dh, days_hash(daily)])
+        days_checked[named] = (day_files, dh, reached)
+    day_files, dh, reached = days_checked[named]
     c = Costs.of(costs)
     settings_ = settings_list if settings_list is not None else expand(strategy, space or {}, search or {})
     if not settings_:
@@ -170,10 +210,6 @@ def submit(*, family: str, strategy: str, days: str | list[str], space: dict[str
     parameters = strategy_classes().get(strategy)
     settings_ = [resolved(strategy, s, parameters) for s in settings_]
     code = code_of(strategy)
-    dh = days_hash(day_files)
-    daily = sorted(runner.daily_dir().glob("*.csv")) if runner.daily_dir().is_dir() else []
-    if daily:  # what the strategy may read beside the days: a change is another trial
-        dh = digest([dh, days_hash(daily)])
     pricing = {"risk_free_rate": risk_free_rate, "iv_price_mode": iv_price_mode}
     trials = []
     for s in settings_:
@@ -186,69 +222,92 @@ def submit(*, family: str, strategy: str, days: str | list[str], space: dict[str
         spec["config"] = config
     if check:
         spec["check"] = check
+    if report:  # a person's or the system's report of strategies: what found nothing, only shows
+        spec["report"] = True
     experiment_id = digest({"spec": spec, "family": family, "days": dh, "code": code, "at": time.time_ns()}, 12)
-    with _lock:
-        con = db()
-        con.execute("BEGIN IMMEDIATE")
-        try:
-            con.execute("INSERT OR IGNORE INTO families VALUES (?, ?)", (family, DEFAULT_BUDGET))
-            budget = con.execute("SELECT budget FROM families WHERE name = ?", (family,)).fetchone()[0]
-            ids = [t for t, _ in trials]
-            known = {r[0] for r in con.execute(
-                f"SELECT id FROM trials WHERE id IN ({','.join('?' * len(ids))})", ids)}
-            used = con.execute("SELECT COUNT(*) FROM trials WHERE family = ?", (family,)).fetchone()[0]
-            new = [t for t in ids if t not in known]
-            if used + len(new) > budget:
-                raise ValueError(f"family {family} has tried {used} of its {budget} trials; this experiment "
-                                 f"adds {len(new)}. Send what it has to review, give it up, or raise its "
-                                 f"budget (set_family_budget)")
-            con.execute("INSERT INTO experiments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (experiment_id, now(), family, strategy, canonical(spec),
-                         json.dumps([str(f.resolve().relative_to(files.data_root().resolve())) for f in day_files]),
-                         dh, canonical(code), int(holdout), parent, note))
-            for position, (trial_id, s) in enumerate(trials):
-                if trial_id not in known:
-                    con.execute("INSERT INTO trials (id, family, strategy, setting, costs, code, status, created_at) "
-                                "VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)",
-                                (trial_id, family, strategy, canonical(s), canonical(c.model_dump()), canonical(code),
-                                 now()))
-                con.execute("INSERT OR IGNORE INTO experiment_trials VALUES (?, ?, ?)",
-                            (experiment_id, trial_id, position))
-            # Trials run again only when they never finished: queued (in no live job) or failed.
-            to_run = [t for t in ids if t not in known] + [
-                r[0] for r in con.execute(
-                    f"SELECT id FROM trials WHERE id IN ({','.join('?' * len(ids))}) "
-                    "AND status IN ('failed', 'cancelled')", ids)]
-            for t in to_run:
-                con.execute("UPDATE trials SET status = 'queued', error = NULL WHERE id = ?", (t,))
-            key = digest({"days": dh, "pricing": pricing})  # what a job's batch is but its trials
-            for i in range(0, len(to_run), max(1, batch_size)):
-                jobs.add(con, "trials", {"trial_ids": to_run[i:i + batch_size]}, priority, ref=experiment_id,
-                         batch_key=key)
-            con.execute("COMMIT")
-        except BaseException:
-            con.execute("ROLLBACK")
-            raise
-    return {"experiment_id": experiment_id, "trial_ids": [t for t, _ in trials], "trials": len(trials),
-            "queued": len(to_run),
-            "reused": len(trials) - len(to_run), "days": len(day_files), "family": family,
+    return {"experiment_id": experiment_id, "family": family, "strategy": strategy, "spec": spec,
+            "day_files": day_files, "days_hash": dh, "code": code, "holdout": reached, "parent": parent, "note": note,
+            "costs": c, "pricing": pricing, "trials": trials, "batch_size": batch_size, "priority": priority}
+
+
+def _register(con: sqlite3.Connection, p: dict[str, Any]) -> dict[str, Any]:
+    """An experiment prepared (_prepared) registered and its trials not yet run queued, inside the caller's
+    transaction."""
+    family, trials, c, code = p["family"], p["trials"], p["costs"], p["code"]
+    con.execute("INSERT OR IGNORE INTO families VALUES (?, ?)", (family, DEFAULT_BUDGET))
+    budget = con.execute("SELECT budget FROM families WHERE name = ?", (family,)).fetchone()[0]
+    ids = [t for t, _ in trials]
+    known = {r[0] for r in con.execute(
+        f"SELECT id FROM trials WHERE id IN ({','.join('?' * len(ids))})", ids)}
+    used = con.execute("SELECT COUNT(*) FROM trials WHERE family = ?", (family,)).fetchone()[0]
+    new = [t for t in ids if t not in known]
+    if used + len(new) > budget:
+        raise ValueError(f"family {family} has tried {used} of its {budget} trials; this experiment "
+                         f"adds {len(new)}. Send what it has to review, give it up, or raise its "
+                         f"budget (set_family_budget)")
+    con.execute("INSERT INTO experiments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (p["experiment_id"], now(), family, p["strategy"], canonical(p["spec"]),
+                 json.dumps([files.ledger_name(f) for f in p["day_files"]]),
+                 p["days_hash"], canonical(code), int(p["holdout"]), p["parent"], p["note"]))
+    for position, (trial_id, s) in enumerate(trials):
+        if trial_id not in known:
+            con.execute("INSERT INTO trials (id, family, strategy, setting, costs, code, status, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)",
+                        (trial_id, family, p["strategy"], canonical(s), canonical(c.model_dump()), canonical(code),
+                         now()))
+        con.execute("INSERT OR IGNORE INTO experiment_trials VALUES (?, ?, ?)",
+                    (p["experiment_id"], trial_id, position))
+    # Trials run again only when they never finished: queued (in no live job) or failed.
+    to_run = [t for t in ids if t not in known] + [
+        r[0] for r in con.execute(
+            f"SELECT id FROM trials WHERE id IN ({','.join('?' * len(ids))}) "
+            "AND status IN ('failed', 'cancelled')", ids)]
+    for t in to_run:
+        con.execute("UPDATE trials SET status = 'queued', error = NULL WHERE id = ?", (t,))
+    key = digest({"days": p["days_hash"], "pricing": p["pricing"]})  # what a job's batch is but its trials
+    size = max(1, p["batch_size"])
+    for i in range(0, len(to_run), size):
+        jobs.add(con, "trials", {"trial_ids": to_run[i:i + size]}, p["priority"], ref=p["experiment_id"],
+                 batch_key=key)
+    return {"experiment_id": p["experiment_id"], "trial_ids": ids, "trials": len(trials), "queued": len(to_run),
+            "reused": len(trials) - len(to_run), "days": len(p["day_files"]), "family": family,
             "family_used": used + len(new), "family_budget": budget}
+
+
+_codes: dict[str, tuple[tuple[Any, ...], dict[str, str]]] = {}  # a strategy's code, by its build's and files' stamps
+
+
+def _stamp(library: Path) -> tuple[Any, ...]:
+    """The ledger (its file), and the size and time of entry_backtest, the library, their build records and the
+    library's files: while they are the same, so is the code (code_of checks it once)."""
+    program = code_identity.entry_backtest()
+    paths = [program, Path(f"{program}.code"), library, Path(f"{library}.code"),
+             *code_identity.strategy_files(library)]
+    db_file = store.db_path()
+    return (str(db_file), db_file.stat().st_ino if db_file.exists() else 0,  # the ledger it was kept in
+            *((str(p), st.st_size, st.st_mtime_ns) if (st := p.stat() if p.exists() else None) else (str(p),)
+              for p in paths))
 
 
 def code_of(strategy: str) -> dict[str, str]:
     """The code a strategy's trials come from, as the build says (code_identity): all a backtest is built from (core), the
     trading core within it (engine) and the strategy's own files. Refused (ValueError) when the strategy's library
-    is not of its files as they are (code_identity.check_build)."""
+    is not of its files as they are (code_identity.check_build). Checked and kept once while nothing it is read from
+    changes: a lease asks it of every job it takes, inside the queue's lock."""
     built = built_strategies()
     listing = {c["name"]: c for c in built["strategies"]}
     if strategy not in listing:
         raise unknown_strategy(strategy, built)
-    code_identity.check_build(listing[strategy])
     library = Path(listing[strategy]["library"])
+    stamp = _stamp(library)
+    if (known := _codes.get(strategy)) is not None and known[0] == stamp:
+        return known[1]
+    code_identity.check_build(listing[strategy])
     code = {"core": code_identity.core_hash(), "engine": code_identity.engine_hash(), "strategy": code_identity.strategy_hash(library)}
     with _lock:
         db().execute("INSERT OR IGNORE INTO strategy_sources VALUES (?, ?)",
                      (code["strategy"], canonical(code_identity.strategy_sources(library))))
+    _codes[strategy] = (stamp, code)
     return code
 
 
@@ -401,14 +460,8 @@ def summary_of(days: dict[str, Any], trades: list[batch.Trade]) -> dict[str, Any
     n = len(net)
     mean = sum(net) / n if n else 0.0
     sd = math.sqrt(sum((x - mean) ** 2 for x in net) / (n - 1)) if n > 1 else 0.0
-    equity = peak = drawdown = 0.0
-    for x in net:
-        equity += x
-        peak = max(peak, equity)
-        drawdown = min(drawdown, equity - peak)
-    rs = [t.r for t in trades]
-    mean_r = sum(rs) / len(rs) if rs else None
-    sd_r = math.sqrt(sum((r - mean_r) ** 2 for r in rs) / (len(rs) - 1)) if len(rs) > 1 else 0.0
+    drawdown = batch.drawdown(net)
+    mean_r, t_r = batch.r_stats([t.r for t in trades])
     by_day = batch.day_measures([(iso_day(on), x) for on, x in zip(days["date"], net)])
     most = {k: max(days.get(k) or [0.0]) for k in ("max_margin", "max_delta", "max_gamma", "max_theta")}
     return {"net": round(sum(net), 2), "gross": round(sum(days["pnl"]), 2), "fees": round(sum(days["fees"]), 2),
@@ -419,7 +472,7 @@ def summary_of(days: dict[str, Any], trades: list[batch.Trade]) -> dict[str, Any
             "max_gamma": round(most["max_gamma"], 4), "max_theta": round(most["max_theta"], 4),
             "trades": len(trades),
             "expectancy_r": round(mean_r, 4) if mean_r is not None else None,
-            "t": round(mean_r / sd_r * math.sqrt(len(rs)), 3) if sd_r > 0 else None}
+            "t": round(t_r, 3) if t_r is not None else None}
 
 
 def iso_day(on: int) -> str:
@@ -482,12 +535,11 @@ def experiments_of(trial_id: str) -> list[str]:
 
 
 def experiment_days(experiment_id: str) -> list[Path]:
-    """The experiment's day files (the ledger keeps them relative to data/)."""
+    """The experiment's day files (the ledger keeps them by files.ledger_name)."""
     row = db().execute("SELECT days FROM experiments WHERE id = ?", (experiment_id,)).fetchone()
     if row is None:
         raise KeyError(experiment_id)
-    root = files.data_root().resolve()
-    return [root / f for f in json.loads(row[0])]
+    return [files.from_ledger_name(f).resolve() for f in json.loads(row[0])]
 
 
 def trial_ids(experiment_id: str, done_only: bool = True) -> list[str]:

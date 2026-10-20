@@ -10,6 +10,7 @@
  */
 #include "core/bookkeeping/bookkeeping_engine.hpp"
 #include "core/risk/risk_engine.hpp"
+#include "model/session_calendar.hpp"
 #include "model/portfolios.hpp"
 #include "model/symbol.hpp"
 #include "model/utility.hpp"
@@ -45,7 +46,7 @@ auto contract(const std::string& symbol, std::optional<model::OptionType> type =
     c.multiplier = 100;
     c.option_strike = strike;
     c.option_type = *type;
-    c.option_expiry = model::option_expiry_time(kExpiry);
+    c.option_expiry = model::kNyse.expiry_time(kExpiry);
     c.option_underlying = "SPY";
     return c;
 }
@@ -64,8 +65,7 @@ class RiskEngineTest : public ::testing::Test {
         structure_.ensure_portfolio("SPY");
         structure_.load_contracts(
             std::vector{contract("SPY"), contract(call_, model::OptionType::CALL, 600)});
-        model::Portfolio* spy = structure_.find_portfolio("SPY");
-        spy->physical = true;
+        model::Portfolio* spy = structure_.find_portfolio("SPY"); // settled in shares
         requote(*spy, [](model::PortfolioSnapshot& q) {
             q.values(&model::Frame::bid)[0] = 1.9;
             q.values(&model::Frame::ask)[0] = 2.1;
@@ -122,6 +122,17 @@ class RiskEngineTest : public ::testing::Test {
         book_.book_fill(fill);
     }
 
+    /** Each strategy's bar starting, as Main starts them: all on SPY. */
+    void start_bar(model::DateTime now) {
+        book_.for_each_holding([&](const std::string& name, const model::StrategyHolding&) {
+            risk_.start_bar(name, *structure_.find_portfolio("SPY"), now);
+        });
+    }
+    /** What bookkeeping closes at the risk limit's flatten_minutes. */
+    auto to_close(const std::string& strategy, const model::Portfolio& portfolio,
+                  model::DateTime now) {
+        return book_.positions_to_close(strategy, portfolio, now, risk_.flatten_minutes());
+    }
     auto refusal(const model::OrderRequest& req, model::DateTime now = {})
         -> std::optional<std::string> {
         return risk_.refusal("s", "SPY", req, now);
@@ -130,7 +141,7 @@ class RiskEngineTest : public ::testing::Test {
     const std::string call_ = model::option_symbol(
         {.root = "SPY", .expiry = kExpiry, .type = model::OptionType::CALL, .strike = 600});
     model::Portfolios structure_;
-    core::BookkeepingEngine book_;
+    core::BookkeepingEngine book_{nullptr, structure_};
     core::RiskEngine risk_{nullptr, structure_, book_};
     int fills_ = 0;
 };
@@ -234,7 +245,7 @@ TEST_F(RiskEngineTest, HaltedOnlyAnOrderThatClosesGoes) {
 TEST_F(RiskEngineTest, OptionsSettledInSharesAreOnlyClosedJustBeforeTheirClose) {
     risk_.set_limits({{"flatten_minutes", 5}});
     hold(1);
-    const model::DateTime close = model::option_expiry_time(kExpiry);
+    const model::DateTime close = model::kNyse.expiry_time(kExpiry);
     EXPECT_EQ(refusal(order(1), close - minutes(10)), std::nullopt);
     EXPECT_TRUE(refusal(order(1), close - minutes(3)));
     EXPECT_EQ(refusal(order(-1), close - minutes(3)), std::nullopt);
@@ -264,7 +275,7 @@ TEST_F(RiskEngineTest, ARefusalIsCountedAndKept) {
 
 TEST_F(RiskEngineTest, TheFlattenWindowIsTheLastMinutesOfAShareSettledOptionsExpiryDay) {
     risk_.set_limits({{"flatten_minutes", 5}});
-    const model::DateTime close = model::option_expiry_time(kExpiry);
+    const model::DateTime close = model::kNyse.expiry_time(kExpiry);
     const model::Portfolio* spy = structure_.find_portfolio("SPY");
     EXPECT_TRUE(risk_.in_flatten_window(call_, spy, close - minutes(5))); // from its first minute
     EXPECT_FALSE(risk_.in_flatten_window(call_, spy, close - minutes(5) - seconds(1)));
@@ -278,56 +289,54 @@ TEST_F(RiskEngineTest, TheFlattenWindowIsTheLastMinutesOfAShareSettledOptionsExp
 TEST_F(RiskEngineTest, AShareSettledOptionHeldIntoItsWindowIsToBeClosed) {
     risk_.set_limits({{"flatten_minutes", 5}});
     hold(2);
-    const model::DateTime close = model::option_expiry_time(kExpiry);
+    const model::DateTime close = model::kNyse.expiry_time(kExpiry);
     const model::Portfolio& spy = *structure_.find_portfolio("SPY");
-    EXPECT_TRUE(risk_.positions_to_flatten("s", spy, close - minutes(10)).empty());
-    const auto due = risk_.positions_to_flatten("s", spy, close - minutes(3));
+    EXPECT_TRUE(to_close("s", spy, close - minutes(10)).empty());
+    const auto due = to_close("s", spy, close - minutes(3));
     ASSERT_EQ(due.size(), 1U);
     ASSERT_EQ(due.at(call_).size(), 1U); // opened alone
     EXPECT_EQ(due.at(call_)[0].quantity, 2);
-    EXPECT_TRUE(risk_.positions_to_flatten("nobody", spy, close - minutes(3)).empty());
+    EXPECT_TRUE(to_close("nobody", spy, close - minutes(3)).empty());
 
-    model::Portfolio cash("SPY"); // the same option settled in cash: held to the close
-    cash.physical = false;
-    EXPECT_TRUE(risk_.positions_to_flatten("s", cash, close - minutes(3)).empty());
+    model::Portfolio cash("SPY"); // of no spec: the same option settled in cash, held to the close
+    EXPECT_TRUE(to_close("s", cash, close - minutes(3)).empty());
 }
 
 TEST_F(RiskEngineTest, ACallSoldIsClosedBeforeTheCloseOfTheDayBeforeAnExDividendDay) {
     risk_.set_limits({{"flatten_minutes", 5}});
     const model::Portfolio& spy = *structure_.find_portfolio("SPY");
     const year_month_day today = 2025y / March / 20, ex = 2025y / March / 21; // Thursday, Friday
-    const model::DateTime close = model::new_york_time(today, model::session_close(today));
+    const model::DateTime close = model::kNyse.at(today, model::kNyse.session_close(today));
     hold(-1); // a call sold, expiring long after
-    EXPECT_TRUE(risk_.positions_to_flatten("s", spy, close - minutes(3)).empty()); // no dates given
+    EXPECT_TRUE(to_close("s", spy, close - minutes(3)).empty()); // no dates given
     model::DailyTable dividends;
     dividends.set("SPY_ex_dividend", {{ex, 1.74}});
-    risk_.use_daily(&dividends);
-    EXPECT_TRUE(risk_.positions_to_flatten("s", spy, close - minutes(10)).empty()); // before the window
-    EXPECT_EQ(risk_.positions_to_flatten("s", spy, close - minutes(3)).size(), 1U);
-    EXPECT_TRUE(risk_.positions_to_flatten("s", spy, close - hours(24) - minutes(3)).empty()); // two days before
-    model::Portfolio cash("SPY"); // settled in cash: never exercised early
-    cash.physical = false;
-    EXPECT_TRUE(risk_.positions_to_flatten("s", cash, close - minutes(3)).empty());
+    book_.use_daily(&dividends);
+    EXPECT_TRUE(to_close("s", spy, close - minutes(10)).empty()); // before the window
+    EXPECT_EQ(to_close("s", spy, close - minutes(3)).size(), 1U);
+    EXPECT_TRUE(to_close("s", spy, close - hours(24) - minutes(3)).empty()); // two days before
+    model::Portfolio cash("SPY"); // of no spec: settled in cash, never exercised early
+    EXPECT_TRUE(to_close("s", cash, close - minutes(3)).empty());
     hold(2); // now held long: nothing to fear from the dividend
-    EXPECT_TRUE(risk_.positions_to_flatten("s", spy, close - minutes(3)).empty());
-    risk_.use_daily(nullptr);
+    EXPECT_TRUE(to_close("s", spy, close - minutes(3)).empty());
+    book_.use_daily(nullptr);
 }
 
 TEST_F(RiskEngineTest, NoCloseIsSentOverAWorkingOneNorForAFlatPosition) {
     risk_.set_limits({{"flatten_minutes", 5}});
     hold(1);
-    const model::DateTime late = model::option_expiry_time(kExpiry) - minutes(3);
+    const model::DateTime late = model::kNyse.expiry_time(kExpiry) - minutes(3);
     const model::Portfolio& spy = *structure_.find_portfolio("SPY");
     model::Order closing = order(-1).create_order("C1");
     closing.status = model::Status::WORKING;
     book_.add_order("s", closing);
-    EXPECT_TRUE(risk_.positions_to_flatten("s", spy, late).empty()); // the close sent a tick ago
+    EXPECT_TRUE(to_close("s", spy, late).empty()); // the close sent a tick ago
 
     closing.status = model::Status::FILLED;
     closing.filled = 1;
     book_.update_order(closing, {});
     hold(-1);
-    EXPECT_TRUE(risk_.positions_to_flatten("s", spy, late).empty()); // closed: flat
+    EXPECT_TRUE(to_close("s", spy, late).empty()); // closed: flat
 }
 
 TEST_F(RiskEngineTest, OfAComboOnlyTheContractsExpiringInTheWindowAreClosed) {
@@ -350,8 +359,8 @@ TEST_F(RiskEngineTest, OfAComboOnlyTheContractsExpiringInTheWindowAreClosed) {
         t.quantity = 1;
         book(t, &calendar);
     }
-    const auto due = risk_.positions_to_flatten(
-        "s", *structure_.find_portfolio("SPY"), model::option_expiry_time(kExpiry) - minutes(3));
+    const auto due = to_close("s", *structure_.find_portfolio("SPY"),
+                              model::kNyse.expiry_time(kExpiry) - minutes(3));
     ASSERT_EQ(due.size(), 1U);
     const auto& [combo, options] = *due.begin();
     EXPECT_EQ(combo, call_ + "|" + later); // what the call was opened in
@@ -520,16 +529,16 @@ TEST_F(RiskEngineTest, AComboWhoseExpiringLegHasACloseWorkingIsNotClosedAgain) {
         t.quantity = 1;
         book(t, &calendar);
     }
-    const model::DateTime late = model::option_expiry_time(kExpiry) - minutes(3);
+    const model::DateTime late = model::kNyse.expiry_time(kExpiry) - minutes(3);
     const model::Portfolio& spy = *structure_.find_portfolio("SPY");
-    ASSERT_EQ(risk_.positions_to_flatten("s", spy, late).size(), 1U);
+    ASSERT_EQ(to_close("s", spy, late).size(), 1U);
     model::Order closing;
     closing.order_id = "K2";
     closing.symbol = "custom_close";
     closing.status = model::Status::WORKING;
     closing.legs = {{.ratio = 1, .side = Side::SELL, .symbol = call_}};
     book_.add_order("s", closing);
-    EXPECT_TRUE(risk_.positions_to_flatten("s", spy, late).empty());
+    EXPECT_TRUE(to_close("s", spy, late).empty());
 }
 
 /** The call's mid moved to `mid`, the strategy's holding marked at it and checked. */
@@ -551,7 +560,7 @@ const model::DateTime kTuesday = kMonday + days(1);
 TEST_F(RiskEngineTest, AStrategyPastItsDailyLossOnlyClosesUntilTheNextDay) {
     risk_.set_limits({{"max_strategy_daily_loss", 500}});
     hold(10);
-    risk_.start_bar(kMonday);
+    start_bar(kMonday);
     mark_at(book_, risk_, structure_, call_, 2.0);
     mark_at(book_, risk_, structure_, call_, 1.6); // 10 x 0.4 x 100 = 400 lost: under
     EXPECT_EQ(refusal(order(1), kMonday), std::nullopt);
@@ -562,7 +571,7 @@ TEST_F(RiskEngineTest, AStrategyPastItsDailyLossOnlyClosesUntilTheNextDay) {
     EXPECT_EQ(risk_.day_stops().size(), 1U);
     EXPECT_EQ(risk_.day_loss(), std::nullopt); // no global limit set
 
-    risk_.start_bar(kTuesday); // the day starts from where the holding is
+    start_bar(kTuesday); // the day starts from where the holding is
     mark_at(book_, risk_, structure_, call_, 1.5);
     EXPECT_TRUE(risk_.day_stops().empty());
     EXPECT_EQ(refusal(order(1), kTuesday), std::nullopt);
@@ -574,20 +583,45 @@ TEST_F(RiskEngineTest, OnADayTheMarketIsClosedTheMarksMovingStopNothing) {
     // A Saturday after a restart: the marks go from the last ones kept to the quotes now.
     risk_.set_limits({{"max_strategy_daily_loss", 500}, {"max_daily_loss", 300}});
     hold(10);
-    risk_.start_bar(kMonday - days(2));
+    start_bar(kMonday - days(2));
     mark_at(book_, risk_, structure_, call_, 2.0);
     mark_at(book_, risk_, structure_, call_, 1.0); // 1,000 "lost"
     EXPECT_TRUE(risk_.day_stops().empty());
     EXPECT_EQ(risk_.day_loss(), std::nullopt);
-    risk_.start_bar(kMonday); // the trading day starts from where the holding is
+    start_bar(kMonday); // the trading day starts from where the holding is
     mark_at(book_, risk_, structure_, call_, 0.4); // 600 lost on Monday
+    EXPECT_EQ(risk_.day_stops().size(), 1U);
+}
+
+TEST_F(RiskEngineTest, ADayStartsOnlyFromAHoldingValuedWhole) {
+    // As after a restart: the call held, rebooked, not quoted yet.
+    risk_.set_limits({{"max_strategy_daily_loss", 100}});
+    hold(1);
+    const auto unquoted = [&] {
+        model::Portfolio& spy = *structure_.find_portfolio("SPY");
+        const std::uint32_t column = *spy.listing().column(call_);
+        requote(spy, [&](model::PortfolioSnapshot& q) {
+            q.values(&model::Frame::bid)[column] = 0.0;
+            q.values(&model::Frame::ask)[column] = 0.0;
+        });
+        book_.value_holding("s", spy);
+        risk_.measure_exposure("s", spy);
+    };
+    start_bar(kMonday);
+    unquoted(); // valued at nothing it would be 200 lost
+    EXPECT_TRUE(risk_.day_stops().empty());
+    mark_at(book_, risk_, structure_, call_, 2.0); // the day starts here
+    unquoted(); // the last mark kept
+    EXPECT_TRUE(risk_.day_stops().empty());
+    EXPECT_DOUBLE_EQ(book_.find_holding("s")->options.at(call_).mid_price, 2.0);
+    mark_at(book_, risk_, structure_, call_, 0.9); // 110 lost
     EXPECT_EQ(risk_.day_stops().size(), 1U);
 }
 
 TEST_F(RiskEngineTest, TheDaysLossOverEveryStrategyHalts) {
     risk_.set_limits({{"max_daily_loss", 300}});
     hold(10);
-    risk_.start_bar(kMonday);
+    start_bar(kMonday);
     mark_at(book_, risk_, structure_, call_, 2.0);
     mark_at(book_, risk_, structure_, call_, 1.8);
     EXPECT_EQ(risk_.day_loss(), std::nullopt);
@@ -598,7 +632,7 @@ TEST_F(RiskEngineTest, TheDaysLossOverEveryStrategyHalts) {
 
 TEST_F(RiskEngineTest, TheDayStartsComeBackAsSaved) {
     hold(10);
-    risk_.start_bar(kMonday);
+    start_bar(kMonday);
     mark_at(book_, risk_, structure_, call_, 2.0);
     mark_at(book_, risk_, structure_, call_, 1.8); // 200 lost before the restart
     std::unordered_map<std::string, std::string> saved;
@@ -608,7 +642,7 @@ TEST_F(RiskEngineTest, TheDayStartsComeBackAsSaved) {
     core::RiskEngine again{nullptr, structure_, book_};
     again.restore_limits(saved);
     again.set_limits({{"max_strategy_daily_loss", 500}});
-    again.start_bar(kMonday + hours(2)); // the same day: the morning's start kept, not 1.8
+    again.start_bar("s", *structure_.find_portfolio("SPY"), kMonday + hours(2)); // the same day: the morning's start kept, not 1.8
     mark_at(book_, again, structure_, call_, 1.5);
     EXPECT_EQ(again.day_stops().size(), 1U);
     EXPECT_FALSE(again.take_day_changed());

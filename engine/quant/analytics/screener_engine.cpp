@@ -2,7 +2,7 @@
 // ranked, with model values from the reference vol asked for.
 #include "json_io.h"
 #include "quant/kernel.h"
-#include "quant/screener/screener.h"
+#include "screener.h"
 
 #include <algorithm>
 #include <cctype>
@@ -91,9 +91,8 @@ std::vector<double> model_prices(const ScreenerParams& p, std::span<const int> i
         if (heston) {
             if (o.years <= 0.0 || o.forward <= 0.0) continue;
             const double df   = std::exp(-p.rate * o.years);
-            const double call = heston_call_price(o.forward * df, o.strike, p.rate, o.years,
-                                                  p.heston.v0, p.heston.kappa, p.heston.theta,
-                                                  p.heston.xi, p.heston.rho);
+            const double call =
+                heston_call_price(o.forward * df, o.strike, p.rate, o.years, p.heston);
             px[idx[k]] = o.is_call ? call : call - df * (o.forward - o.strike);   // put-call parity
             continue;
         }
@@ -104,7 +103,8 @@ std::vector<double> model_prices(const ScreenerParams& p, std::span<const int> i
             vol = vol_surface_interp(p.surface_strikes, p.surface_expiries, p.surface_ivs,
                                      p.spot, o.strike, o.years);
         }
-        px[idx[k]] = vol > 0.0 ? black76_price(o.forward, o.strike, p.rate, vol, o.years, o.is_call) : kNaN;
+        const bool priced = vol > 0.0 && o.forward > 0.0 && o.strike > 0.0;  // else none: null
+        px[idx[k]] = priced ? black76_price(o.forward, o.strike, p.rate, vol, o.years, o.is_call) : kNaN;
     }
     return px;
 }

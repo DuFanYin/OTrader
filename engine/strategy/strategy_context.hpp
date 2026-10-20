@@ -12,6 +12,7 @@
 #include "utilities/log_level.hpp"
 #include <span>
 #include <string>
+#include <string_view>
 
 namespace strategy {
 
@@ -38,7 +39,12 @@ class StrategyContext {
     virtual void unregister_hedging() = 0;
     /** Live quotes for these chains in place of those before, until it is removed. */
     virtual void subscribe_chains(std::span<const std::string> chains) = 0;
+    /** One of the chains it subscribes. */
+    virtual bool subscribed(std::string_view chain) const = 0;
     virtual void write_log(const std::string& msg, utilities::LogLevel level) const = 0;
+    /** A value of the day under `name` (the last written stands): a backtest reports each day's
+     * with the day's results; live keeps only the last. */
+    virtual void write_value(std::string_view name, double value) = 0;
     /** It stops: in error, its positions left as they are, until it is inited again. The first
      * cause stays. */
     virtual void set_error(const std::string& msg) = 0;

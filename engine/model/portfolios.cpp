@@ -9,21 +9,24 @@
 namespace model {
 
 void Portfolios::ensure_portfolios_created() {
-    for (const PortfolioSpec& p : kPortfolios) {
-        const std::string name(p.name);
-        ensure_portfolio(name);
-        Portfolio& port = *find_portfolio(name);
-        port.underlying_symbol = p.underlying;
-        port.physical = p.physical;
-        if (p.hedge != p.underlying) {
-            port.hedge_symbol = p.hedge;
-        }
+    for (const PortfolioSpec& spec : kPortfolios) {
+        ensure_portfolio(spec);
     }
 }
 
 void Portfolios::ensure_portfolio(const std::string& portfolio_name) {
-    if (!portfolios_.contains(portfolio_name)) {
+    if (const PortfolioSpec* spec = model::find_portfolio(portfolio_name)) {
+        ensure_portfolio(*spec);
+    } else if (!portfolios_.contains(portfolio_name)) {
         portfolios_.emplace(portfolio_name, std::make_unique<Portfolio>(portfolio_name));
+    }
+}
+
+void Portfolios::ensure_portfolio(const PortfolioSpec& spec) {
+    std::string name(spec.name);
+    if (!portfolios_.contains(name)) {
+        auto portfolio = std::make_unique<Portfolio>(name, &spec);
+        portfolios_.emplace(std::move(name), std::move(portfolio));
     }
 }
 
@@ -68,14 +71,15 @@ auto Portfolios::replace_contracts(const std::string& portfolio_name,
 }
 
 auto Portfolios::replace_contracts(const std::string& portfolio_name, const Contract& underlying,
-                                   std::shared_ptr<const Listing> listing)
+                                   std::shared_ptr<const Listing> listing,
+                                   std::optional<std::span<const std::string>> valued)
     -> std::vector<std::string> {
     Portfolio* port = find_portfolio(portfolio_name);
     if (port == nullptr) {
         return {};
     }
     load_underlying(underlying);
-    return port->list(std::move(listing));
+    return port->list(std::move(listing), valued);
 }
 
 auto Portfolios::find_portfolio(const std::string& portfolio_name) -> Portfolio* {
@@ -104,7 +108,7 @@ auto Portfolios::trades_contract(std::string_view symbol) const -> bool {
     }
     return std::ranges::any_of(portfolios_, [&](const auto& entry) {
         const Portfolio& p = *entry.second;
-        return p.underlying_symbol == symbol || p.hedge_symbol == symbol;
+        return p.underlying_symbol() == symbol || p.hedge_symbol() == symbol;
     });
 }
 
@@ -115,12 +119,12 @@ auto Portfolios::portfolio_of(std::string_view symbol) const -> const Portfolio*
     // Its own portfolio before one it hedges (SPY: SPY's underlying, SPXW's hedge), whatever the
     // map's order.
     for (const auto& [_, p] : portfolios_) {
-        if (p->underlying_symbol == symbol) {
+        if (p->underlying_symbol() == symbol) {
             return p.get();
         }
     }
     for (const auto& [_, p] : portfolios_) {
-        if (p->hedge_symbol == symbol) {
+        if (p->hedge_symbol() == symbol) {
             return p.get();
         }
     }
@@ -140,16 +144,38 @@ auto Portfolios::find_contract(std::string_view symbol) const -> const Contract*
     return nullptr;
 }
 
+auto Portfolios::multiplier(std::string_view symbol) const -> double {
+    if (const Contract* contract = find_contract(symbol)) {
+        return contract->multiplier;
+    }
+    return parse_option_symbol(symbol) ? Contract::kOptionMultiplierDefault : 1.0;
+}
+
+auto Portfolios::calendar_of(std::string_view symbol) const -> const SessionCalendar& {
+    if (const Portfolio* p = portfolio_of(symbol)) {
+        return p->calendar();
+    }
+    const auto id = parse_option_symbol(symbol);
+    return model::calendar_of(id ? std::string_view(id->root) : symbol);
+}
+
 void Portfolios::load_underlying(const Contract& contract) {
-    for (const PortfolioSpec& spec : kPortfolios) {
-        Portfolio* port = find_portfolio(std::string(spec.name));
-        if (port != nullptr && spec.hedge == contract.symbol && spec.hedge != spec.underlying) {
+    bool underlies = false;
+    for (const auto& [_, port] : portfolios_) {
+        const PortfolioSpec* spec = port->spec();
+        if (spec == nullptr) {
+            continue;
+        }
+        if (spec->hedge == contract.symbol && spec->hedge != spec->underlying) {
             port->set_hedge_instrument(contract);
         }
+        if (spec->underlying == contract.symbol) {
+            port->set_underlying(contract);
+            underlies = true;
+        }
     }
-    const auto spec = std::ranges::find(kPortfolios, contract.symbol, &PortfolioSpec::underlying);
-    if (Portfolio* port =
-            find_portfolio(spec != kPortfolios.end() ? std::string(spec->name) : contract.symbol)) {
+    if (Portfolio* port = find_portfolio(contract.symbol);
+        !underlies && port != nullptr && port->spec() == nullptr) {
         port->set_underlying(contract);
     }
 }

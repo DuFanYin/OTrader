@@ -9,6 +9,8 @@ add_library(analytics STATIC
   utility_engine.cpp
   calibration_engine.cpp
   screener_engine.cpp
+  screener_filters.cpp
+  screener_strategies.cpp
 )
 set_target_properties(analytics PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(analytics PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

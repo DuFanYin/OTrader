@@ -189,12 +189,12 @@ auto option_contract(const ContractDetails& details, const std::string& underlyi
     const Contract& c = details.contract;
     model::Contract out = underlying_contract(details);
     out.name = c.localSymbol;
-    out.multiplier = 100.0;
+    out.multiplier = model::Contract::kOptionMultiplierDefault;
     std::from_chars(c.multiplier.data(), c.multiplier.data() + c.multiplier.size(), out.multiplier);
     out.option_strike = c.strike;
     out.option_type = option_type_of(c.right);
     if (const auto date = model::parse_date(c.lastTradeDateOrContractMonth)) {
-        out.option_expiry = model::option_expiry_time(*date);
+        out.option_expiry = model::calendar_of(c.tradingClass).expiry_time(*date);
     }
     out.option_underlying = underlying_symbol;
     return out;

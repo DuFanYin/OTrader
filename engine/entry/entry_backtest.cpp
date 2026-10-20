@@ -10,6 +10,7 @@
 #include <nlohmann/json.hpp>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <format>
 #include <iostream>
@@ -100,10 +101,11 @@ std::vector<size_t> lttb_downsample_indices(const std::vector<double>& y, size_t
 // The result goes to stdout and nothing else does: main moves stdout to a descriptor of its own
 // (result_fd) and points fd 1 at stderr, so the logs, and anything else printed, go there.
 int result_fd = STDOUT_FILENO;
+// --json: the result as JSON lines, for programs (the server); a person reads text. --batch is
+// always JSON.
+bool as_json = false;
 
-/** `out` as one line. */
-void print_json(const nlohmann::json& out) {
-    const std::string text = out.dump() + "\n";
+void print_text(const std::string& text) {
     std::cout << std::flush;
     for (std::size_t done = 0; done < text.size();) {
         const ssize_t n = ::write(result_fd, text.data() + done, text.size() - done);
@@ -114,8 +116,15 @@ void print_json(const nlohmann::json& out) {
     }
 }
 
+/** `out` as one line. */
+void print_json(const nlohmann::json& out) { print_text(out.dump() + "\n"); }
+
 void print_error_json(const std::string& msg) {
-    print_json({{"status", "error"}, {"error", msg}});
+    if (as_json) {
+        print_json({{"status", "error"}, {"error", msg}});
+    } else {
+        print_text("Error: " + msg + "\n");
+    }
 }
 
 using FillModel = adapters::BacktestGateway::FillModel;
@@ -130,14 +139,14 @@ auto fill_model_of(const std::string& name) -> FillModel {
     throw std::invalid_argument("Unknown fill model '" + name + "': quote or shown_size");
 }
 
-/** A trial's costs, as the server's ledger.Costs writes them: "fee_rate", "fill_position",
+/** A trial's costs, as the server's ledger.Costs writes them: "fee_scale", "fill_position",
  * "multi_leg_fill_position", "fill" (quote or shown_size), "delay_bars" and "risk" ({limit:
  * value}). One left out keeps the engine's default; an unknown one is refused. */
 void read_costs(const nlohmann::json& costs, backtest::BacktestTrial& trial) {
     adapters::BacktestGateway::Execution& e = trial.execution;
     for (const auto& [key, value] : costs.items()) {
-        if (key == "fee_rate") {
-            e.fee_rate = value.get<double>();
+        if (key == "fee_scale") {
+            e.fee_scale = value.get<double>();
         } else if (key == "fill_position") {
             e.fill_position = value.get<double>();
         } else if (key == "multi_leg_fill_position") {
@@ -176,7 +185,35 @@ void print_strategies_json() {
     for (const strategy::StrategyRegistry::Refusal& r : strategy::StrategyRegistry::refused()) {
         refused.push_back({{"library", r.library}, {"why", r.why}});
     }
-    print_json({{"status", "ok"}, {"strategies", std::move(classes)}, {"refused", std::move(refused)}});
+    if (as_json) {
+        print_json({{"status", "ok"},
+                    {"strategies", std::move(classes)},
+                    {"refused", std::move(refused)}});
+        return;
+    }
+    std::string text;
+    for (const nlohmann::json& c : classes) {
+        text += std::format("{}  ({})\n", c["name"].get<std::string>(),
+                            std::filesystem::path(c["source"].get<std::string>())
+                                .lexically_relative(std::filesystem::current_path())
+                                .string());
+        for (const nlohmann::json& p : c["parameters"]) {
+            const auto number = [&](const char* key) {
+                const double v = p[key].get<double>();
+                return p["integer"].get<bool>() ? std::format("{:.0f}", v) : std::format("{:g}", v);
+            };
+            text += std::format("    {:<18} {:>10}   {} to {}\n", p["name"].get<std::string>(),
+                                number("default"), number("min"), number("max"));
+        }
+        text += "\n";
+    }
+    for (const nlohmann::json& r : refused) {
+        text += std::format("Not loaded: {}: {}\n", r["library"].get<std::string>(),
+                            r["why"].get<std::string>());
+    }
+    text += "Set a parameter as name=value after the strategy's name (its default shown, then its "
+            "range).\n";
+    print_text(text);
 }
 
 /** YYYYMMDD of the day a file holds; 0 when its name is not a date. */
@@ -267,7 +304,20 @@ auto trial_line(const backtest::BacktestRunSummary& summary,
     Attribution by_source;
     nlohmann::json fills = columns({"date", "time", "symbol", "order_id", "side", "price", "quantity"});
     nlohmann::json log = columns({"date", "time", "level", "source", "msg"});
+    // What the strategy wrote each day (write_value): a column a name, null on a day without it.
+    nlohmann::json values = nlohmann::json::object();
     for (const auto* daily : loaded_days) {
+        for (const auto& [name, value] : daily->values) {
+            values.emplace(name, nlohmann::json::array());
+        }
+    }
+    for (const auto* daily : loaded_days) {
+        for (auto column = values.begin(); column != values.end(); ++column) {
+            const auto it = daily->values.find(column.key());
+            column->push_back(it != daily->values.end() && std::isfinite(it->second)
+                                  ? nlohmann::json(it->second)
+                                  : nlohmann::json(nullptr));
+        }
         const int on = date_number(daily->file_path);
         date.push_back(on);
         day_pnl.push_back(daily->daily_pnl);
@@ -339,7 +389,8 @@ auto trial_line(const backtest::BacktestRunSummary& summary,
           {"max_delta", max_delta},
           {"max_gamma", max_gamma},
           {"max_theta", max_theta},
-          {"attribution", by_source.json()}}},
+          {"attribution", by_source.json()},
+          {"values", std::move(values)}}},
         {"round_trips", std::move(trips)}};
     if (trial.fills) {
         out["fills"] = std::move(fills);
@@ -386,6 +437,89 @@ auto days_line(std::span<const backtest::BacktestRunSummary> summaries) -> nlohm
         days["underlying_close"].push_back(d->underlying_close);
     }
     return {{"status", "ok"}, {"days", std::move(days)}};
+}
+
+/** A trial (trial_line) for a person: the run, its days, its round trips, where its P&L came
+ * from. */
+void print_trial_text(const nlohmann::json& trial, const backtest::BacktestTrial& run) {
+    const nlohmann::json& days = trial["days"];
+    const nlohmann::json& result = trial["result"];
+    const std::vector<int> dates = days["date"].get<std::vector<int>>();
+    const auto day_text = [](int d) {
+        return std::format("{:04}-{:02}-{:02}", d / 10000, (d / 100) % 100, d % 100);
+    };
+    std::string text = std::format("{} on {}, {} day{}", result["strategy_name"].get<std::string>(),
+                                   result["portfolio_name"].get<std::string>(), dates.size(),
+                                   dates.size() == 1 ? "" : "s");
+    if (!dates.empty()) {
+        text += std::format(" ({} to {})", day_text(dates.front()), day_text(dates.back()));
+    }
+    text += std::format(", {:.1f} s\n", result["duration_seconds"].get<double>());
+    std::map<std::string, double> setting(run.strategy_setting.begin(), run.strategy_setting.end());
+    text += "setting:";
+    for (const auto& [name, value] : setting) {
+        text += std::format(" {}={:g}", name, value);
+    }
+    const adapters::BacktestGateway::Execution& e = run.execution;
+    const auto fill = [](double at) {
+        return at == 1.0   ? std::string("at the bid or ask")
+               : at == 0.0 ? std::string("at the mid")
+                           : std::format("{:g} of the way from the mid to the bid or ask", at);
+    };
+    text += std::format("{}\ncosts: {}; options fill {}, combos {}\n\n",
+                        setting.empty() ? " the defaults" : "",
+                        e.fee_scale == 1.0   ? std::string("fees as IBKR charges them")
+                        : e.fee_scale == 0.0 ? std::string("no fees")
+                                             : std::format("fees {:g} times IBKR's", e.fee_scale),
+                        fill(e.fill_position), fill(e.multi_leg_fill_position));
+    for (const nlohmann::json& e : trial["errors"]) {
+        text += "Error: " + e.get<std::string>() + "\n";
+    }
+
+    const std::vector<double> net = days["net_pnl"].get<std::vector<double>>();
+    const std::vector<double> fees = days["fees"].get<std::vector<double>>();
+    const std::vector<int> orders = days["orders"].get<std::vector<int>>();
+    text += std::format("{:<12}{:>12}{:>10}{:>8}\n", "day", "net P&L", "fees", "orders");
+    double total = 0.0, total_fees = 0.0, peak = 0.0, drawdown = 0.0;
+    int total_orders = 0;
+    for (std::size_t i = 0; i < dates.size(); ++i) {
+        text += std::format("{:<12}{:>12.2f}{:>10.2f}{:>8}\n", day_text(dates[i]), net[i], fees[i],
+                            orders[i]);
+        total += net[i];
+        total_fees += fees[i];
+        total_orders += orders[i];
+        peak = std::max(peak, total);
+        drawdown = std::min(drawdown, total - peak);
+    }
+    text += std::format("{:<12}{:>12.2f}{:>10.2f}{:>8}\n\n", "total", total, total_fees,
+                        total_orders);
+
+    const std::vector<double> trips = trial["round_trips"]["net"].get<std::vector<double>>();
+    if (trips.empty()) {
+        text += "No round trips: the strategy opened nothing.\n";
+    } else {
+        const auto won = std::ranges::count_if(trips, [](double x) { return x > 0.0; });
+        double sum = 0.0;
+        for (const double x : trips) {
+            sum += x;
+        }
+        text += std::format("Round trips  {}: {} won, {} lost; average {:+.2f}, best {:+.2f}, "
+                            "worst {:+.2f}\n",
+                            trips.size(), won, std::ssize(trips) - won,
+                            sum / static_cast<double>(trips.size()), std::ranges::max(trips),
+                            std::ranges::min(trips));
+    }
+    text += std::format("Drawdown     {:.2f} (day to day, after fees)\n", drawdown);
+    text += "P&L by source";
+    for (const char* source : {"delta", "gamma", "theta", "vega", "other", "fills"}) {
+        double sum = 0.0;
+        for (const double x : days["attribution"][source].get<std::vector<double>>()) {
+            sum += x;
+        }
+        text += std::format("  {} {:+.2f}", source, sum);
+    }
+    text += "\n\nAdd --json for every column (fills, round trips, attribution by day) as JSON.\n";
+    print_text(text);
 }
 
 /** The output: a line a trial (trial_line), each let go of once written, then days_line. */
@@ -466,6 +600,8 @@ int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; ++i) {
         if (std::string_view(argv[i]) == "--strategies" && i + 1 < argc) {
             strategy::StrategyRegistry::load(argv[++i]);
+        } else if (std::string_view(argv[i]) == "--json") {
+            as_json = true;
         } else {
             args.push_back(argv[i]);
         }
@@ -476,6 +612,7 @@ int main(int argc, char* argv[]) {
         result_fd = fd;
     }
     if (argc == 3 && std::string(argv[1]) == "--batch") {
+        as_json = true;
         try {
             return run_batch(argv[2]);
         } catch (const std::exception& e) {
@@ -493,12 +630,19 @@ int main(int argc, char* argv[]) {
         }
     }
     if (argc < 3) {
-        print_error_json(
-            "Usage: backtest_entry <parquet_path>|<--files file1 file2 ...> <strategy_name> "
-            "[--costs JSON (as a batch trial's)] [--risk-free-rate number] "
-            "[--iv-price-mode mid|bid|ask] [--daily DIR] [--log] [key=value ...] | "
-            "backtest_entry --batch <spec.json> | backtest_entry --list-strategies; any of them "
-            "[--strategies DIR]...");
+        const std::string usage =
+            "usage:\n"
+            "  entry_backtest --files DAY.parquet... STRATEGY [name=value...]   over days\n"
+            "      [--costs JSON] [--risk-free-rate R] [--iv-price-mode mid|bid|ask]\n"
+            "      [--daily DIR] [--log]\n"
+            "  entry_backtest --list-strategies         the strategies and their parameters\n"
+            "  entry_backtest --batch SPEC.json         many trials over the same days (JSON)\n"
+            "any of them: --strategies DIR (more strategy libraries), --json (the result as JSON)";
+        if (as_json) {
+            print_error_json(usage);
+        } else {
+            print_text(usage + "\n");
+        }
         return 1;
     }
 
@@ -609,11 +753,16 @@ int main(int argc, char* argv[]) {
                                             .strategy_setting = strategy_setting,
                                             .fills = true,
                                             .daily = &daily};
+        trial.execution.fee_scale = 1.0; // a person's run pays the fees, unless --costs says not
         read_costs(costs, trial);
         std::vector<backtest::BacktestRunSummary> summaries = backtest::run_backtests(
             parquet_files, std::span(&trial, 1), risk_free_rate, iv_price_mode, log_level);
         const std::string id = "0";
-        print_results(summaries, std::span(&trial, 1), std::span(&id, 1));
+        if (as_json) {
+            print_results(summaries, std::span(&trial, 1), std::span(&id, 1));
+        } else {
+            print_trial_text(trial_line(summaries.front(), trial, id), trial);
+        }
         return 0;
     } catch (const std::exception& e) {
         print_error_json(e.what());

@@ -1,6 +1,6 @@
 """What the system recorded about strategy versions, which only it writes: each paper day of a version's strategy
-against a backtest of the day (the daily report, services.session), and each look at a holdout (the promotion
-report). research.promotion reads them for its gates."""
+against a backtest of the day (the daily report, services.session). research.promotion reads them for its gates; a
+look at a holdout is the experiment whose days reach it (ledger: holdout)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import json
 from typing import Any
 
 from optra.research.space import canonical, resolved
-from optra.research.store import db, lock as _lock, now
+from optra.research.store import db, lock as _lock
 
 
 def record_paper_day(strategy_name: str, strategy: str, setting: dict[str, float], day: str, paper_net: float,
@@ -33,13 +33,3 @@ def paper_days(strategy: str, setting: dict[str, float], code: dict[str, str]) -
     days = [{**dict(r), "code": json.loads(r["code"])} for r in rows]
     return [d for d in days if d["code"].get("engine") == code.get("engine")
             and d["code"].get("strategy") == code.get("strategy")]
-
-
-def record_holdout_use(strategies: list[str], first: str, last: str) -> None:
-    with _lock:
-        db().executemany("INSERT INTO holdout_uses VALUES (?, ?, ?)",
-                         [(now(), s, f"{first}..{last}") for s in strategies])
-
-
-def holdout_uses(strategy: str) -> int:
-    return db().execute("SELECT COUNT(*) FROM holdout_uses WHERE strategy = ?", (strategy,)).fetchone()[0]

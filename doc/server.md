@@ -74,7 +74,7 @@ Each trial's results are kept day by day in `data/experiments.db`. From the matr
 - a **walk-forward**: the best trial on each window, traded on the next;
 - the best trial without its five best days, and on up, down, quiet and wild days.
 
-Doubled costs and parameters moved 20% either way are run as experiments of their own under the same family.
+Doubled costs, parameters moved 20% either way and the same setting on the other underlying over the same dates (SPXW for SPY, SPY for SPXW and XSP; reported, not a gate) are run as experiments of their own under the same family.
 
 For agents, `backtest` does all of this in one call: it registers a setting or a space, runs it beside a random-buying control, and answers with the measures, the statistics, the robustness checks and which review gates are met. `replay_trial` runs a trial again, uncounted, and returns its fills, its P&L by source and what it logged on the days asked for.
 

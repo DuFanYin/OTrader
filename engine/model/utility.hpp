@@ -1,21 +1,35 @@
 #pragma once
 
-/** Rounding, quotes' marks, the exchange's calendar and clock, and dates in text. */
+/** Rounding, quotes' marks, time to expiry, and dates in text (the calendar: session_calendar.hpp). */
 
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace model {
 
-// Calendar constant
-inline constexpr int ANNUAL_DAYS = 240;
-
-/** Round value to target tick (e.g. round_to(1.234, 0.01) -> 1.23). */
-double round_to(double value, double target);
+/** Rounded to `digits` decimals, halves away from zero (round_digits(1.235, 2) -> 1.24); scaled by
+ * an exact power of ten, not divided by a tick such as 0.01 that no double holds. */
+inline double round_digits(double value, int digits) {
+    if (digits < 0) {
+        return value;
+    }
+    // Exact powers of ten, the values std::pow gives for them, without its call.
+    static constexpr std::array<double, 9> kPowersOfTen{1e0, 1e1, 1e2, 1e3, 1e4,
+                                                        1e5, 1e6, 1e7, 1e8};
+    const double factor = std::cmp_less(digits, kPowersOfTen.size())
+                              ? kPowersOfTen[static_cast<std::size_t>(digits)]
+                              : std::pow(10.0, digits);
+    const double scaled = value * factor;
+    const double rounded = scaled >= 0.0 ? std::floor(scaled + 0.5) : std::ceil(scaled - 0.5);
+    return rounded / factor;
+}
 
 /** A quote's mark: its mid when it is quoted both ways, else the side quoted, else `otherwise`
  * (a price marked before, a last trade). */
@@ -30,35 +44,11 @@ inline double mark(double bid, double ask, double otherwise = 0.0) {
 }
 
 
-/** A day the New York Stock Exchange trades: a weekday that is not one of its holidays. The
- * holidays are listed for 2020 to 2027; outside those years every weekday counts. */
-bool is_trading_day(std::chrono::year_month_day date);
-
-/** The trading day after `date`. */
-std::chrono::year_month_day next_trading_day(std::chrono::year_month_day date);
-
-/** When the exchange closes on `date`, New York time of day: 16:00, or 13:00 on an early close
- * (the day before Independence Day, the day after Thanksgiving, Christmas Eve). */
-std::chrono::minutes session_close(std::chrono::year_month_day date);
-
-/** The instant `time_of_day` New York time on `date`, daylight saving included. */
-std::chrono::system_clock::time_point new_york_time(std::chrono::year_month_day date,
-                                                    std::chrono::minutes time_of_day);
-
-/** The instant an option expiring on `date` expires: the New York close it settles on
- * (session_close), daylight saving included. Backtest (OCC symbols) and live (database) both use
- * it. */
-std::chrono::system_clock::time_point option_expiry_time(std::chrono::year_month_day date);
-
-/** Years from now to expiry (a year of 365.25 days); 0 once it has passed, else at least 1e-6. */
+/** A year of calendar time, as Cboe counts it for the VIX: 365 days. */
+inline constexpr double kSecondsAYear = 365.0 * 24.0 * 3600.0;
+/** Years from now to expiry (kSecondsAYear); 0 once it has passed, else at least 1e-6. */
 double years_to_expiry(std::chrono::system_clock::time_point now,
                        std::chrono::system_clock::time_point expiry);
-
-/** The New York calendar date at t: the trading day it falls on. */
-std::chrono::year_month_day new_york_date(std::chrono::system_clock::time_point t);
-
-/** Minutes from the 09:30 New York open to t, on t's New York date (negative before the open). */
-int minutes_since_open(std::chrono::system_clock::time_point t);
 
 /** The text a time is kept in (UTC, to the second), as the UI shows it. */
 std::string datetime_to_str(std::chrono::system_clock::time_point tp);

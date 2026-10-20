@@ -5,10 +5,67 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <numeric>
 #include <ranges>
 #include <string>
 #include <vector>
+
+namespace quant {
+
+void greek_surface_grid(
+    double strike, double rate, double vol, double dividend_yield,
+    std::span<const double> spots,
+    std::span<const double> maturities,
+    int greek_code,
+    std::span<double> out_grid
+) {
+    const int n_s = static_cast<int>(spots.size());
+    const int n_t = static_cast<int>(maturities.size());
+    if (n_s == 0 || n_t == 0 || static_cast<int>(out_grid.size()) < n_s * n_t) return;
+
+#pragma omp parallel for schedule(static)
+    for (int i = 0; i < n_s; ++i) {
+        for (int j = 0; j < n_t; ++j) {
+            double g[5];   // delta, gamma, vega, theta, rho: greek_code's order
+            pricing_greeks(true, spots[i], strike, rate, dividend_yield, vol, maturities[j],
+                           &g[0], &g[1], &g[3], &g[2], &g[4]);
+            out_grid[i * n_t + j] = greek_code >= 0 && greek_code < 5 ? g[greek_code] : 0.0;
+        }
+    }
+}
+
+void pricing_batch(
+    std::span<const double> spots,
+    std::span<const double> strikes,
+    std::span<const double> rates,
+    std::span<const double> vols,
+    std::span<const double> maturities,
+    std::span<const int> n_paths_arr,
+    std::span<const double> div_yields,
+    std::span<double> out_mc,
+    std::span<double> out_bs,
+    std::span<double> out_binomial
+) {
+    const size_t n_jobs = spots.size();
+    if (n_jobs == 0) return;
+    if (strikes.size() != n_jobs || rates.size() != n_jobs || vols.size() != n_jobs ||
+        maturities.size() != n_jobs || n_paths_arr.size() != n_jobs ||
+        div_yields.size() != n_jobs ||
+        out_mc.size() != n_jobs || out_bs.size() != n_jobs || out_binomial.size() != n_jobs) return;
+
+#pragma omp parallel for schedule(dynamic)
+    for (int i = 0; i < static_cast<int>(n_jobs); ++i) {
+        const double s = spots[i], k = strikes[i], r = rates[i], q = div_yields[i];
+        const double v = vols[i], t = maturities[i];
+        const int steps = std::max(10, static_cast<int>(t * 250));
+        out_mc[i]       = mc_price(s, k, r, q, v, t, n_paths_arr[i], true);
+        out_bs[i]       = black_price(true, spot_forward(s, r, q, t), k, t, r, v);
+        out_binomial[i] = binomial_crr_price(s, k, r, q, v, t, steps, true, false);
+    }
+}
+
+}  // namespace quant
 
 namespace quant::analytics {
 
@@ -16,14 +73,6 @@ namespace {
 
 constexpr double kZ95 = 1.96;
 constexpr std::size_t kMaxBatchJobs = 500;
-
-double quantile_sorted(const std::vector<double>& sv, double q) {
-    if (sv.empty()) return 0.0;
-    const double pos = q * (sv.size() - 1);
-    const int lo = static_cast<int>(pos);
-    const int hi = std::min(lo + 1, static_cast<int>(sv.size()) - 1);
-    return sv[lo] * (1.0 - (pos - lo)) + sv[hi] * (pos - lo);
-}
 
 double pop_std(const std::vector<double>& v) {
     if (v.empty()) return 0.0;
@@ -100,8 +149,8 @@ std::string batch_answer(const std::vector<Option>& jobs, double t0_ms) {
         {"job_count", n},
         {"total_compute_ms", ms},
         {"avg_method_spread", mean},
-        {"p50_method_spread", quantile_sorted(sorted, 0.50)},
-        {"p95_method_spread", quantile_sorted(sorted, 0.95)},
+        {"p50_method_spread", interp_quantile_sorted(sorted, 0.50)},
+        {"p95_method_spread", interp_quantile_sorted(sorted, 0.95)},
         {"max_method_spread", sorted.empty() ? 0.0 : sorted.back()},
         {"min_method_spread", sorted.empty() ? 0.0 : sorted.front()},
         {"avg_runtime_per_job_ms", n > 0 ? ms / n : 0.0},
@@ -446,6 +495,69 @@ std::string run_black_batch_json(const std::string& src, double t0_ms) {
     for (std::size_t i = 0; i < n; ++i)
         ivs[i] = quant::black_implied_vol(values[i], forwards[i], strikes[i], maturities[i], rate, is_call[i]);
     return ok_response({{"n_points", (int)n}, {"mode", "implied_vol"}}, {{"ivs", ivs}}, t0_ms);
+}
+
+// A synthetic day's quotes (app/server optra.data.synthetic_days): each contract every minute at its
+// Black price (on the forward, the spot grown at `rate`, discounted at it; at expiry its payoff) at the
+// smile's vol, bid and ask a spread around it on the tick. In: "times" and "expiries" in seconds since
+// the epoch, "spots" a minute, "strikes" and "is_call" a contract, the model's rate, implied_vol, skew,
+// smile, tick, spread. Out: "bids" and "asks", minute by minute, a contract each.
+std::string run_synthetic_quotes_json(const std::string& src, double t0_ms) {
+    const auto req = parse_request(src, {"rate", "implied_vol", "tick", "spread"},
+                                   "missing_required_synthetic_quotes_fields");
+    if (!req) return req.error();
+    const auto& j = *req;
+    for (const std::string arr : {"times", "spots", "expiries", "strikes", "is_call"}) {
+        if (!j.contains(arr) || !j[arr].is_array()) return err_response("missing_array_" + arr);
+    }
+    const auto times = j["times"].get<std::vector<std::int64_t>>();
+    const auto spots = j["spots"].get<std::vector<double>>();
+    const auto expiries = j["expiries"].get<std::vector<std::int64_t>>();
+    const auto strikes = j["strikes"].get<std::vector<double>>();
+    const auto is_call = j["is_call"].get<std::vector<bool>>();
+    if (spots.size() != times.size() || strikes.size() != expiries.size() || is_call.size() != expiries.size())
+        return err_response("array_length_mismatch");
+    const double rate = jv(j, "rate", 0.0), iv = jv(j, "implied_vol", 0.0), skew = jv(j, "skew", 0.0),
+                 smile = jv(j, "smile", 0.0), tick = jv(j, "tick", 0.0), spread = jv(j, "spread", 0.0);
+    if (iv <= 0.0) return err_response("implied_vol_must_be_positive");
+    constexpr double kYearSeconds = 365.0 * 24 * 3600; // model::kSecondsAYear
+    constexpr double kMinT = 1e-6, kMinIv = 0.01, kMaxIv = 3.0;
+    // Python's round(v, places), which the generator's quotes were made with: the float noise of a
+    // division off before flooring onto the tick.
+    const auto round_to = [](double v, double places) { return std::nearbyint(v * places) / places; };
+    const std::size_t n = expiries.size();
+    std::vector<double> bids(times.size() * n), asks(times.size() * n);
+    for (std::size_t m = 0; m < times.size(); ++m) {
+        for (std::size_t c = 0; c < n; ++c) {
+            const std::int64_t secs = expiries[c] - times[m];
+            const double t = secs <= 0 ? 0.0 : std::max(kMinT, static_cast<double>(secs) / kYearSeconds);
+            const double forward = spots[m] * std::exp(rate * t);
+            double price = 0.0;
+            if (t <= 0.0) {
+                price = std::max(is_call[c] ? forward - strikes[c] : strikes[c] - forward, 0.0);
+            } else {
+                double vol = iv;
+                if (skew != 0.0 || smile != 0.0) {
+                    const double z = std::log(strikes[c] / forward) / (iv * std::sqrt(t));
+                    vol = std::clamp(iv + skew * z + smile * z * z, kMinIv, kMaxIv);
+                }
+                price = quant::black_price(is_call[c], forward, strikes[c], t, rate, vol);
+            }
+            const double half = std::max(tick, spread * price) / 2.0;
+            double bid = 0.0, ask = 0.0;
+            if (tick <= 0.0) {
+                bid = std::max(price - half, 0.0);
+                ask = price + half;
+            } else {
+                bid = round_to(std::max(std::floor(round_to((price - half) / tick, 1e9)) * tick, 0.0), 1e10);
+                ask = round_to(std::max(std::ceil(round_to((price + half) / tick, 1e9)) * tick, tick), 1e10);
+            }
+            bids[(m * n) + c] = bid;
+            asks[(m * n) + c] = ask;
+        }
+    }
+    return ok_response({{"minutes", (int)times.size()}, {"contracts", (int)n}}, {{"bids", bids}, {"asks", asks}},
+                       t0_ms);
 }
 
 }  // namespace quant::analytics

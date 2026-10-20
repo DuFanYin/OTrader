@@ -8,6 +8,7 @@
  * Writes temporary Parquet files.
  */
 #include "adapters/market_data/data_loader.hpp"
+#include "core/bookkeeping/bookkeeping_engine.hpp"
 #include "adapters/market_data/historical_data.hpp"
 #include "adapters/market_data/simulated_market_data.hpp"
 #include "model/portfolios.hpp"
@@ -293,7 +294,9 @@ TEST_F(ParquetQuotesTest, TheSimulatedMarketAnswersADaysCloseFromThatDaysFile) {
     auto source = std::make_unique<adapters::SimulatedMarketData>(
         std::vector<std::string>{(month / "20250805.parquet").string()},
         [] { return model::DateTime{}; }, nullptr);
-    core::MarketDataEngine engine(nullptr, portfolios, std::move(source),
+    core::BookkeepingEngine bookkeeping(nullptr, portfolios);
+    const core::StrategyEngine strategies(nullptr, portfolios, bookkeeping, {});
+    core::MarketDataEngine engine(nullptr, portfolios, strategies, std::move(source),
                                   [](const model::PortfolioSnapshot&) {});
     std::mutex m;
     std::condition_variable answered;
@@ -313,6 +316,45 @@ TEST_F(ParquetQuotesTest, TheSimulatedMarketAnswersADaysCloseFromThatDaysFile) {
     EXPECT_DOUBLE_EQ(closes.front(), 5000.25); // the last minute quoted both sides: its mid
     answered.wait_for(lock, milliseconds(500), [&] { return closes.size() > 1; });
     EXPECT_EQ(closes.size(), 1U);
+    lock.unlock();
+    engine.stop();
+}
+
+TEST_F(ParquetQuotesTest, TheSimulatedMarketAnswersADaysRangeFromThatDaysFile) {
+    using namespace std::chrono;
+    const fs::path month = dir_ / "SPY" / "SPY-2025-08";
+    fs::create_directories(month);
+    const std::vector<Row> rows{{.minute = 0, .symbol = kCall, .underlying_bid = 5000.0},
+                                {.minute = 1, .symbol = kCall, .underlying_bid = 5010.0},
+                                {.minute = 2, .symbol = kCall, .underlying_bid = 4990.0},
+                                {.minute = 3, .symbol = kCall, .underlying_bid = std::nullopt}};
+    write_file(month / "20250804.parquet", rows);
+    model::Portfolios portfolios;
+    portfolios.ensure_portfolios_created();
+    auto source = std::make_unique<adapters::SimulatedMarketData>(
+        std::vector<std::string>{(month / "20250804.parquet").string()},
+        [] { return model::DateTime{}; }, nullptr);
+    core::BookkeepingEngine bookkeeping(nullptr, portfolios);
+    const core::StrategyEngine strategies(nullptr, portfolios, bookkeeping, {});
+    core::MarketDataEngine engine(nullptr, portfolios, strategies, std::move(source),
+                                  [](const model::PortfolioSnapshot&) {});
+    std::mutex m;
+    std::condition_variable answered;
+    std::optional<std::array<double, 3>> range;
+    engine.on_day_range([&](const std::string& underlying, year_month_day day, double open,
+                            double high, double low) {
+        const std::lock_guard lock(m);
+        EXPECT_EQ(underlying, "SPY");
+        EXPECT_EQ(day, 2025y / August / 4);
+        range = std::array{open, high, low};
+        answered.notify_all();
+    });
+    engine.start();
+    ASSERT_TRUE(engine.ask_day_range("SPY", 2025y / August / 4));
+    std::unique_lock lock(m);
+    ASSERT_TRUE(answered.wait_for(lock, seconds(5), [&] { return range.has_value(); }));
+    // The first minute's mid, the highest and lowest; a minute without the underlying left out.
+    EXPECT_EQ(*range, (std::array{5000.25, 5005.25, 4995.25})); // asks 5000.5
     lock.unlock();
     engine.stop();
 }

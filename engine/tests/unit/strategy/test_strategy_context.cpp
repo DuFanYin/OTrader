@@ -3,13 +3,16 @@
  * it, and this test links the strategy layer alone: no engine, so none can sneak back in.
  */
 #include "strategy/strategy_context.hpp"
+#include "model/session_calendar.hpp"
 #include "strategy/strategy.hpp"
-#include "quant/kernel.h"
+#include "quant/engine_api.h"
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <chrono>
 #include <format>
 #include <gtest/gtest.h>
+#include <map>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -50,12 +53,18 @@ class FakeContext final : public strategy::StrategyContext {
     }
     void unregister_hedging() override { hedged = false; }
     void subscribe_chains(std::span<const std::string> chains) override {
-        subscribed.assign(chains.begin(), chains.end());
+        chains_subscribed.assign(chains.begin(), chains.end());
+    }
+    bool subscribed(std::string_view chain) const override {
+        return std::ranges::contains(chains_subscribed, chain);
     }
     void write_log(const std::string& msg, utilities::LogLevel /*level*/) const override {
         logs.push_back(msg);
     }
     void set_error(const std::string& msg) override { errors.push_back(msg); }
+    void write_value(std::string_view name, double value) override {
+        values.insert_or_assign(std::string(name), value);
+    }
 
     model::DailyTable table;
 
@@ -74,9 +83,10 @@ class FakeContext final : public strategy::StrategyContext {
     std::vector<std::string> orders;
     std::vector<std::string> combos;
     bool hedged = false;
-    std::vector<std::string> subscribed;
+    std::vector<std::string> chains_subscribed;
     std::vector<std::string> errors;
     mutable std::vector<std::string> logs;
+    std::map<std::string, double> values;
 
   private:
     model::StrategyRecord record_{.name = "probe", .setting = {{"timer_trigger", 1}}};
@@ -98,7 +108,7 @@ TEST(StrategyContext, AStrategyActsThroughItsContextAlone) {
     FakeContext context;
     Probe probe(context);
     probe.on_init();
-    EXPECT_EQ(context.subscribed, std::vector<std::string>{"SPY_20991218"});
+    EXPECT_EQ(context.chains_subscribed, std::vector<std::string>{"SPY_20991218"});
     EXPECT_TRUE(context.hedged);
 
     EXPECT_EQ(probe.send_order(std::array{probe.leg("SPY", model::Side::BUY)}, 0.0, 2.0),
@@ -165,7 +175,7 @@ TEST(Strategy, AChainOrAStrikeNotThereIsNone) {
     EXPECT_TRUE(probe.select_chain(0, 5).empty()); // decades away
     const std::string chain = probe.select_chain(0, 100'000);
     ASSERT_EQ(chain, "SPY_20991218");
-    EXPECT_EQ(context.subscribed, std::vector<std::string>{chain});
+    EXPECT_EQ(context.chains_subscribed, std::vector<std::string>{chain});
     EXPECT_FALSE(probe.find_chain("SPY_20991219")); // not subscribed
     probe.subscribe_chains(std::vector<std::string>{"SPY_20991219"});
     EXPECT_FALSE(probe.find_chain("SPY_20991219")); // subscribed, not listed
@@ -221,7 +231,7 @@ TEST(Strategy, ClosingSendsWhatCanBeClosedAndLogsWhatCannot) {
     model::StrategyHolding& holding = context.held;
     holding.shares.symbol = "SPY";
     holding.shares.quantity = -5;
-    model::OptionPosition unlisted(spy_option(model::OptionType::CALL, 999));
+    model::OptionPosition unlisted(spy_option(model::OptionType::CALL, 999), 100.0);
     unlisted.quantity = 1;
     holding.options.insert_or_assign(unlisted.symbol, unlisted);
 
@@ -230,8 +240,8 @@ TEST(Strategy, ClosingSendsWhatCanBeClosedAndLogsWhatCannot) {
 
     // Options one of which is not listed: not sent, and said so.
     std::vector<model::OptionPosition> options{
-        model::OptionPosition(spy_option(model::OptionType::CALL, 600)),
-        model::OptionPosition(spy_option(model::OptionType::PUT, 999))};
+        model::OptionPosition(spy_option(model::OptionType::CALL, 600), 100.0),
+        model::OptionPosition(spy_option(model::OptionType::PUT, 999), 100.0)};
     options[0].quantity = 1;
     options[1].quantity = 1;
     probe.close_options(options);
@@ -249,7 +259,7 @@ TEST(StrategyContext, ValuesByDayAreAsOfTheDayBefore) {
     context.table.set("SPY", {{2025y / March / 3, 100.0}, {2025y / March / 4, 101.0},
                               {2025y / March / 5, 99.0}, {2025y / March / 6, 500.0}});
     context.table.set("FOMC", {{2025y / March / 19, 1.0}});
-    context.quote(model::new_york_time(2025y / March / 6, 10h)); // Thursday, 10:00
+    context.quote(model::kNyse.at(2025y / March / 6, 10h)); // Thursday, 10:00
     context.spy().set_trading_day(sys_days{2025y / March / 6});
     Idle s(context);
     EXPECT_EQ(s.daily("SPY"), 99.0); // Wednesday's close, not today's
@@ -261,6 +271,19 @@ TEST(StrategyContext, ValuesByDayAreAsOfTheDayBefore) {
     ASSERT_TRUE(vol.has_value());
     EXPECT_GT(*vol, 0.0);
     EXPECT_EQ(s.rank_in("SPY", 100.0, 3), 2.0 / 3.0); // 100 and 99 of 100, 101, 99
+}
+
+TEST(StrategyContext, ASeriesNoLongerKeptIsMissingNotItsLastValue) {
+    using namespace std::chrono;
+    FakeContext context;
+    context.table.set("FIVE", {{2025y / February / 26, 1.0}}); // Feb 27, 28, Mar 3, 4, 5 missed
+    context.table.set("SIX", {{2025y / February / 25, 2.0}});  // and Feb 26: one too many
+    context.quote(model::kNyse.at(2025y / March / 6, 10h));
+    context.spy().set_trading_day(sys_days{2025y / March / 6});
+    Idle s(context);
+    EXPECT_EQ(s.daily("FIVE"), 1.0);
+    EXPECT_EQ(s.daily("SIX"), std::nullopt);
+    EXPECT_TRUE(s.daily_history("SIX", 3).empty());
 }
 
 TEST(StrategyContext, TheSkewAndTheTermSlopeComeFromTheChainsNow) {

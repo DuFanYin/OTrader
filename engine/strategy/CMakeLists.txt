@@ -12,12 +12,12 @@ target_link_libraries(strategies PUBLIC model ${CMAKE_DL_LIBS})
 
 # The strategy API: a hash of the headers strategies compile against, in every program and
 # strategy library; a library with another is refused (StrategyRegistry::load).
+# Only what strategy.hpp reaches: a change to the rest of the numerics or utilities refuses none.
 file(GLOB STRATEGY_API_HEADERS CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_SOURCE_DIR}/*.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../model/*.hpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../utilities/*.hpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../quant/kernel.h
-  ${CMAKE_CURRENT_SOURCE_DIR}/../quant/screener/*.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/../quant/engine_api.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/../utilities/log_level.hpp
 )
 set(STRATEGY_API ${CMAKE_CURRENT_BINARY_DIR}/strategy_api.hpp)
 add_custom_command(

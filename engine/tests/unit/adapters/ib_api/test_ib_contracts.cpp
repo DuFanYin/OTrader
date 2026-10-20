@@ -3,6 +3,7 @@
  * under, and the expiries a sync asks IB for.
  */
 #include "adapters/ib_api/ib_api.hpp"
+#include "model/session_calendar.hpp"
 #include "model/utility.hpp"
 #include <chrono>
 #include <gtest/gtest.h>
@@ -36,7 +37,7 @@ TEST(IbContracts, AnOptionIsNamedByItsTradingClass) {
     EXPECT_EQ(c.symbol, "SPXW-20261016-C-5800");
     EXPECT_EQ(c.option_strike, 5800.0);
     EXPECT_EQ(c.option_type, model::OptionType::CALL);
-    EXPECT_EQ(c.option_expiry, model::option_expiry_time(2026y / October / 16));
+    EXPECT_EQ(c.option_expiry, model::kNyse.expiry_time(2026y / October / 16));
     EXPECT_EQ(c.option_underlying, "SPX");
     EXPECT_EQ(c.name, "SPXW  261016C05800000");
     EXPECT_EQ(c.product, model::Product::OPTION);

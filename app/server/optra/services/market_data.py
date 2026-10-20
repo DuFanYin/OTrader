@@ -23,7 +23,7 @@ import statistics
 import time
 import xml.etree.ElementTree as ET  # the Treasury's rate feed
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -75,7 +75,7 @@ _FB_FUNDING = 0.0001   # ~10 bps per 8 h — typical neutral funding
 
 def _years_to_expiry(expiry_ts_ms: int) -> float:
     now = datetime.now(timezone.utc).timestamp()
-    return max((expiry_ts_ms / 1000 - now) / (365.25 * 24 * 3600), 1e-6)
+    return max((expiry_ts_ms / 1000 - now) / (365 * 24 * 3600), 1e-6)
 
 
 # ── 1. Spot ───────────────────────────────────────────────────────────────────
@@ -220,7 +220,7 @@ def normalize_deribit_chain(instruments: list[dict], summaries: list[dict],
             "expiry_ts":   expiry_ms,
             "strike":      float(inst["strike"]),
             "forward":     forward,
-            "years":       max((expiry_ms - now_ms) / 1000 / (365.25 * 24 * 3600), 1e-6),
+            "years":       max((expiry_ms - now_ms) / 1000 / (365 * 24 * 3600), 1e-6),
             "bid":         bid * forward if bid is not None else None,
             "ask":         ask * forward if ask is not None else None,
             "mark":        mark * forward,
@@ -580,6 +580,32 @@ async def _download_rate_curve() -> tuple[dict[str, float], str | None]:
         raise ValueError("no rates in the latest entry")
     date = props.find(f"{{{ns}}}NEW_DATE")
     return {**_FALLBACK_CURVE, **curve}, (date.text[:10] if date is not None and date.text else None)
+
+
+# The Treasury's par yields under FRED's names for the same series: the five a backtest's day is priced with.
+TREASURY_SERIES = {"BC_1MONTH": "DGS1MO", "BC_3MONTH": "DGS3MO", "BC_6MONTH": "DGS6MO", "BC_1YEAR": "DGS1",
+                   "BC_2YEAR": "DGS2"}
+
+
+def treasury_days(month: date) -> dict[str, dict[str, float]]:
+    """Each day of the month the Treasury has published its yield curve (YYYY-MM-DD): the five yields, percent, under
+    TREASURY_SERIES's names; a day missing one left out."""
+    url = ("https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml"
+           f"?data=daily_treasury_yield_curve&field_tdr_date_value_month={month:%Y%m}")
+    ns, atom = "http://schemas.microsoft.com/ado/2007/08/dataservices", "http://www.w3.org/2005/Atom"
+    r = httpx.get(url, timeout=60.0)
+    r.raise_for_status()
+    out = {}
+    for entry in ET.fromstring(r.text).findall(f"{{{atom}}}entry"):
+        props = entry.find(f"{{{atom}}}content/{{{ns}/metadata}}properties")
+        day = props.find(f"{{{ns}}}NEW_DATE") if props is not None else None
+        if day is None or not day.text:
+            continue
+        yields = {name: float(el.text) for field, name in TREASURY_SERIES.items()
+                  if (el := props.find(f"{{{ns}}}{field}")) is not None and el.text}
+        if len(yields) == len(TREASURY_SERIES):
+            out[day.text[:10]] = yields
+    return out
 
 
 async def refresh_rate_curve() -> None:

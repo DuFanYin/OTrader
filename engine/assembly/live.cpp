@@ -2,7 +2,6 @@
 
 #include "assembly/live.hpp"
 #include "adapters/database/sqlite_database.hpp"
-#include "model/symbol.hpp"
 #include "model/utility.hpp"
 #include "strategy/strategy_registry.hpp"
 #ifdef OPTRA_WITH_IB
@@ -69,21 +68,8 @@ void load_saved_contracts(core::Main& main) {
     const std::vector<model::Contract> options = main.database()->load_option_contracts();
     const std::vector<model::Contract> equities = main.database()->load_equity_contracts();
     std::vector<model::Contract> contracts = equities;
-    std::size_t foreign = 0; // named differently by an older sync
-    for (const model::Contract& c : options) {
-        if (model::parse_option_symbol(c.symbol)) {
-            contracts.push_back(c);
-        } else {
-            ++foreign;
-        }
-    }
+    contracts.insert(contracts.end(), options.begin(), options.end());
     structure.load_contracts(contracts);
-    if (foreign > 0) {
-        main.write_log(std::format("Skipped {} option contracts not named the platform's way: "
-                                   "sync the contracts again",
-                                   foreign),
-                       utilities::WARNING);
-    }
     main.write_log(std::format("Loaded {} contracts", options.size() + equities.size()),
                    utilities::INFO);
     const auto today = std::chrono::floor<std::chrono::days>(main.now());
@@ -324,18 +310,31 @@ void TradingDays::run_days(std::stop_token stop, std::vector<Synced> portfolios,
     if (portfolios.empty()) {
         return; // nothing to roll: the contracts saved are the engine's
     }
-    // Each day before the open; a failed sync retries each minute on yesterday's contracts.
-    year_month_day day = model::new_york_date(main_.now());
-    if (!model::is_trading_day(day) || main_.now() >= model::new_york_time(day, kRollTime)) {
-        day = model::next_trading_day(day);
+    // Each day at the earliest roll of the portfolios' calendars, on that calendar's days (a
+    // calendar that never rolls, a market open around the clock, only syncs, above); a failed
+    // sync retries each minute on yesterday's contracts.
+    const model::SessionCalendar* calendar = nullptr;
+    for (const Synced& s : portfolios) {
+        const model::SessionCalendar& c = model::calendar_of(s.first);
+        if (c.roll && (calendar == nullptr || *c.roll < *calendar->roll)) {
+            calendar = &c;
+        }
     }
-    while (sleep_until(model::new_york_time(day, kRollTime))) {
+    if (calendar == nullptr) {
+        return;
+    }
+    const minutes roll = *calendar->roll;
+    year_month_day day = calendar->date_of(main_.now());
+    if (!calendar->is_trading_day(day) || main_.now() >= calendar->at(day, roll)) {
+        day = calendar->next_trading_day(day);
+    }
+    while (sleep_until(calendar->at(day, roll))) {
         try {
             if (!connected()) {
                 throw std::runtime_error("not connected to the broker");
             }
             main_.roll_day(portfolios);
-            day = model::next_trading_day(day);
+            day = calendar->next_trading_day(day);
         } catch (const std::exception& e) {
             main_.write_log(std::format("The day's contracts did not come in ({}): trying again "
                                         "in a minute",

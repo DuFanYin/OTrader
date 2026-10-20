@@ -31,11 +31,14 @@ LogEngine::~LogEngine() {
     if (thread_.joinable()) {
         thread_.join(); // it writes what is queued first
     }
+    if (rings_ == nullptr) {
+        return; // nothing ever logged
+    }
     utilities::LogRecord* p = nullptr;
-    while (queue_.try_pop(p)) { // logged as it stopped
+    while (rings_->queue.try_pop(p)) { // logged as it stopped
         log_pool_.release(p);
     }
-    while (stream_ring_.try_pop(p)) {
+    while (rings_->stream.try_pop(p)) {
         log_pool_.release(p);
     }
 }
@@ -44,7 +47,7 @@ auto LogEngine::acquire(utilities::LogLevel level) -> utilities::LogRecord* {
     if (level < level_) {
         return nullptr;
     }
-    return log_pool_.acquire(); // null when the pool is closing
+    return log_pool_.take(); // null when the pool is closing
 }
 
 void LogEngine::log(const utilities::LogRecord& record) {
@@ -73,8 +76,12 @@ void LogEngine::enqueue(utilities::LogRecord* p) {
     if (p->time.empty() && p->at == std::chrono::system_clock::time_point{}) {
         p->at = clock_ ? clock_() : std::chrono::system_clock::now(); // the text is the log thread's
     }
-    std::call_once(thread_started_, [this] { thread_ = std::thread([this] { run(); }); });
-    if (!queue_.try_push(p)) {
+    std::call_once(thread_started_, [this] {
+        rings_ = std::make_unique<Rings>();
+        started_.store(rings_.get(), std::memory_order_release);
+        thread_ = std::thread([this] { run(); });
+    });
+    if (!rings_->queue.try_push(p)) {
         log_pool_.release(p);
         ++dropped_; // the log thread says how many
         wakeup_.wake();
@@ -107,7 +114,7 @@ void LogEngine::run() {
         const bool stopping = stopping_.load(std::memory_order_acquire);
         bool wrote = false;
         utilities::LogRecord* p = nullptr;
-        while (queue_.try_pop(p)) {
+        while (rings_->queue.try_pop(p)) {
             stamp(*p);
             write(*p);
             stream(p);
@@ -129,7 +136,7 @@ void LogEngine::run() {
         if (wrote && !sink_) {
             std::fflush(stdout); // stdout to a file is block-buffered: written once a batch
         }
-        if (stopping && queue_.empty()) {
+        if (stopping && rings_->queue.empty()) {
             return;
         }
     }
@@ -157,14 +164,15 @@ void LogEngine::write(const utilities::LogRecord& record) {
 }
 
 void LogEngine::stream(utilities::LogRecord* record) {
-    if (!stream_ring_.try_push(record)) {
+    auto& ring = rings_->stream;
+    if (!ring.try_push(record)) {
         // Full, as when nothing reads the stream: drop the oldest, so it holds the latest.
         std::scoped_lock lock(stream_mutex_);
         utilities::LogRecord* oldest = nullptr;
-        if (stream_ring_.try_pop(oldest)) {
+        if (ring.try_pop(oldest)) {
             log_pool_.release(oldest);
         }
-        if (!stream_ring_.try_push(record)) {
+        if (!ring.try_push(record)) {
             log_pool_.release(record);
             return;
         }
@@ -177,12 +185,15 @@ void LogEngine::stream(utilities::LogRecord* record) {
 
 auto LogEngine::pop_log_for_stream(utilities::LogRecord& out, int timeout_ms) -> bool {
     std::unique_lock lock(stream_mutex_);
-    if (!stream_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
-                             [this] { return !stream_ring_.empty(); })) {
+    Rings* rings = nullptr;
+    if (!stream_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this, &rings] {
+            rings = started_.load(std::memory_order_acquire);
+            return rings != nullptr && !rings->stream.empty();
+        })) {
         return false;
     }
     utilities::LogRecord* p = nullptr;
-    if (!stream_ring_.try_pop(p) || p == nullptr) {
+    if (!rings->stream.try_pop(p) || p == nullptr) {
         return false;
     }
     lock.unlock();

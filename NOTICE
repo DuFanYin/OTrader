@@ -1,0 +1,9 @@
+Optra
+Copyright 2026 Hang Zhengyang
+
+Licensed under the Apache License, Version 2.0 (LICENSE).
+
+Third-party code fetched at build time keeps its own license: the TWS API (Interactive Brokers),
+the Intel Decimal Floating-Point Math Library, LetsBeRational (Peter Jäckel).
+
+Trading carries substantial risk; connecting Optra to a live account is at your own risk.

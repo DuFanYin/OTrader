@@ -52,7 +52,7 @@ The research side finds and tests trade ideas before they reach the paper accoun
 |---|---|
 | Pricing | Black-Scholes in closed form (calls, puts, dividend yield, a currency mode, digital calls). Monte Carlo up to 20 million paths: plain, antithetic, Sobol. Binomial and trinomial trees, European and American. Finite differences (explicit, implicit, Crank-Nicolson; American by PSOR), the time step refined when an explicit scheme would be unstable. Longstaff-Schwartz for American options. Up to 500 options in one call |
 | Implied volatility | Jäckel's "Let's Be Rational" on the Black price (`quant/pricing/black.cpp`), the same function in the engine and the tools |
-| Calibration | Heston prices from the characteristic function (a form without branch-cut problems); a Heston fit to market prices by bounded Nelder-Mead, graded by its error as a share of the average quote. `ComboStrategy` uses the same calibration live |
+| Calibration | Heston prices from the characteristic function (a form without branch-cut problems); a Heston fit to market prices by bounded Nelder-Mead, graded by its error as a share of the average quote. A smile as raw SVI (`quant/pricing/svi.cpp`): Zeliade's quasi-explicit fit to the out-of-the-money IVs, each residual over its half spread, checked for butterfly arbitrage; the engine fits every chain with it |
 | Stress | four scenario packs (Core 4, Vol First, Rates First, Crash Kit), three severities each. Each scenario reprices by three methods, optionally hedges, and splits P&L into spot, volatility and rate; a summary gives a robustness score, the main driver and the worst case. A position is stressed whole, each leg with its own volatility and forward; the live engine's holdings too |
 | Hedging | a position (by default one option sold) delta-hedged on simulated paths four ways: fixed steps, with transaction costs, only past a delta threshold, with deltas from the wrong volatility. Each: P&L distribution, VaR and expected shortfall at 95%, turnover, costs; cost against tail risk plotted. On real days, the engine's own hedge is compared instead |
 | Screener | strikes against each expiry's forward, Greeks by Black-76, costs at the price you would trade (ask to buy, bid to sell) unless the mid is asked for. Model value from the option's mark, a flat volatility, an IV surface, or a Heston model fitted to the chain. About two million iron condors enumerated in about 12 ms |
@@ -94,7 +94,9 @@ r["result_summary"]["bs"]
 - Run again unchanged, a config finds its trials in the ledger and counts nothing new.
 - The folder belongs to the owner and the agents and is not in git.
 
-**New ideas are settings of `ComboStrategy`**, not new classes:
+**A new idea is a class of its own** in `strategy/research/`: its rules and the features it reads, computed in it as it runs from what the backtest gives (quotes, IVs, smiles, the values by day). The same code then trades it live.
+
+**`ComboStrategy`** runs a combo picked in the lab and sweeps a structure; it gets no new filters. Its parameters:
 
 | Parameter group | What it sets |
 |---|---|

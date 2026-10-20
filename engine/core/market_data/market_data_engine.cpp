@@ -2,9 +2,11 @@
 #include "model/portfolio.hpp"
 #include "model/symbol.hpp"
 #include "model/utility.hpp"
+#include "pricing/pricing.hpp"
 #include "utilities/latency.hpp"
 #include "utilities/log_level.hpp"
 #include "utilities/text.hpp"
+#include "utilities/thread_pool.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <format>
@@ -22,29 +24,16 @@ template <typename T> void make_set(std::vector<T>& values) {
     values.erase(std::ranges::unique(values).begin(), values.end());
 }
 
-/** The names' places in index, and the names not found. */
-template <typename Index>
-auto split_found(const Index& index, std::span<const std::string> names)
-    -> std::pair<std::vector<typename Index::mapped_type>, std::vector<std::string>> {
-    std::pair<std::vector<typename Index::mapped_type>, std::vector<std::string>> out;
-    for (const std::string& name : names) {
-        if (const auto it = index.find(name); it != index.end()) {
-            out.first.push_back(it->second);
-        } else {
-            out.second.push_back(name);
-        }
-    }
-    return out;
-}
-
 } // namespace
 
 MarketDataEngine::MarketDataEngine(utilities::Logger* logger,
                                    const model::Portfolios& structure,
+                                   const StrategyEngine& strategies,
                                    std::unique_ptr<MarketData> market_data,
                                    SnapshotSink on_snapshot, std::chrono::milliseconds interval)
-    : log_(logger, "MarketData"), structure_(structure), on_snapshot_(std::move(on_snapshot)),
-      interval_(interval), market_data_(std::move(market_data)) {
+    : log_(logger, "MarketData"), structure_(structure), strategies_(strategies),
+      on_snapshot_(std::move(on_snapshot)), interval_(interval),
+      market_data_(std::move(market_data)) {
     lay_out();
 }
 
@@ -75,6 +64,10 @@ void MarketDataEngine::stop() {
     log_.write_log("Market data stopped", utilities::INFO);
 }
 
+void MarketDataEngine::use_rates(model::RateCurve rates) {
+    rates_.store(std::make_shared<const model::RateCurve>(std::move(rates)));
+}
+
 auto MarketDataEngine::ask_close(const std::string& underlying, std::chrono::year_month_day day)
     -> bool {
     std::unique_lock lock(control_mutex_, std::try_to_lock); // not while starting or stopping
@@ -89,6 +82,23 @@ void MarketDataEngine::closed(const std::string& underlying, std::chrono::year_m
                               double close) {
     if (on_close_) {
         on_close_(underlying, day, close);
+    }
+}
+
+auto MarketDataEngine::ask_day_range(const std::string& underlying,
+                                     std::chrono::year_month_day day) -> bool {
+    std::unique_lock lock(control_mutex_, std::try_to_lock); // not while starting or stopping
+    if (!lock.owns_lock() || !running_) {
+        return false;
+    }
+    market_data_->ask_day_range(underlying, day);
+    return true;
+}
+
+void MarketDataEngine::day_range(const std::string& underlying, std::chrono::year_month_day day,
+                                 double open, double high, double low) {
+    if (on_day_range_) {
+        on_day_range_(underlying, day, open, high, low);
     }
 }
 
@@ -115,10 +125,9 @@ void MarketDataEngine::lay_out() {
         if (const std::optional<model::Underlying> u = portfolio->underlying()) {
             book.underlying = portfolio->contract(u->symbol());
         }
-        if (!portfolio->hedge_symbol.empty()) {
-            book.hedge = portfolio->contract(portfolio->hedge_symbol);
+        if (const std::string_view hedge = portfolio->hedge_symbol(); !hedge.empty()) {
+            book.hedge = portfolio->contract(hedge);
         }
-        book.portfolio = portfolio;
         book.listing = portfolio->shared_listing();
         book.snapshot = portfolio->snapshot();
         const model::Listing& listing = *book.listing;
@@ -134,150 +143,39 @@ void MarketDataEngine::lay_out() {
         }
     }
     next_replan_ = {};
-
-    // What was subscribed and held, found again among the new contracts (by name).
-    std::scoped_lock lock(subscriptions_mutex_);
-    subscriptions_.clear();
-    for (const auto& [strategy_name, chains] : subscribed_) {
-        subscriptions_[strategy_name] = resolve_chains(chains).first;
-    }
-    streamed_ = resolve_options(streamed_options_).first;
-}
-
-auto MarketDataEngine::resolve_chains(std::span<const std::string> chains) const
-    -> std::pair<std::vector<std::size_t>, std::vector<std::string>> {
-    return split_found(chain_index_, chains);
-}
-
-auto MarketDataEngine::resolve_options(std::span<const std::string> options) const
-    -> std::pair<std::vector<QuoteSlot>, std::vector<std::string>> {
-    return split_found(option_slots_, options);
-}
-
-void MarketDataEngine::subscribe_chains(const std::string& strategy_name,
-                                        std::span<const std::string> chains) {
-    auto [found, unknown] = resolve_chains(chains);
-    {
-        std::scoped_lock lock(subscriptions_mutex_);
-        subscribed_[strategy_name] = {chains.begin(), chains.end()};
-        subscriptions_[strategy_name] = std::move(found);
-    }
-    if (market_data_) { // nothing streams without a source
-        log_.write_log(std::format("{} subscribes {}", strategy_name, utilities::join(chains)),
-                       utilities::INFO);
-        if (!unknown.empty()) {
-            log_.write_log(std::format("{}: no chain {} to stream", strategy_name,
-                                       utilities::join(unknown)),
-                           utilities::WARNING);
-        }
-    }
-    subscriptions_changed();
-}
-
-void MarketDataEngine::unsubscribe_chains(const std::string& strategy_name) {
-    {
-        std::scoped_lock lock(subscriptions_mutex_);
-        subscribed_.erase(strategy_name);
-        subscriptions_.erase(strategy_name);
-    }
-    subscriptions_changed();
-}
-
-void MarketDataEngine::set_held_options(std::span<const std::string> options) {
-    {
-        std::scoped_lock lock(subscriptions_mutex_);
-        held_options_ = {options.begin(), options.end()};
-    }
-    subscriptions_changed();
-}
-
-void MarketDataEngine::add_ordered_options(const model::OrderRequest& request) {
-    bool added = false;
-    {
-        std::scoped_lock lock(subscriptions_mutex_);
-        const auto add = [&](const std::string& symbol) {
-            if (model::parse_option_symbol(symbol) && ordered_options_.insert(symbol).second) {
-                added = true;
-            }
-        };
-        for (const model::Leg& leg : request.legs) {
-            add(leg.symbol);
-        }
-    }
-    if (added) {
-        subscriptions_changed();
-    }
-}
-
-void MarketDataEngine::clear_ordered_options() {
-    std::scoped_lock lock(subscriptions_mutex_);
-    ordered_options_.clear();
-}
-
-auto MarketDataEngine::subscribed_chains() const
-    -> std::unordered_map<std::string, std::vector<std::string>> {
-    std::scoped_lock lock(subscriptions_mutex_);
-    return subscribed_;
-}
-
-auto MarketDataEngine::held_and_ordered_options() const -> std::vector<std::string> {
-    std::scoped_lock lock(subscriptions_mutex_);
-    return held_and_ordered_options_locked();
-}
-
-auto MarketDataEngine::chains_wanted() const -> std::vector<std::string> {
-    std::scoped_lock lock(subscriptions_mutex_);
-    std::vector<std::string> out;
-    for (const auto& [_, chains] : subscribed_) {
-        out.insert(out.end(), chains.begin(), chains.end());
-    }
-    for (const std::string& option : held_and_ordered_options_locked()) {
-        if (const std::optional<model::OptionId> id = model::parse_option_symbol(option)) {
-            out.push_back(model::chain_symbol(id->root, id->expiry));
-        }
-    }
-    make_set(out);
-    return out;
-}
-
-auto MarketDataEngine::held_and_ordered_options_locked() const -> std::vector<std::string> {
-    std::vector<std::string> out = held_options_;
-    out.insert(out.end(), ordered_options_.begin(), ordered_options_.end());
-    make_set(out);
-    return out;
-}
-
-void MarketDataEngine::subscriptions_changed() {
-    wanted_changes_.fetch_add(1, std::memory_order_acq_rel);
-    std::vector<std::string> unknown;
-    {
-        std::scoped_lock lock(subscriptions_mutex_);
-        std::vector<std::string> options = held_and_ordered_options_locked();
-        if (options != streamed_options_) { // the same options: the streams stay as they are
-            auto [slots, not_found] = resolve_options(options);
-            streamed_options_ = std::move(options);
-            streamed_ = std::move(slots);
-            unknown = std::move(not_found);
-        }
-    }
-    // An option without a contract here has expired (its contract is gone) or was never synced.
-    if (market_data_) {
-        for (const std::string& symbol : unknown) {
-            log_.write_log("Held option not streamed (no contract): " + symbol, utilities::DEBUG);
-        }
-    }
+    planned_.reset();
+    warned_.clear();
 }
 
 auto MarketDataEngine::instruments(std::size_t max_lines) -> std::vector<Instrument> {
+    const std::shared_ptr<const StrategyEngine::Wanted> asked = strategies_.wanted();
+    // Found by name in the day's contracts: an option held may have expired, or not be synced.
     std::vector<std::size_t> wanted;
-    std::vector<QuoteSlot> held;
-    {
-        std::scoped_lock lock(subscriptions_mutex_);
-        for (const auto& [_, chains] : subscriptions_) {
-            wanted.insert(wanted.end(), chains.begin(), chains.end());
+    for (const std::string& symbol : asked->subscribed) {
+        if (const auto it = chain_index_.find(symbol); it != chain_index_.end()) {
+            wanted.push_back(it->second);
+        } else if (warned_.insert(symbol).second) {
+            log_.write_log("No chain " + symbol + " to stream: not among the day's contracts",
+                           utilities::WARNING);
         }
-        held = streamed_;
     }
+    std::vector<QuoteSlot> held;
+    for (const std::string& symbol : asked->options) {
+        if (const auto it = option_slots_.find(symbol); it != option_slots_.end()) {
+            held.push_back(it->second);
+        } else if (warned_.insert(symbol).second) {
+            log_.write_log("Held option not streamed (no contract): " + symbol, utilities::DEBUG);
+        }
+    }
+    if (planned_ == nullptr || planned_->subscribed != asked->subscribed ||
+        planned_->options != asked->options) {
+        log_.write_log(std::format("Streaming chains {}; {} options held or ordered",
+                                   asked->subscribed.empty() ? std::string("none")
+                                                             : utilities::join(asked->subscribed),
+                                   asked->options.size()),
+                       utilities::INFO);
+    }
+    planned_ = asked;
     make_set(wanted);
 
     // The underlyings (a window centers on their price) and the hedge instruments first.
@@ -462,9 +360,11 @@ void MarketDataEngine::publish() {
             ask_size[i] = q.ask_size;
         }
         // All priced on the first snapshot, or one after reset(). Live: an expiry's time moves in
-        // steps of kLiveTimeStep (see price_snapshot).
-        book.portfolio->price_snapshot(s, book.option_changed, book.underlying_changed,
-                                       model::Portfolio::kLiveTimeStep);
+        // steps of kLiveTimeStep (see price_snapshot), a chain's smile is fitted once a minute.
+        pricing::price_snapshot(s, *rates_.load(), iv_price_mode_, book.option_changed,
+                                book.underlying_changed, pricing::kLiveTimeStep,
+                                &utilities::shared_pool());
+        pricing::fit_smiles(s, pricing::kLiveFitStep, &utilities::shared_pool());
         std::ranges::fill(book.option_changed, 0);
         book.underlying_changed = false;
         if (on_snapshot_) {

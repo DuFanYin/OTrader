@@ -51,7 +51,7 @@ static void test_load_and_advance_time(
         return;
     }
     std::cout << "OK Parquet file loaded successfully\n";
-    historical->load_all_chains(); // the whole day inspected, no strategy asking for its chains
+    backtest.load_all_chains(); // the whole day inspected, no strategy asking for its chains
 
     std::cout << "\n[2] File metadata:\n";
     std::cout << "  Path: " << historical->path() << "\n";
@@ -148,7 +148,7 @@ int main(int argc, char* argv[]) {
     if (argc < 2 || (argv[1][0] == '\0')) {
         std::cout << "Usage: test_backtest_data <parquet_path> [max_timesteps]\n";
         std::cout << "  parquet_path   path to parquet file (e.g. "
-                     "data/SPXW/SPXW-2025-03/20250303.parquet)\n";
+                     "data/backtest/SPXW/SPXW-2025-03/20250303.parquet)\n";
         std::cout << "  max_timesteps  optional, default 5\n";
         std::cout << "Log: set BACKTEST_LOG=1 to enable engine log (default off).\n";
         return 1;

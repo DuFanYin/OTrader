@@ -1,5 +1,5 @@
-// Validation gate: the theory checks (sample moments, Ito, simulation and hedging, the lattices), each
-// against its threshold, with the fix for each that fails.
+// Validation gate: the theory checks (sample moments, Ito, simulation and hedging, the lattices, the
+// smile fit), each against its threshold, with the fix for each that fails.
 #include "json_io.h"
 #include "quant/kernel.h"
 
@@ -20,6 +20,7 @@ constexpr double T_NORM_STD          = 0.25;
 constexpr double T_TRI_VS_BS         = 1e-3;
 constexpr double T_LSM_VS_BIN        = 0.02;
 constexpr double T_PDE_VS_BIN        = 5e-3;
+constexpr double T_SMILE_ERROR       = 1.0; // the fit's rms residual, in half spreads
 
 // A check against its threshold; `param` (when not empty) is the request's field that cures a
 // failure, at `proposed` instead of `current`.
@@ -37,7 +38,7 @@ json make_row(const std::string& cap, const std::string& metric, double value, d
 // The request's inputs the checks read.
 struct Inputs {
     double spot, strike, rate, vol, maturity, mu;
-    bool pick_stats, pick_ito, pick_simulation, pick_lattice, block_mode;
+    bool pick_stats, pick_ito, pick_simulation, pick_lattice, pick_smile, block_mode;
     double stats_theta;
     int stats_n;
     double ito_theta, ito_t;
@@ -49,7 +50,7 @@ struct Inputs {
 Inputs read_inputs(const json& j) {
     return {jv(j, "spot", 0.0), jv(j, "strike", 0.0), jv(j, "rate", 0.0), jv(j, "vol", 0.0),
             jv(j, "maturity", 0.0), jv(j, "mu", 0.0), jv(j, "pick_stats", false), jv(j, "pick_ito", false),
-            jv(j, "pick_simulation", false), jv(j, "pick_lattice", false),
+            jv(j, "pick_simulation", false), jv(j, "pick_lattice", false), jv(j, "pick_smile", false),
             jv(j, "compute_block_on_validation", false), jv(j, "stats_theta", 1.0), jv(j, "stats_n", 10000),
             jv(j, "ito_theta", 0.7), jv(j, "ito_t", 1.0), jv(j, "ito_n", 2000),
             jv<std::string>(j, "ito_function_type", "exp_martingale"), jv(j, "sim_steps", 100),
@@ -145,6 +146,33 @@ std::string run_validation_json(const std::string& src, double t0_ms) {
         rows.push_back(make_row("lattice", "pde_vs_binomial_american_rel", pde_rel, T_PDE_VS_BIN, pde_rel <= T_PDE_VS_BIN,
             "PSOR finite difference vs binomial American put",
             "check the inputs: the grid is 300 x 300"));
+    }
+
+    if (p.pick_smile) {
+        // A smile like an index's (vol at the money, the put side steeper), its total variances
+        // off by up to half their half spread (2% of each): fitted, it should be within the spread
+        // and free of butterfly arbitrage; Axel Vogt's smile should not be.
+        const double sd = p.vol * std::sqrt(p.maturity);
+        const Svi made{.a = 0.6 * sd * sd, .b = 0.4 * sd, .rho = -0.5, .m = 0.0, .sigma = sd};
+        std::vector<double> k, w, half;
+        for (int i = 0; i <= 40; ++i) {
+            const double x = sd * (-3.0 + (6.0 * i / 40.0));
+            const double v = made.total_variance(x);
+            k.push_back(x);
+            half.push_back(0.02 * v);
+            w.push_back(v + (0.5 * half.back() * std::sin(1.7 * i)));
+        }
+        const SviFit fit = svi_fit(k, w, half);
+        rows.push_back(make_row("smile", "fit_error_half_spreads", fit.error, T_SMILE_ERROR,
+            fit.points > 0 && fit.error <= T_SMILE_ERROR, "SVI fit to a smile noisy within its spread",
+            "check the vol and maturity: the smile is 41 strikes over 3 deviations either side"));
+        const double free = fit.svi.butterfly_free(k.front(), k.back()) ? 1.0 : 0.0;
+        rows.push_back(make_row("smile", "butterfly_free", free, 1.0, free >= 1.0,
+            "the fitted smile's density not negative", "check the vol and maturity"));
+        const Svi vogt{.a = -0.0410, .b = 0.1331, .rho = 0.3060, .m = 0.3586, .sigma = 0.4153};
+        const double found = vogt.butterfly_free(-1.5, 1.5) ? 0.0 : 1.0;
+        rows.push_back(make_row("smile", "arbitrage_found", found, 1.0, found >= 1.0,
+            "the butterfly check finds Axel Vogt's arbitrage", "the check itself is broken"));
     }
 
     int failed = 0;

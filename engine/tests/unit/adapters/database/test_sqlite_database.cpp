@@ -6,6 +6,7 @@
  * last saved, and only what came after it.
  */
 #include "adapters/database/sqlite_database.hpp"
+#include "model/session_calendar.hpp"
 #include "model/utility.hpp"
 #include <algorithm>
 #include <chrono>
@@ -133,7 +134,7 @@ TEST_F(SqliteDatabaseTest, ContractsLoadBackAndExpiredOptionsAreDropped) {
     EXPECT_EQ(put.symbol, "SPY-20991218-P-600");
     EXPECT_EQ(put.option_type, model::OptionType::PUT);
     EXPECT_EQ(put.option_strike, 600);
-    EXPECT_EQ(put.option_expiry, model::option_expiry_time(2099y / December / 18));
+    EXPECT_EQ(put.option_expiry, model::kNyse.expiry_time(2099y / December / 18));
     EXPECT_EQ(put.trading_class, "SPY");
     ASSERT_EQ(underlyings.size(), 1U);
     EXPECT_EQ(underlyings[0].con_id, 756733);
@@ -156,7 +157,7 @@ TEST_F(SqliteDatabaseTest, SyncedContractsLoadBackAndALaterSyncReplacesThem) {
     put.trading_class = "SPY";
     put.option_type = model::OptionType::PUT;
     put.option_strike = 600;
-    put.option_expiry = model::option_expiry_time(2099y / December / 18);
+    put.option_expiry = model::kNyse.expiry_time(2099y / December / 18);
     put.option_underlying = "SPY";
     {
         adapters::SqliteDatabase db(nullptr, path_);

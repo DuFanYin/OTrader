@@ -66,7 +66,7 @@ class BacktestComboFill : public ::testing::Test {
     void SetUp() override {
         main.portfolios()->ensure_portfolio("SPY");
         ASSERT_NE(main.portfolios()->find_portfolio("SPY"), nullptr);
-        gateway().configure_execution({.fee_rate = 0.0});
+        gateway().configure_execution({});
     }
 
     adapters::BacktestGateway& gateway() { return *backtest.backtest_gateway(); }
@@ -135,7 +135,7 @@ OrderRequest one_call(const char* symbol, Side side) {
 }
 
 TEST_F(BacktestComboFill, AMultiLegOrderFillsAtItsFillPositionInEachLegsSpread) {
-    gateway().configure_execution({.fee_rate = 0.0, .multi_leg_fill_position = 0.25});
+    gateway().configure_execution({.multi_leg_fill_position = 0.25});
     quote(main, "SPY-20991218-C-601", 0.30, 0.32);
     quote(main, "SPY-20991218-C-603", 0.10, 0.12);
     ASSERT_TRUE(fill(call_spread()));
@@ -146,14 +146,14 @@ TEST_F(BacktestComboFill, AMultiLegOrderFillsAtItsFillPositionInEachLegsSpread) 
 
 TEST_F(BacktestComboFill, AnOrderOfOneLegHasItsOwnFillPosition) {
     gateway().configure_execution(
-        {.fee_rate = 0.0, .fill_position = 0.5, .multi_leg_fill_position = 0.25});
+        {.fill_position = 0.5, .multi_leg_fill_position = 0.25});
     quote(main, "SPY-20991218-C-601", 0.30, 0.32);
     ASSERT_TRUE(fill(one_call("SPY-20991218-C-601", Side::BUY)));
     EXPECT_NEAR(main.bookkeeping_engine()->find_fill("backtest_trade_1")->price, 0.315, 1e-12);
 }
 
 TEST_F(BacktestComboFill, AFillPositionAboveOneFillsBeyondTheQuoteButASaleNeverBelowNothing) {
-    gateway().configure_execution({.fee_rate = 0.0, .multi_leg_fill_position = 2.0});
+    gateway().configure_execution({.multi_leg_fill_position = 2.0});
     quote(main, "SPY-20991218-C-601", 0.30, 0.32);
     quote(main, "SPY-20991218-C-603", 0.00, 0.02);
     ASSERT_TRUE(fill(call_spread()));
